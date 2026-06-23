@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Podcast Selection"
+  short_description: "Select China-related YouTube podcast episodes."
+  default_prompt: "Find and rank a recent China-related YouTube podcast episode."

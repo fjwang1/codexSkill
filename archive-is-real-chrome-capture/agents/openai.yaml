@@ -1,0 +1,4 @@
+interface:
+  display_name: "Archive.is 真实浏览器抓取"
+  short_description: "暂不可用的网页存档镜像抓取流程"
+  default_prompt: "使用 $archive-is-real-chrome-capture 尝试通过用户真实 Chrome 查找网页的 archive.is/archive.today 快照。"

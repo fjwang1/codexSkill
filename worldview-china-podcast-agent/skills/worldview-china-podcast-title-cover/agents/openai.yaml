@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Podcast Title Cover"
+  short_description: "Create identity-prefixed YouTube podcast titles and source-frame covers"
+  default_prompt: "Use $worldview-china-podcast-title-cover to create a Chinese YouTube podcast title with a justified speaker/source identity prefix and build a centered source-frame cover."

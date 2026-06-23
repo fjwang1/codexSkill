@@ -1,0 +1,7 @@
+interface:
+  display_name: "B站播客封面"
+  short_description: "生成 4K 大字中文缩略图封面"
+  default_prompt: "Use $bilibili-podcast-cover to create a 3840x2160 Bilibili-style podcast cover with large burned-in Chinese title text."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+
+BASE_TAGS = ("外网热议", "海外视角", "中国观察", "国际观察")
+FALLBACK_TAGS = ("国际播客", "中文配音", "财经解读", "中美关系", "国际经济", "全球化")
+PUBLIC_DESCRIPTION = "本期是基于外网公开播客/访谈视频制作的中文配音版本：保留原视频画面，替换为中文对话音频，方便中文观众理解原对话内容。"
+KEYWORD_PATTERNS = [
+	("中国经济", r"中国经济|经济|增长|消费|出口|房地产|内需|脆弱|疲软"),
+	("财经解读", r"经济|财经|贸易|出口|消费|房地产|制造业|供应链|企业|市场"),
+	("中美关系", r"中美|美国|特朗普|关税|贸易战|美中"),
+	("贸易战", r"贸易战|关税|贸易冲突|Trump trade"),
+	("中国制造", r"中国制造|制造业|产业|工业|dominance|industry"),
+	("供应链", r"供应链|supply chain|supply chains"),
+	("全球南方", r"全球南方|Global South|Africa|Asia"),
+	("一带一路", r"一带一路|belt and road|BRI"),
+	("地缘政治", r"地缘政治|G7|七国集团|台海|制裁|安全"),
+	("中国市场", r"中国市场|foreign companies|entering the Chinese market|外企"),
+	("外企在中国", r"外企|foreign companies|American Chamber|商会"),
+	("黄仁勋", r"黄仁勋|Nvidia|NVIDIA|英伟达"),
+	("马斯克", r"马斯克|Musk|Tesla|特斯拉"),
+	("特朗普", r"特朗普|Trump"),
+]
+
+
+def _read_json_optional(path: Path) -> dict[str, Any]:
+	if not path.exists():
+		return {}
+	try:
+		return json.loads(path.read_text(encoding="utf-8"))
+	except (json.JSONDecodeError, OSError):
+		return {}
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_text_optional(path: Path, limit: int | None = None) -> str:
+	if not path.exists():
+		return ""
+	text = path.read_text(encoding="utf-8", errors="ignore")
+	return text[:limit] if limit else text
+
+
+def _clean_text(value: Any, max_len: int | None = None) -> str:
+	text = re.sub(r"\s+", " ", str(value or "")).strip()
+	if max_len is not None and len(text) > max_len:
+		return text[:max_len].rstrip("，,；;。. ") + "。"
+	return text
+
+
+def _clean_tag(value: Any) -> str | None:
+	tag = str(value or "").strip()
+	if not tag:
+		return None
+	tag = re.sub(r"[#\s,，、;；:：\"'“”‘’《》<>【】\[\]（）()]+", "", tag)
+	tag = tag.strip()
+	if len(tag) < 2 or len(tag) > 20:
+		return None
+	if re.search(r"[A-Za-z]", tag):
+		return None
+	if re.search(r"为什么|怎么|如何|是谁|到底|比你想象|意味着|正在|形成|不是", tag):
+		return None
+	return tag
+
+
+def _append_tag(tags: list[str], seen: set[str], report: list[dict[str, str]], value: Any, source: str) -> None:
+	tag = _clean_tag(value)
+	if tag and tag not in seen:
+		tags.append(tag)
+		seen.add(tag)
+		report.append({"tag": tag, "source": source})
+
+
+def _context_text(*items: Any) -> str:
+	parts: list[str] = []
+	for item in items:
+		if isinstance(item, (dict, list)):
+			parts.append(json.dumps(item, ensure_ascii=False))
+		else:
+			parts.append(str(item or ""))
+	return "\n".join(parts)
+
+
+def _keyword_tags(text: str) -> list[str]:
+	tags: list[str] = []
+	for tag, pattern in KEYWORD_PATTERNS:
+		if re.search(pattern, text, re.I) and tag not in tags:
+			tags.append(tag)
+	return tags
+
+
+def _source_metadata(run_dir: Path) -> dict[str, Any]:
+	for path in (
+		run_dir / "02-source-capture/youtube-media/source.info.json",
+		run_dir / "02-source-capture/youtube-media/metadata.json",
+		run_dir / "02-source-capture/source_metadata.json",
+		run_dir / "source/source_metadata.json",
+	):
+		data = _read_json_optional(path)
+		if data:
+			data["_metadata_path"] = str(path)
+			return data
+	return {}
+
+
+def _chapter_lines(run_dir: Path) -> list[str]:
+	chapter_data = _read_json_optional(run_dir / "03-source-translation/chapter_segments.json")
+	chapters = chapter_data.get("chapters") if isinstance(chapter_data, dict) else None
+	if isinstance(chapters, list) and chapters:
+		lines: list[str] = []
+		for idx, chapter in enumerate(chapters, start=1):
+			title = _clean_text(chapter.get("title") or chapter.get("chapter_title") or f"第 {idx} 章", max_len=32)
+			if re.fullmatch(r"原文顺序分段\s*\d+", title):
+				continue
+			lines.append(f"{idx}. {title}")
+		return lines
+	render_report = _read_text_optional(run_dir / "video/render_report.md")
+	if render_report:
+		return [line.strip("- ") for line in render_report.splitlines() if line.strip().startswith("- ")][:8]
+	return []
+
+
+def _build_tags(run_dir: Path, title: str, source_metadata: dict[str, Any], cover_title: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
+	tags: list[str] = []
+	seen: set[str] = set()
+	report: list[dict[str, str]] = []
+	for tag in BASE_TAGS:
+		_append_tag(tags, seen, report, tag, "base.worldview_video")
+
+	identity = cover_title.get("source_identity_label")
+	_append_tag(tags, seen, report, identity, "cover.source_identity_label")
+	source_channel = source_metadata.get("channel") or source_metadata.get("uploader")
+	if source_channel and not re.search(r"CGSP|Podcast|播客", str(source_channel), re.I):
+		_append_tag(tags, seen, report, source_channel, "source.channel")
+
+	context = _context_text(
+		title,
+		source_metadata.get("title"),
+		source_metadata.get("description"),
+		source_metadata.get("tags"),
+		cover_title,
+		_read_text_optional(run_dir / "03-source-translation/source_transcript.zh.md", limit=8000),
+		_read_json_optional(run_dir / "03-source-translation/chapter_segments.json"),
+	)
+	for tag in _keyword_tags(context):
+		_append_tag(tags, seen, report, tag, "detected.keyword")
+
+	for item in cover_title.get("highlight_texts") or []:
+		_append_tag(tags, seen, report, item, "cover.highlight_texts")
+
+	for tag in FALLBACK_TAGS:
+		if len(tags) >= 10:
+			break
+		_append_tag(tags, seen, report, tag, "fallback.compatible")
+
+	return tags[:10], report[:10]
+
+
+def _build_description(run_dir: Path, title: str, source_metadata: dict[str, Any], cover_title: dict[str, Any], tags: list[str]) -> str:
+	return PUBLIC_DESCRIPTION + "\n"
+
+
+def _load_existing_schedule(path: Path) -> dict[str, Any]:
+	existing = _read_json_optional(path)
+	return {
+		"scheduled_publish_at": existing.get("scheduled_publish_at"),
+		"scheduled_publish_timezone": existing.get("scheduled_publish_timezone") or "Asia/Shanghai",
+		"schedule_source": existing.get("schedule_source"),
+	}
+
+
+def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
+	run_dir = run_dir.resolve()
+	title_path = run_dir / "video_title.txt"
+	cover_path = run_dir / "cover/cover_4k.png"
+	video_path = run_dir / "video/final_video.mp4"
+	assert title_path.exists(), f"Missing {title_path}"
+	assert cover_path.exists(), f"Missing {cover_path}"
+	assert video_path.exists(), f"Missing {video_path}"
+	title = _read_text_optional(title_path).strip()
+	assert title, f"Empty {title_path}"
+	cover_title = _read_json_optional(run_dir / "cover/cover_title.json")
+	source_metadata = _source_metadata(run_dir)
+	tags, tag_sources = _build_tags(run_dir, title, source_metadata, cover_title)
+	if len(tags) < 8:
+		for tag in FALLBACK_TAGS:
+			if len(tags) >= 8:
+				break
+			_append_tag(tags, {item["tag"] for item in tag_sources}, tag_sources, tag, "fallback.underfilled")
+		tags = [item["tag"] for item in tag_sources][:10]
+
+	description = _build_description(run_dir, title, source_metadata, cover_title, tags)
+	publish_info_path = run_dir / "publish_info.txt"
+	publish_info_path.write_text(description, encoding="utf-8")
+
+	metadata = {
+		"schema_version": "bilibili_upload_metadata.v1",
+		"workflow": "worldview-china-podcast-agent",
+		"title": title,
+		"description": description,
+		"tags": tags,
+		"category": "知识",
+		"creation_declaration": "含AI生成内容",
+		**_load_existing_schedule(run_dir / "bilibili_upload_metadata.json"),
+		"selection_mode": source_metadata.get("selection_mode") or "youtube_podcast_translation",
+		"source_title": source_metadata.get("title") or cover_title.get("source_title"),
+		"source_channel": source_metadata.get("channel") or source_metadata.get("uploader"),
+		"source_url": source_metadata.get("webpage_url") or source_metadata.get("original_url") or source_metadata.get("url"),
+		"source_identity_label": cover_title.get("source_identity_label"),
+		"translated_title_core": cover_title.get("translated_title_core"),
+		"topic_keywords": tags[4:],
+		"video_path": "video/final_video.mp4",
+		"cover_path": "cover/cover_4k.png",
+		"publish_info_path": "publish_info.txt",
+	}
+	report = {
+		"schema_version": "worldview_china_bilibili_publish_metadata_report.v1",
+		"project_dir": str(run_dir),
+		"metadata_path": str(output_path),
+		"publish_info_path": str(publish_info_path),
+		"tags": tags,
+		"tag_sources": tag_sources,
+		"tag_count": len(tags),
+		"strategy": "Worldview China 外网播客视频标签：外网/海外视角定位优先，中国主题和具体议题其次；不使用外刊文章专属标签。",
+		"warnings": [] if len(tags) >= 8 else ["bilibili tags underfilled"],
+	}
+	return metadata, report, publish_info_path
+
+
+def parse_args() -> argparse.Namespace:
+	parser = argparse.ArgumentParser(description="Generate Bilibili upload metadata for Worldview China translated YouTube podcast videos.")
+	parser.add_argument("--run-dir", "--project-dir", dest="run_dir", required=True, type=Path)
+	parser.add_argument("--output", type=Path)
+	parser.add_argument("--report", type=Path)
+	return parser.parse_args()
+
+
+def main() -> None:
+	args = parse_args()
+	run_dir = args.run_dir.resolve()
+	output_path = args.output or (run_dir / "bilibili_upload_metadata.json")
+	report_path = args.report or (run_dir / "10-bilibili-publish/publish_metadata_report.json")
+	metadata, report, publish_info_path = generate_metadata(run_dir, output_path, report_path)
+	_write_json(output_path, metadata)
+	_write_json(report_path, report)
+	print(json.dumps({
+		"metadata": str(output_path),
+		"report": str(report_path),
+		"publish_info": str(publish_info_path),
+		"tags": metadata["tags"],
+	}, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+	main()

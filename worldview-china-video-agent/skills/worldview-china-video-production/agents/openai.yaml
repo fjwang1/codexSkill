@@ -1,0 +1,3 @@
+display_name: Worldview China Video Production
+short_description: Compatibility entry for the merged Worldview China video agent flow.
+default_prompt: "使用 canonical $worldview-china-video-agent 执行端到端视频生产：自动选出最佳视频，并在当前 run 目录中生成中文配音视频、中文字幕、封面、manifest 和 QA 报告。"

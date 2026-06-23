@@ -1,0 +1,4 @@
+interface:
+  display_name: "Page to Chinese Markdown"
+  short_description: "Translate captured page material to Chinese Markdown"
+  default_prompt: "Use $page-to-chinese-markdown to turn captured page material into a Chinese Markdown document."

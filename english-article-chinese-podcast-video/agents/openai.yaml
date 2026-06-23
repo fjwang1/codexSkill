@@ -1,0 +1,7 @@
+interface:
+  display_name: "英文文章中文播客视频"
+  short_description: "本地英文文章生成中文双人播客视频"
+  default_prompt: "Use $english-article-chinese-podcast-video with this local article file to create a Chinese two-host podcast video using Speaker 0/Speaker 1 script, VibeVoice long-form audio, ASR-aligned subtitles, chapter information cards, and final MP4."
+
+policy:
+  allow_implicit_invocation: true

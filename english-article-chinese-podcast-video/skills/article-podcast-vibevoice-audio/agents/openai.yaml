@@ -1,0 +1,7 @@
+interface:
+  display_name: "VibeVoice播客音频"
+  short_description: "整篇双人文稿生成连续播客音频"
+  default_prompt: "Use $article-podcast-vibevoice-audio to generate one continuous VibeVoice podcast audio from a finalized Speaker 0/Speaker 1 Chinese podcast script."
+
+policy:
+  allow_implicit_invocation: true

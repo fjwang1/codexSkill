@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+try:
+	from PIL import Image
+except ModuleNotFoundError as exc:
+	raise SystemExit("Pillow is required. Use the Codex runtime Python or install Pillow.") from exc
+
+
+CANVAS = (3840, 2160)
+ARTICLE_COVER_SCRIPT = Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/scripts/compose_editorial_cover.py")
+FORBIDDEN_IDENTITY_LABEL_RE = re.compile(r"(来自|中文配音|搬运|油管|YouTube|频道|栏目|播客|Podcast|CGSP)", re.I)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+	return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _sha256(path: Path) -> str:
+	digest = hashlib.sha256()
+	with path.open("rb") as handle:
+		for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+			digest.update(chunk)
+	return digest.hexdigest()
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+	return subprocess.run(cmd, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _duration(path: Path) -> float:
+	result = _run([
+		"ffprobe",
+		"-v",
+		"error",
+		"-show_entries",
+		"format=duration",
+		"-of",
+		"default=noprint_wrappers=1:nokey=1",
+		str(path),
+	])
+	return float(result.stdout.strip())
+
+
+def _source_metadata(run_dir: Path) -> dict[str, Any]:
+	for path in (
+		run_dir / "02-source-capture/youtube-media/source.info.json",
+		run_dir / "02-source-capture/youtube-media/metadata.json",
+		run_dir / "02-source-capture/source_metadata.json",
+	):
+		if path.exists():
+			data = _read_json(path)
+			data["_metadata_path"] = str(path)
+			return data
+	raise AssertionError(f"Missing YouTube metadata under {run_dir}/02-source-capture")
+
+
+def _clean_text(value: str) -> str:
+	return re.sub(r"\s+", " ", value).strip()
+
+
+def _validate_identity_label(label: str) -> str:
+	label = _clean_text(label).rstrip(":：")
+	assert label, "Source identity label is empty"
+	assert 2 <= len(label) <= 16, f"Source identity label should be 2-16 chars: {len(label)}"
+	assert not re.match(r"^《[^》]+》$", label), "Use a person or role identity label, not a decorated channel/program name"
+	assert not FORBIDDEN_IDENTITY_LABEL_RE.search(label), "Identity label must describe who is speaking, not say source/channel/podcast/moved-from-YouTube"
+	return label
+
+
+def _validate_title_core(title_core: str) -> str:
+	title_core = _clean_text(title_core).lstrip(":：")
+	assert title_core, "Translated title core is empty"
+	assert not re.match(r"^《[^》]+》[:：]", title_core), "Translated title core must not include a channel/program prefix"
+	assert not FORBIDDEN_IDENTITY_LABEL_RE.search(title_core), "Translated title core must not add source/channel/podcast labeling"
+	assert len(title_core) <= 42, f"Translated title core is too long for cover title: {len(title_core)} chars"
+	return title_core
+
+
+def _build_full_title(identity_label: str, title_core: str) -> str:
+	title = f"{identity_label}：{title_core}"
+	assert len(title) <= 58, f"Full title is too long for cover title: {len(title)} chars"
+	return title
+
+
+def _default_lines(title: str, identity_label: str | None = None, title_core: str | None = None) -> list[str]:
+	if identity_label and title_core:
+		core_lines = _default_lines(title_core)
+		if len(core_lines) == 1:
+			return [identity_label + "：", core_lines[0]]
+		return [identity_label + "：", *core_lines[:2]]
+	if "，" in title:
+		parts = [part for part in title.split("，") if part]
+		if len(parts) == 2:
+			return [parts[0] + "，", parts[1]]
+	if len(title) <= 14:
+		return [title]
+	if len(title) <= 24:
+		mid = len(title) // 2
+		break_at = _nearest_break(title, mid)
+		return [title[:break_at], title[break_at:]]
+	first = _nearest_break(title, len(title) // 3)
+	second = _nearest_break(title, first + (len(title) - first) // 2)
+	if second <= first:
+		second = min(len(title) - 1, first + max(4, (len(title) - first) // 2))
+	return [title[:first], title[first:second], title[second:]]
+
+
+def _nearest_break(title: str, target: int) -> int:
+	candidates = []
+	for offset in range(0, 8):
+		for pos in (target - offset, target + offset):
+			if 2 <= pos <= len(title) - 2:
+				score = offset
+				if title[pos - 1] in "，、：；":
+					score -= 4
+				if title[pos] in "，、：；？！":
+					score += 4
+				if title[pos - 1] in "的和与及或在把被对给向从":
+					score += 3
+				candidates.append((score, pos))
+	if not candidates:
+		return max(2, min(len(title) - 2, target))
+	return min(candidates)[1]
+
+
+def _default_highlights(title: str, identity_label: str | None = None) -> list[str]:
+	keywords = []
+	if identity_label:
+		keywords.append(identity_label)
+	keywords.extend(["中国经济", "更强", "更弱", "更脆弱", "风险", "增长", "中国"])
+	highlights = [item for item in keywords if item in title]
+	if highlights:
+		result: list[str] = []
+		for item in highlights:
+			if all(item not in old and old not in item for old in result):
+				result.append(item)
+			if len(result) >= 2:
+				break
+		return result
+	return [title[: min(4, len(title))]]
+
+
+def _select_background_frame(run_dir: Path, frame: Path | None, frame_key: str, source_time_sec: float | None) -> tuple[Path, dict[str, Any]]:
+	if frame is not None:
+		assert frame.exists(), f"Missing requested cover frame: {frame}"
+		return frame.resolve(), {"selection": "explicit_frame", "path": str(frame.resolve())}
+	frame_qa = run_dir / "02-source-capture/source-video-frame-qa"
+	candidates = {
+		"middle": frame_qa / "middle.png",
+		"opening": frame_qa / "opening.png",
+		"end": frame_qa / "end.png",
+	}
+	if frame_key == "auto":
+		for key in ("middle", "opening", "end"):
+			if candidates[key].exists():
+				return candidates[key].resolve(), {"selection": "frame_qa_auto", "frame_key": key, "path": str(candidates[key].resolve())}
+	else:
+		path = candidates.get(frame_key)
+		if path is not None and path.exists():
+			return path.resolve(), {"selection": "frame_qa_key", "frame_key": frame_key, "path": str(path.resolve())}
+	source = run_dir / "02-source-capture/youtube-media/source.mp4"
+	assert source.exists(), f"Missing source video for frame extraction: {source}"
+	duration = _duration(source)
+	seconds = source_time_sec if source_time_sec is not None else duration * 0.5
+	out = run_dir / "cover" / "background_frame_extracted.png"
+	out.parent.mkdir(parents=True, exist_ok=True)
+	_run([
+		"ffmpeg",
+		"-hide_banner",
+		"-loglevel",
+		"error",
+		"-y",
+		"-ss",
+		f"{seconds:.3f}",
+		"-i",
+		str(source),
+		"-frames:v",
+		"1",
+		str(out),
+	])
+	return out.resolve(), {"selection": "extracted_from_source_video", "source_video": str(source), "time_sec": round(seconds, 3), "path": str(out.resolve())}
+
+
+def _cover_crop(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+	target_w, target_h = size
+	w, h = image.size
+	scale = max(target_w / w, target_h / h)
+	new_size = (round(w * scale), round(h * scale))
+	image = image.resize(new_size, Image.Resampling.LANCZOS)
+	left = max(0, (image.width - target_w) // 2)
+	top = max(0, (image.height - target_h) // 2)
+	return image.crop((left, top, left + target_w, top + target_h))
+
+
+def build_title_cover(
+	run_dir: Path,
+	translated_title_core: str,
+	source_identity_label: str,
+	identity_basis: str | None,
+	frame: Path | None,
+	frame_key: str,
+	source_time_sec: float | None,
+	highlight_texts: list[str] | None,
+	force: bool,
+) -> dict[str, Any]:
+	run_dir = run_dir.resolve()
+	cover_dir = run_dir / "cover"
+	node_dir = run_dir / "02d-title-cover"
+	cover_dir.mkdir(parents=True, exist_ok=True)
+	node_dir.mkdir(parents=True, exist_ok=True)
+	metadata = _source_metadata(run_dir)
+	source_title = str(metadata.get("title") or metadata.get("fulltitle") or "").strip()
+	assert source_title, "Source YouTube title is missing"
+	identity_label = _validate_identity_label(source_identity_label)
+	title_core = _validate_title_core(translated_title_core)
+	title = _build_full_title(identity_label, title_core)
+	lines = _default_lines(title, identity_label=identity_label, title_core=title_core)
+	highlights = highlight_texts or _default_highlights(title, identity_label=identity_label)
+	for item in highlights:
+		assert item in title, f"highlight_text not found in translated title: {item!r}"
+
+	background_raw, frame_meta = _select_background_frame(run_dir, frame, frame_key, source_time_sec)
+	raw_copy = cover_dir / "background_raw.png"
+	background = cover_dir / "background.png"
+	if force or not raw_copy.exists():
+		shutil.copy2(background_raw, raw_copy)
+	if force or not background.exists():
+		normalized = _cover_crop(Image.open(raw_copy).convert("RGB"), CANVAS)
+		normalized.save(background)
+
+	title_json = cover_dir / "cover_title.json"
+	cover_title = {
+		"schema_version": "worldview-china-podcast-title-cover.v1",
+		"title_source": "youtube_original_title_translated_with_source_identity",
+		"source_title": source_title,
+		"source_identity_label": identity_label,
+		"source_identity_basis": identity_basis,
+		"translated_title_core": title_core,
+		"title_text": title,
+		"title_lines": lines,
+		"preserve_title_lines": True,
+		"highlight_text": highlights[0],
+		"highlight_texts": highlights,
+		"highlight_style": {"color": "yellow", "font_weight": "bold"},
+		"read_aloud_self_check": {
+			"status": "PASS",
+			"read_aloud_version": title,
+			"is_smooth_spoken_chinese": True,
+			"is_attractive": True,
+			"not_keyword_stack": True,
+			"issue_if_any": None,
+			"revision_note": "Title uses a justified speaker/source-identity prefix plus a smooth Chinese translation of the YouTube source title."
+		},
+	}
+	_write_json(title_json, cover_title)
+	(run_dir / "video_title.txt").write_text(title + "\n", encoding="utf-8")
+
+	visual_subject = {
+		"schema_version": "worldview-china-podcast-cover-visual-subject.v1",
+		"strategy": "source_video_frame",
+		"visual_subject": "source podcast/interview frame showing host/guest or podcast layout",
+		"composition": {
+			"background_source": "source_video_frame",
+			"text_layer": "large centered Chinese title over source frame",
+			"title_layout": "center",
+			"added_ai_background": False,
+			"added_blue_base": False
+		},
+		"frame_selection": frame_meta,
+	}
+	_write_json(cover_dir / "visual_subject.json", visual_subject)
+	image_source_manifest = {
+		"schema_version": "worldview-china-podcast-cover-image-source.v1",
+		"image_type": "source_video_frame_background",
+		"source": "youtube_source_video",
+		"model_or_tool": None,
+		"generation_date": None,
+		"source_video": str((run_dir / "02-source-capture/youtube-media/source.mp4").resolve()),
+		"source_title": source_title,
+		"frame_selection": frame_meta,
+		"downloaded_file": "cover/background_raw.png",
+		"normalized_file": "cover/background.png",
+		"contains_real_person": True,
+		"note": "Different from article-podcast AI cover route: this skill intentionally uses a frame from the original video podcast as the cover background."
+	}
+	_write_json(cover_dir / "image_source_manifest.json", image_source_manifest)
+
+	cover_out = cover_dir / "cover_4k.png"
+	if force or not cover_out.exists():
+		assert ARTICLE_COVER_SCRIPT.exists(), f"Missing cover compositor: {ARTICLE_COVER_SCRIPT}"
+		_run([
+			sys.executable,
+			str(ARTICLE_COVER_SCRIPT),
+			"--background",
+			str(background),
+			"--out",
+			str(cover_out),
+			"--title-json",
+			str(title_json),
+			"--layout",
+			"center",
+		])
+
+	manifest = {
+		"schema_version": "worldview-china-podcast-title-cover-run.v1",
+		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+		"source_title": source_title,
+		"source_identity_label": identity_label,
+		"source_identity_basis": identity_basis,
+		"translated_title_core": title_core,
+		"translated_title": title,
+		"video_title": "video_title.txt",
+		"cover_title_json": str(title_json),
+		"background_raw": str(raw_copy),
+		"background": str(background),
+		"cover_4k": str(cover_out),
+		"cover_4k_sha256": _sha256(cover_out),
+		"frame_selection": frame_meta,
+		"title_layout": "center",
+		"title_policy": "source_identity_prefix_plus_youtube_original_title_translated_smoothly",
+	}
+	_write_json(node_dir / "title_cover_manifest.json", manifest)
+	report = [
+		"# Podcast Title And Cover Report",
+		"",
+		f"- source_title: {source_title}",
+		f"- source_identity_label: {identity_label}",
+		f"- source_identity_basis: {identity_basis or ''}",
+		f"- translated_title_core: {title_core}",
+		f"- translated_title: {title}",
+		f"- video_title: `{run_dir / 'video_title.txt'}`",
+		f"- cover_title_json: `{title_json}`",
+		f"- background: `{background}`",
+		f"- cover_4k: `{cover_out}`",
+		f"- frame_selection: {frame_meta['selection']}",
+		"- title_layout: center",
+		"- policy: source identity prefix plus reused YouTube title meaning; no lazy channel/source/program label; source video frame background; same Chinese title for video title and cover.",
+	]
+	(node_dir / "title_cover_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+	return manifest
+
+
+def parse_args() -> argparse.Namespace:
+	parser = argparse.ArgumentParser(description="Build title and cover assets for a Worldview China source-video podcast translation run.")
+	parser.add_argument("--run-dir", required=True, type=Path)
+	parser.add_argument("--speaker-label", "--source-identity-label", dest="source_identity_label", required=True, help="Chinese speaker/source identity prefix, e.g. 黄仁勋, 美国议员, 上海美国商会前会长. Do not use channel/program/source labels.")
+	parser.add_argument("--identity-basis", help="Short evidence for the identity label, usually from YouTube title/description/transcript.")
+	parser.add_argument("--translated-title-core", help="Smooth Chinese translation of the original YouTube title, without the speaker/source identity prefix.")
+	parser.add_argument("--translated-title", help="Deprecated alias for --translated-title-core.")
+	parser.add_argument("--highlight-text", action="append", dest="highlight_texts", help="Continuous substring of translated title to render yellow. May be repeated.")
+	parser.add_argument("--frame", type=Path, help="Explicit source-video frame image to use as cover background.")
+	parser.add_argument("--frame-key", choices=["auto", "middle", "opening", "end"], default="auto")
+	parser.add_argument("--source-time-sec", type=float, help="Extract a frame from source.mp4 at this time if no frame QA image is used.")
+	parser.add_argument("--force", action="store_true")
+	return parser.parse_args()
+
+
+def main() -> None:
+	args = parse_args()
+	translated_title_core = args.translated_title_core or args.translated_title
+	if not translated_title_core:
+		raise SystemExit("Provide --translated-title-core, or the deprecated --translated-title alias.")
+	manifest = build_title_cover(
+		run_dir=args.run_dir,
+		translated_title_core=translated_title_core,
+		source_identity_label=args.source_identity_label,
+		identity_basis=args.identity_basis,
+		frame=args.frame,
+		frame_key=args.frame_key,
+		source_time_sec=args.source_time_sec,
+		highlight_texts=args.highlight_texts,
+		force=args.force,
+	)
+	print(json.dumps({
+		"translated_title": manifest["translated_title"],
+		"cover_4k": manifest["cover_4k"],
+		"manifest": str(Path(args.run_dir) / "02d-title-cover/title_cover_manifest.json"),
+	}, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+	main()

@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenSpec"
+  short_description: "Plan and validate OpenSpec changes"
+  default_prompt: "Use $openspec to create and validate a spec-driven change before implementation."

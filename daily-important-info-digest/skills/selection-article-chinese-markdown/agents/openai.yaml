@@ -1,0 +1,4 @@
+interface:
+  display_name: "Selection Article Chinese Markdown"
+  short_description: "Chinese Markdown from selected China article"
+  default_prompt: "Use $selection-article-chinese-markdown to translate the selected China article into Chinese Markdown."

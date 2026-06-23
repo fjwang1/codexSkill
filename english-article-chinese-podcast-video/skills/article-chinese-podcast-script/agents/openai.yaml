@@ -1,0 +1,7 @@
+interface:
+  display_name: "中文播客文稿"
+  short_description: "本地文章转 TTS 友好的追问式双人播客稿"
+  default_prompt: "Use $article-chinese-podcast-script to turn this local article text into a Linyao/Chenche Chinese podcast script with speaker-turn lengths suitable for TTS."
+
+policy:
+  allow_implicit_invocation: true

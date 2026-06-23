@@ -1,0 +1,7 @@
+interface:
+  display_name: "单人口播 VibeVoice 音频"
+  short_description: "把单人口播稿生成连续 VibeVoice 音频"
+  default_prompt: "使用 $article-single-host-vibevoice-audio，从 single_host_script.md 生成单人 VibeVoice 连续音频。"
+
+policy:
+  allow_implicit_invocation: true

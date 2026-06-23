@@ -1,0 +1,4 @@
+interface:
+  display_name: "Daily Important Info Digest"
+  short_description: "每日 AI 技术文章与中国选题阅读包"
+  default_prompt: "Use $daily-important-info-digest to produce today’s Chinese Markdown information digest."

@@ -1,0 +1,7 @@
+interface:
+  display_name: "播客克隆音轨"
+  short_description: "旧Qwen按回合克隆音轨，仅用于legacy fallback"
+  default_prompt: "Use $article-podcast-cloned-audio only as a legacy Qwen3 turn-level clone fallback for an existing project with frozen voice references."
+
+policy:
+  allow_implicit_invocation: true

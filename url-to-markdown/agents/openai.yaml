@@ -1,0 +1,4 @@
+interface:
+  display_name: "URL to Markdown Router"
+  short_description: "Route URL Markdown requests to split skills"
+  default_prompt: "Use $url-to-markdown to route this URL request through capture and Markdown writing skills."

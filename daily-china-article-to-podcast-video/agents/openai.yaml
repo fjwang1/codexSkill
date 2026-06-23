@@ -1,0 +1,4 @@
+interface:
+  display_name: "每日外刊自动视频"
+  short_description: "每日生成中国外刊 Top 5，自动选择最高分可用正文并进入视频流程"
+  default_prompt: "使用 $daily-china-article-to-podcast-video 为我生成昨日 China Viva 外刊候选 Top 5；先执行正文可获取性门禁并落成本地文章材料，然后自动选择评分最高候选，写出 selection-decision.json，标准化 article package，并继续中文单人口播解释视频流程；不要等待人工选择或人工提供正文。"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "单人文章讲解稿"
+  short_description: "把外刊文章改写成中文单人解释型视频口播稿"
+  default_prompt: "使用 $article-single-host-explainer-script，把这个本地文章项目改写成中文单人解释型视频口播稿。"

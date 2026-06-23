@@ -1,0 +1,7 @@
+interface:
+  display_name: "播客字幕对齐"
+  short_description: "生成并校准 SRT/ASS 中文字幕"
+  default_prompt: "Use $article-podcast-subtitle-alignment to generate Chinese SRT/ASS subtitles from finalized podcast audio and audio/dialogue_timeline.json."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT Master Article Deck"
+  short_description: "Turn manuscripts into normal editable PPTX decks with the local canonical ppt-master workflow."
+  default_prompt: "Use $ppt-master-article-deck to turn this manuscript into a polished editable PPTX with local ppt-master, preserving autonomous design choices."

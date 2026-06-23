@@ -1,0 +1,4 @@
+interface:
+  display_name: "时间轴口播配音分段"
+  short_description: "把带时间点的中文口播稿按语义拆成适合 TTS 的配音段"
+  default_prompt: "使用 $timed-script-to-voiceover-segments 将这份带时间点的中文口播稿按语义完整性拆成 voiceover_segments JSON，供后续中文配音和视频合成使用。"

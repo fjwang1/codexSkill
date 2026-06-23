@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bilibili Upload Draft"
+  short_description: "Prepare Bilibili video drafts safely"
+  default_prompt: "Use $bilibili-video-upload-draft to upload a local video and cover into a Bilibili draft, fill metadata, and stop before final submission."

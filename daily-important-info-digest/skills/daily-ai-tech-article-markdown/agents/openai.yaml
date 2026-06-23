@@ -1,0 +1,4 @@
+interface:
+  display_name: "Daily AI Tech Article Markdown"
+  short_description: "Chinese Markdown for daily AI technical articles"
+  default_prompt: "Use $daily-ai-tech-article-markdown to find yesterday’s best AI technical article and translate it to Chinese Markdown."

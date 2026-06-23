@@ -1,0 +1,7 @@
+interface:
+  display_name: "章节图时间线绑定"
+  short_description: "把 PPT 章节图语义绑定到最终音频时间轴"
+  default_prompt: "Use $article-podcast-chapter-timeline-binding to map existing chapter_semantics.json and chapter PNGs to audio/dialogue_timeline.json, then write the final chapter_plan.json for video composition."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "外刊单人口播视频"
+  short_description: "把本地外刊文章制作成中文单人口播解释视频"
+  default_prompt: "使用 $english-article-chinese-single-host-video，把这个本地文章文件制作成中文单人口播解释视频。"
+
+policy:
+  allow_implicit_invocation: true

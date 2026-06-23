@@ -1,0 +1,7 @@
+interface:
+  display_name: "封面主体图生成"
+  short_description: "为外刊播客封面寻找真实人物图或生成强主体无字底图"
+  default_prompt: "Use $article-podcast-cover-image-generation to create cover/background.png and visual_subject.json for a local article podcast project."
+
+policy:
+  allow_implicit_invocation: true

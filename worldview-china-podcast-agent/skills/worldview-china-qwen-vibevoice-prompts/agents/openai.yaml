@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Qwen VibeVoice Prompts"
+  short_description: "Convert source voices into Chinese VibeVoice prompts"
+  default_prompt: "Generate Chinese Qwen3 voice prompts from extracted source speaker clips, register them for VibeVoice, and update the podcast run manifest."

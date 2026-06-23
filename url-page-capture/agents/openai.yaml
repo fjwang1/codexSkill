@@ -1,0 +1,4 @@
+interface:
+  display_name: "URL Page Capture"
+  short_description: "Capture URL content, including archive.is via real Chrome"
+  default_prompt: "Use $url-page-capture to capture page material from this URL, using real Chrome archive fallback if needed."

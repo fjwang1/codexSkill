@@ -1,0 +1,4 @@
+interface:
+  display_name: "播客音频时间轴对齐"
+  short_description: "对最终播客音频做ASR对齐、统一时间轴和边界伪声检测"
+  default_prompt: "Use $article-podcast-audio-alignment to align the final podcast audio with the Speaker 0/Speaker 1 script, write a dialogue timeline, detect turn-boundary artifacts, and complete AI review when needed."

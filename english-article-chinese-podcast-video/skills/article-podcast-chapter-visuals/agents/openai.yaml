@@ -1,0 +1,7 @@
+interface:
+  display_name: "播客章节画面"
+  short_description: "用 PPT Master 生成章节图和语义"
+  default_prompt: "Use $article-podcast-chapter-visuals to read the finalized Chinese podcast script and generate 4K PPT Master chapter visuals plus chapter_semantics.json for later timeline binding."
+
+policy:
+  allow_implicit_invocation: true

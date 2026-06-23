@@ -1,0 +1,4 @@
+interface:
+  display_name: "B站英文转写"
+  short_description: "下载 B 站视频并用本地 Whisper/MLX 生成英文稿"
+  default_prompt: "使用 $bilibili-video-english-transcript 下载这个 B 站视频，抽取音频并用本地 Whisper 生成英文 transcript。"

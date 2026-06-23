@@ -1,0 +1,7 @@
+interface:
+  display_name: "Subtitle Timeline QA"
+  short_description: "逐句检查字幕、语音、视频时间线"
+  default_prompt: "Use $article-podcast-subtitle-timeline-qa to verify subtitle/audio/video timing for this podcast project."
+policy:
+  allow_implicit_invocation: true
+

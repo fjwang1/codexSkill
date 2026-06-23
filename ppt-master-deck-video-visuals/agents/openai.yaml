@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT Master Deck Video Visuals"
+  short_description: "Render an existing PPT Master deck project into 4K video slide PNGs and chapter semantics."
+  default_prompt: "Use $ppt-master-deck-video-visuals to convert this existing PPT Master project into chapter_XX.png images and chapter_semantics.json without changing slide design."

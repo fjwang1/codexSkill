@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouTube 素材准备"
+  short_description: "下载 YouTube 视频素材并准备视频、音频、字幕和缩略图"
+  default_prompt: "根据 YouTube URL 准备本地素材目录，输出视频、音频、字幕、缩略图和 manifest。"

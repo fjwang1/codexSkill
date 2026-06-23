@@ -1,0 +1,4 @@
+interface:
+  display_name: "中文配音音频生成"
+  short_description: "用本地 Qwen3-TTS/MLX 从中文配音段生成克隆音色音频并做对齐质检"
+  default_prompt: "根据中文配音段 JSON 生成克隆音色中文配音音频，并输出 manifest、对齐报告和质检结果。"

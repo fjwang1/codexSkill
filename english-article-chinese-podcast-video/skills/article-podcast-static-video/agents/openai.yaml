@@ -1,0 +1,7 @@
+interface:
+  display_name: "文章播客静态视频"
+  short_description: "用音轨、6 张以上章节图和字幕合成 MP4"
+  default_prompt: "Use $article-podcast-static-video to combine finalized audio, at least six approved PPT-style chapter information cards, cover asset, and already aligned subtitles into MP4, then write publish_info.txt, production_manifest.json, and qa_report.md."
+
+policy:
+  allow_implicit_invocation: true

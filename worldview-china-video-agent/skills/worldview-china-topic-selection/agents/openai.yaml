@@ -1,0 +1,4 @@
+interface:
+  display_name: "世界眼中的中国选题"
+  short_description: "自动选出一个最佳中国相关 YouTube 长视频"
+  default_prompt: "使用 $worldview-china-topic-selection 为我自动选出 1 个最近发布的中国相关 YouTube 长视频最佳选题，并保留排序审计记录。"

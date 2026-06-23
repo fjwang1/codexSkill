@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Bilibili Metadata"
+  short_description: "Generate Bilibili metadata for translated YouTube podcast videos"
+  default_prompt: "Use $worldview-china-bilibili-publish-metadata to create Bilibili upload metadata for a Worldview China translated YouTube podcast video."

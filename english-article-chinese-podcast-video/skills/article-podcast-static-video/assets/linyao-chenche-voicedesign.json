@@ -1,0 +1,26 @@
+{
+  "schema_version": "article-podcast-voice-profile.v1",
+  "profile_name": "linyao-chenche-voicedesign",
+  "provider": "qwen3-tts-mlx-voicedesign",
+  "python": "/Users/wangfangjia/code/qwen3-tts-apple-silicon-test/.venv/bin/python",
+  "model_dir": "/Volumes/GT34/AI/qwen3-tts-apple-silicon-test-models/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
+  "lang_code": "zh",
+  "speed": 0.94,
+  "temperature": 0.7,
+  "silence_between_turns_sec": 0.35,
+  "sample_rate": 24000,
+  "voices": {
+    "林遥": {
+      "role": "female_host",
+      "label": "林遥｜女主持｜追问与推进",
+      "sample_path": "/Volumes/GT34/Downloads/awesome_english_latest_china/podcast_voice_design_samples/female_linyao_voice_design.wav",
+      "instruct": "30岁左右的中文女性播客主持人，声音真实、近距离、清醒但不端着。她不是播音员，也不是新闻主播，而是在一间安静录音室里和嘉宾认真聊天。音色中低偏亮，亲近、敏锐、有好奇心；句尾偶尔轻微上扬，像是在自然追问。语速中等，遇到复杂问题会稍微放慢，保留轻微呼吸和短暂停顿。整体感觉是克制、聪明、有人味，不要夸张表演，不要朗读腔，不要甜美客服腔，不要电台主持腔。"
+    },
+    "陈澈": {
+      "role": "male_expert",
+      "label": "陈澈｜男嘉宾｜解释与分析",
+      "sample_path": "/Volumes/GT34/Downloads/awesome_english_latest_china/podcast_voice_design_samples/male_chenche_voice_design.wav",
+      "instruct": "35岁左右的中文男性深度播客嘉宾，声音自然、沉稳、松弛，像一个长期研究跨国犯罪和技术社会问题的人在跟朋友解释复杂事件。音色中低，不要过分低沉，不要广告旁白，不要新闻评论员腔。说话有思考感，逻辑清楚，但不是讲课；句子之间有自然停顿，关键事实会稍微放慢，带一点同情和压抑的严肃感。整体要像真实对谈里的回答者，而不是朗读文章或配纪录片。"
+    }
+  }
+}

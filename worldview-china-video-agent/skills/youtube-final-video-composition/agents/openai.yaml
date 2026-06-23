@@ -1,0 +1,3 @@
+display_name: YouTube Final Video Composition
+short_description: Compose source video, Chinese voiceover, burned subtitles, cover image, check clips, manifest, and QA report.
+default_prompt: "把源视频、中文配音音频和中文字幕合成为最终中文配音视频，并生成封面、检查片段、manifest 和 QA 报告。"

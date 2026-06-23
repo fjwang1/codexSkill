@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bilibili Publish Metadata"
+  short_description: "Generate Bilibili title, description, and tags"
+  default_prompt: "Use $article-bilibili-publish-metadata to generate Bilibili upload metadata for an article video project."

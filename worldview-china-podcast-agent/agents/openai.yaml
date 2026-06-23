@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Podcast Agent"
+  short_description: "Build China video-podcast videos"
+  default_prompt: "Find a recent China-related YouTube video podcast, download and audit the source video, then produce a Chinese two-host podcast video."

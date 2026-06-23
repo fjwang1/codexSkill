@@ -1,0 +1,7 @@
+interface:
+  display_name: "播客声音定稿"
+  short_description: "旧Qwen声音定稿，仅用于legacy fallback"
+  default_prompt: "Use $article-podcast-voice-profile only as a legacy Qwen3 VoiceDesign fallback for an existing project that must use frozen voice references."
+
+policy:
+  allow_implicit_invocation: true

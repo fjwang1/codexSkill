@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
+
+
+GLOBAL_LEAD_SEC = 0.05
+TAIL_SEC = 0.12
+MIN_CUE_SEC = 0.45
+NEXT_CUE_OVERLAP_SEC = 0.24
+SUBTITLE_FONT_PATH = Path("/Volumes/GT34/Downloads/podcast_visual_style_prototypes/fonts/NotoSansCJKsc-Bold.otf")
+SUBTITLE_FONT_FAMILY = "NotoSansCJKsc-Bold"
+SUBTITLE_FONT_FULL_NAME = "Noto Sans CJK SC Bold"
+SUBTITLE_FONT_LICENSE_NOTE = "SIL Open Font License 1.1"
+SUBTITLE_FONT_SIZE_PX = 96
+SUBTITLE_LETTER_SPACING_PX = 6
+SUBTITLE_FAUX_ITALIC_SHEAR = 0.10
+SUBTITLE_OUTLINE_WIDTH_PX = 3
+SUBTITLE_OUTLINE_COLOR = "rgba(30,30,30,0.57)"
+SUBTITLE_AVAILABLE_WIDTH_PX = 3320
+SUBTITLE_GLYPH_EDGE_PAD_PX = 72
+SUBTITLE_BLOCK_TOP_MIN_Y = 1808
+SUBTITLE_BLOCK_TOP_MAX_Y = 1878
+SUBTITLE_BLOCK_BOTTOM_MAX_Y = 1948
+ASS_MARGIN_V = 212
+PUBLICATION_CHINESE_NAMES = {
+	"the economist": "经济学人",
+	"economist": "经济学人",
+	"financial times": "金融时报",
+	"ft": "金融时报",
+	"the new york times": "纽约时报",
+	"new york times": "纽约时报",
+	"nytimes": "纽约时报",
+	"the new yorker": "纽约客",
+	"new yorker": "纽约客",
+	"the atlantic": "大西洋月刊",
+	"atlantic": "大西洋月刊",
+	"the wall street journal": "华尔街日报",
+	"wall street journal": "华尔街日报",
+	"wsj": "华尔街日报",
+	"wired": "连线",
+	"bloomberg": "彭博社",
+	"bloomberg news": "彭博社",
+	"bloomberg businessweek": "彭博商业周刊",
+	"the guardian": "卫报",
+	"guardian": "卫报",
+	"foreign policy": "外交政策",
+	"foreign affairs": "外交事务",
+	"the washington post": "华盛顿邮报",
+	"washington post": "华盛顿邮报",
+	"reuters": "路透社",
+	"associated press": "美联社",
+	"ap": "美联社",
+	"bbc": "英国广播公司",
+	"bbc news": "英国广播公司",
+	"cnn": "美国有线电视新闻网",
+	"nikkei asia": "日经亚洲",
+	"the wire china": "连线中国",
+	"rest of world": "世界其余地区",
+	"the diplomat": "外交学者",
+	"china leadership monitor": "中国领导层观察",
+	"time": "时代",
+}
+
+
+def _sha256(path: Path) -> str:
+	digest = hashlib.sha256()
+	with path.open("rb") as handle:
+		for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+			digest.update(chunk)
+	return digest.hexdigest()
+
+
+def _duration(path: Path) -> float:
+	result = subprocess.run(
+		[
+			"ffprobe",
+			"-v",
+			"error",
+			"-show_entries",
+			"format=duration",
+			"-of",
+			"default=noprint_wrappers=1:nokey=1",
+			str(path),
+		],
+		check=True,
+		text=True,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+	)
+	return float(result.stdout.strip())
+
+
+def _timeline_text_len(text: Any) -> int:
+	return len(re.sub(r"[\s,，。.!！?？;；:：、'\"“”‘’（）()《》<>\\[\\]{}—…·-]+", "", str(text or "")))
+
+
+def _asr_match_ratio(item: dict[str, Any]) -> float | None:
+	try:
+		return float(item["asr_matched_char_ratio"])
+	except (KeyError, TypeError, ValueError):
+		return None
+
+
+def _assert_timeline_complete(timeline: dict[str, Any]) -> None:
+	try:
+		matched_ratio = float(timeline.get("asr_summary", {}).get("matched_script_ratio"))
+	except (TypeError, ValueError):
+		matched_ratio = -1.0
+	assert matched_ratio >= 0.90, f"dialogue_timeline matched_script_ratio too low for subtitle generation: {matched_ratio:.3f} < 0.900"
+
+	turns = list(timeline.get("turns") or [])
+	cues = list(timeline.get("cues") or [])
+	trailing_low_turns = 0
+	for turn in reversed(turns):
+		text_len = _timeline_text_len(turn.get("tts_text") or turn.get("text"))
+		ratio = _asr_match_ratio(turn)
+		confidence = str(turn.get("alignment_confidence") or "").lower()
+		if text_len >= 20 and (confidence == "low" or (ratio is not None and ratio < 0.2)):
+			trailing_low_turns += 1
+			continue
+		break
+	assert trailing_low_turns <= 1, f"dialogue_timeline has compressed trailing low-confidence turns: {trailing_low_turns}"
+
+	for turn in turns:
+		text_len = _timeline_text_len(turn.get("tts_text") or turn.get("text"))
+		if text_len < 20:
+			continue
+		duration = float(turn["end_sec"]) - float(turn["start_sec"])
+		min_duration = max(0.5, min(5.0, text_len * 0.055))
+		assert duration >= min_duration, (
+			f"dialogue_timeline turn {turn.get('turn_index')} is too short for its text: "
+			f"{duration:.3f}s < {min_duration:.3f}s, chars={text_len}"
+		)
+
+	for cue in cues:
+		text_len = _timeline_text_len(cue.get("text"))
+		if text_len < 12:
+			continue
+		duration = float(cue["end_sec"]) - float(cue["start_sec"])
+		min_duration = max(0.25, min(1.2, text_len * 0.045))
+		assert duration >= min_duration, (
+			f"dialogue_timeline cue {cue.get('cue_index')} is too short for subtitle generation: "
+			f"{duration:.3f}s < {min_duration:.3f}s, chars={text_len}"
+		)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+	return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+	path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _publication_key(publication: str) -> str:
+	cleaned = publication.strip().strip("《》")
+	cleaned = re.sub(r"\s+", " ", cleaned)
+	return cleaned.casefold()
+
+
+def _has_ascii_alpha(text: str) -> bool:
+	return bool(re.search(r"[A-Za-z]", text))
+
+
+def _chinese_publication_name(publication: str) -> str | None:
+	key = _publication_key(publication)
+	if not key:
+		return None
+	if key in PUBLICATION_CHINESE_NAMES:
+		return PUBLICATION_CHINESE_NAMES[key]
+	if not _has_ascii_alpha(publication):
+		return publication.strip().strip("《》")
+	return None
+
+
+def _raw_publication_terms(publication: str) -> list[str]:
+	cleaned = re.sub(r"\s+", " ", publication.strip().strip("《》"))
+	if not _has_ascii_alpha(cleaned):
+		return []
+	terms = [cleaned]
+	without_the = re.sub(r"(?i)^the\s+", "", cleaned).strip()
+	if without_the and without_the != cleaned:
+		terms.append(without_the)
+	return sorted(set(terms), key=len, reverse=True)
+
+
+def _contains_raw_publication(text: str, raw_terms: list[str]) -> str | None:
+	for term in raw_terms:
+		pattern = rf"(?i)(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])"
+		if re.search(pattern, text):
+			return term
+	return None
+
+
+def _subtitle_publication_check(project_dir: Path, cues: list[dict[str, Any]]) -> dict[str, Any]:
+	metadata_path = project_dir / "source" / "source_metadata.json"
+	if not metadata_path.exists():
+		return {"checked": False, "reason": "source/source_metadata.json missing"}
+	metadata = _read_json(metadata_path)
+	publication = str(metadata.get("publication") or "").strip()
+	if not publication:
+		return {"checked": False, "reason": "source_metadata publication missing"}
+	chinese_publication = _chinese_publication_name(publication)
+	raw_terms = _raw_publication_terms(publication)
+	offenders: list[dict[str, Any]] = []
+	for cue in cues:
+		text = str(cue.get("display_text") or cue.get("text") or "")
+		raw_term = _contains_raw_publication(text, raw_terms)
+		if raw_term:
+			offenders.append({"cue_index": cue.get("index"), "raw_publication": raw_term, "text": text})
+	if offenders:
+		raise AssertionError(
+			"Subtitle cue still contains raw English publication; fix podcast_script.md/dialogue_timeline.json upstream: "
+			+ json.dumps(offenders[:5], ensure_ascii=False)
+		)
+	return {
+		"checked": True,
+		"publication": chinese_publication,
+		"raw_publication_terms_blocked_count": len(raw_terms),
+	}
+
+
+def _srt_time(seconds: float) -> str:
+	total_ms = max(0, int(round(seconds * 1000)))
+	ms = total_ms % 1000
+	total_seconds = total_ms // 1000
+	sec = total_seconds % 60
+	total_minutes = total_seconds // 60
+	minute = total_minutes % 60
+	hour = total_minutes // 60
+	return f"{hour:02d}:{minute:02d}:{sec:02d},{ms:03d}"
+
+
+def _ass_time(seconds: float) -> str:
+	total_cs = max(0, int(round(seconds * 100)))
+	cs = total_cs % 100
+	total_seconds = total_cs // 100
+	sec = total_seconds % 60
+	total_minutes = total_seconds // 60
+	minute = total_minutes % 60
+	hour = total_minutes // 60
+	return f"{hour}:{minute:02d}:{sec:02d}.{cs:02d}"
+
+
+def _ass_escape(text: str) -> str:
+	return text.replace("\\", "＼").replace("{", "｛").replace("}", "｝")
+
+
+def _clean_display_text(text: str) -> str:
+	text = re.sub(r"\s+", " ", text).strip()
+	text = text.replace("。", "，").replace("．", "，")
+	text = re.sub(r"(?<!\d)\.(?!\d)", "，", text)
+	text = re.sub(r"[，,；;：:、\s]+$", "", text).strip()
+	text = re.sub(r"^[，,；;：:、\s]+", "", text).strip()
+	return text
+
+
+def _subtitle_font() -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+	return ImageFont.truetype(str(SUBTITLE_FONT_PATH), SUBTITLE_FONT_SIZE_PX)
+
+
+def _measure_spaced_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+	width = 0
+	height = 0
+	for index, char in enumerate(text):
+		box = draw.textbbox((0, 0), char, font=font, stroke_width=SUBTITLE_OUTLINE_WIDTH_PX)
+		width += box[2] - box[0]
+		height = max(height, box[3] - box[1])
+		if index < len(text) - 1:
+			width += SUBTITLE_LETTER_SPACING_PX
+	return width + round(abs(SUBTITLE_FAUX_ITALIC_SHEAR) * height) + SUBTITLE_GLYPH_EDGE_PAD_PX * 2
+
+
+def _fits_single_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> bool:
+	return _measure_spaced_text(draw, text, font) <= SUBTITLE_AVAILABLE_WIDTH_PX
+
+
+def _avoid_ascii_token_split(text: str, cut: int) -> int:
+	while cut > 1 and cut < len(text) and text[cut - 1].isascii() and text[cut - 1].isalnum() and text[cut].isascii() and text[cut].isalnum():
+		cut -= 1
+	return cut
+
+
+def _best_fit_cut(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+	low = 1
+	high = len(text)
+	best = 0
+	while low <= high:
+		mid = (low + high) // 2
+		if _fits_single_line(draw, text[:mid], font):
+			best = mid
+			low = mid + 1
+		else:
+			high = mid - 1
+	assert best > 0, f"Single subtitle character does not fit at {SUBTITLE_FONT_SIZE_PX}px"
+	preferred_breaks = "，,；;：:、！？?!"
+	for index in range(best - 1, 3, -1):
+		if text[index] in preferred_breaks:
+			return index + 1
+	cut = _avoid_ascii_token_split(text, best)
+	return cut if cut > 0 else best
+
+
+def _split_display_text_to_fit(text: str) -> list[str]:
+	font = _subtitle_font()
+	draw = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
+	remaining = text
+	parts: list[str] = []
+	while remaining:
+		if _fits_single_line(draw, remaining, font):
+			parts.append(remaining)
+			break
+		cut = _best_fit_cut(draw, remaining, font)
+		part = remaining[:cut].strip(" ，,；;：:、")
+		assert part, f"Failed to split overlong subtitle text: {text}"
+		parts.append(part)
+		remaining = remaining[cut:].strip(" ，,；;：:、")
+	return parts
+
+
+def _split_timing(start: float, end: float, parts: list[str]) -> list[tuple[float, float]]:
+	if len(parts) == 1:
+		return [(start, end)]
+	duration = max(0.05, end - start)
+	total_weight = sum(max(1, len(part)) for part in parts)
+	cursor = start
+	cumulative_weight = 0
+	timings: list[tuple[float, float]] = []
+	for index, part in enumerate(parts):
+		if index == len(parts) - 1:
+			part_end = end
+		else:
+			cumulative_weight += max(1, len(part))
+			part_end = start + duration * cumulative_weight / total_weight
+		timings.append((round(cursor, 3), round(max(cursor + 0.01, part_end), 3)))
+		cursor = part_end
+	return timings
+
+
+def _build_cues(timeline: dict[str, Any], audio_duration: float, lead_sec: float, tail_sec: float, next_cue_overlap_sec: float) -> list[dict[str, Any]]:
+	source_cues = sorted(list(timeline.get("cues") or []), key=lambda item: (float(item.get("start_sec") or 0), int(item.get("cue_index") or 0)))
+	assert source_cues, "dialogue_timeline has no cues"
+	raw_starts = [max(0.0, float(cue["start_sec"]) - lead_sec) for cue in source_cues]
+	output: list[dict[str, Any]] = []
+	for index, cue in enumerate(source_cues, start=1):
+		start = raw_starts[index - 1]
+		end = min(audio_duration, float(cue["end_sec"]) + tail_sec)
+		if index < len(source_cues):
+			end = min(end, raw_starts[index] + next_cue_overlap_sec)
+		if end <= start:
+			end = min(audio_duration, start + MIN_CUE_SEC)
+		text = _clean_display_text(str(cue.get("text") or ""))
+		if not text:
+			continue
+		parts = _split_display_text_to_fit(text)
+		for split_index, (part, (part_start, part_end)) in enumerate(zip(parts, _split_timing(start, max(start + 0.05, end), parts)), start=1):
+			output.append({
+				"index": len(output) + 1,
+				"speaker": cue.get("speaker"),
+				"display_role": cue.get("display_role"),
+				"text": part,
+				"display_text": part,
+				"start_sec": part_start,
+				"end_sec": part_end,
+				"source_turn_id": cue.get("turn_id"),
+				"source_turn_index": cue.get("turn_index"),
+				"source_cue_index": cue.get("cue_index"),
+				"source_cue_split_index": split_index,
+				"source_cue_split_count": len(parts),
+				"alignment_confidence": cue.get("alignment_confidence"),
+			})
+	return output
+
+
+def _write_srt(path: Path, cues: list[dict[str, Any]]) -> None:
+	lines: list[str] = []
+	for cue in cues:
+		lines.append(str(cue["index"]))
+		lines.append(f"{_srt_time(float(cue['start_sec']))} --> {_srt_time(float(cue['end_sec']))}")
+		lines.append(str(cue["display_text"]))
+		lines.append("")
+	path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_ass(path: Path, cues: list[dict[str, Any]]) -> None:
+	lines = [
+		"[Script Info]",
+		"ScriptType: v4.00+",
+		"PlayResX: 3840",
+		"PlayResY: 2160",
+		"ScaledBorderAndShadow: yes",
+		"",
+		"[V4+ Styles]",
+		"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+		f"Style: Default,{SUBTITLE_FONT_FAMILY},{SUBTITLE_FONT_SIZE_PX},&H00FFFFFF,&H000000FF,&H91000000,&HFF000000,-1,0,0,0,100,100,{SUBTITLE_LETTER_SPACING_PX},0,1,{SUBTITLE_OUTLINE_WIDTH_PX},0,2,180,180,{ASS_MARGIN_V},1",
+		"",
+		"[Events]",
+		"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+	]
+	for cue in cues:
+		lines.append(
+			f"Dialogue: 0,{_ass_time(float(cue['start_sec']))},{_ass_time(float(cue['end_sec']))},Default,,0,0,0,,{_ass_escape(str(cue['display_text']))}"
+		)
+	path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_subtitles(project_dir: Path, lead_sec: float, tail_sec: float, next_cue_overlap_sec: float) -> dict[str, Any]:
+	audio_dir = project_dir / "audio"
+	video_dir = project_dir / "video"
+	video_dir.mkdir(parents=True, exist_ok=True)
+	audio_path = audio_dir / "final_podcast.wav"
+	timeline_path = audio_dir / "dialogue_timeline.json"
+	script_path = project_dir / "podcast_script.md"
+	assert audio_path.exists(), f"Missing {audio_path}"
+	assert timeline_path.exists(), f"Missing {timeline_path}"
+	assert SUBTITLE_FONT_PATH.exists(), f"Missing subtitle font: {SUBTITLE_FONT_PATH}"
+	timeline = _read_json(timeline_path)
+	_assert_timeline_complete(timeline)
+	audio_duration = _duration(audio_path)
+	cues = _build_cues(timeline, audio_duration, lead_sec, tail_sec, next_cue_overlap_sec)
+	assert cues, "No subtitle cues generated"
+	publication_check = _subtitle_publication_check(project_dir, cues)
+	srt_path = video_dir / "final_subtitles.srt"
+	ass_path = video_dir / "final_subtitles.ass"
+	_write_srt(srt_path, cues)
+	_write_ass(ass_path, cues)
+	shutil.copy2(srt_path, video_dir / "final_subtitles_1x.srt")
+	shutil.copy2(ass_path, video_dir / "final_subtitles_1x.ass")
+	manifest = {
+		"schema_version": "article-podcast-subtitles.v1",
+		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+		"script_sha256": _sha256(script_path) if script_path.exists() else timeline.get("script_sha256"),
+		"audio_sha256": _sha256(audio_path),
+		"dialogue_timeline_sha256": _sha256(timeline_path),
+		"alignment_method": "dialogue_timeline_asr",
+		"global_lead_sec": lead_sec,
+		"tail_sec": tail_sec,
+		"next_cue_overlap_sec": next_cue_overlap_sec,
+		"playback_speed_factor": 1.0,
+		"source_timeline": "1x",
+		"final_timeline": "1x",
+		"source_publication_check": publication_check,
+		"style": {
+			"resolution": "3840x2160",
+			"font_family": SUBTITLE_FONT_FAMILY,
+			"font_full_name": SUBTITLE_FONT_FULL_NAME,
+			"font_file": str(SUBTITLE_FONT_PATH),
+			"font_license_note": SUBTITLE_FONT_LICENSE_NOTE,
+			"font_size_px": SUBTITLE_FONT_SIZE_PX,
+			"letter_spacing_px": SUBTITLE_LETTER_SPACING_PX,
+			"faux_italic_shear": SUBTITLE_FAUX_ITALIC_SHEAR,
+			"preferred_lines": 1,
+			"max_lines": 1,
+			"line_policy": "single_line_preferred_frequent_short_cues",
+			"speaker_labels": False,
+			"burned_subtitle_default": True,
+			"embed_soft_subtitle_default": False,
+			"background_box": False,
+			"outline": "subtle_translucent_outline",
+			"outline_width_px": SUBTITLE_OUTLINE_WIDTH_PX,
+			"outline_color": SUBTITLE_OUTLINE_COLOR,
+			"shadow": "soft_drop_shadow",
+			"shadow_color": "rgba(0,0,0,0.38)",
+			"shadow_blur_px": 2,
+			"back_color": "transparent",
+			"sentence_periods_displayed": False,
+			"subtitle_block_top_min_y": SUBTITLE_BLOCK_TOP_MIN_Y,
+			"subtitle_block_top_max_y": SUBTITLE_BLOCK_TOP_MAX_Y,
+			"subtitle_block_bottom_max_y": SUBTITLE_BLOCK_BOTTOM_MAX_Y,
+			"overflow_policy": "split_overlong_cues_no_font_shrink",
+		},
+		"cues": cues,
+	}
+	_write_json(video_dir / "subtitle_manifest.json", manifest)
+	report = [
+		"# 字幕对齐报告",
+		"",
+		f"- project: `{project_dir}`",
+		"- alignment_method: dialogue_timeline_asr",
+		f"- cues: {len(cues)}",
+		f"- global_lead_sec: {lead_sec}",
+		f"- tail_sec: {tail_sec}",
+		f"- next_cue_overlap_sec: {next_cue_overlap_sec}",
+		f"- source_publication_check: {publication_check}",
+		"- speaker_labels: false",
+		"- sentence_periods_displayed: false",
+		f"- style: {SUBTITLE_FONT_FULL_NAME}, white text, subtle translucent outline, soft drop shadow, no background box",
+		f"- subtitle_font_file: `{SUBTITLE_FONT_PATH}`",
+		"",
+		"## 抽检提示",
+		"",
+		"- 需要人工抽听开头、中段、结尾和至少 5 个 speaker switch。",
+		"- 本脚本只使用 `audio/dialogue_timeline.json` 的 ASR cue 时间轴，不做字数反推。",
+	]
+	(video_dir / "subtitle_alignment_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+	return {
+		"srt": str(srt_path),
+		"ass": str(ass_path),
+		"manifest": str(video_dir / "subtitle_manifest.json"),
+		"cue_count": len(cues),
+	}
+
+
+def _build_parser() -> argparse.ArgumentParser:
+	parser = argparse.ArgumentParser(description="Build SRT/ASS subtitles from audio/dialogue_timeline.json.")
+	parser.add_argument("--project-dir", required=True, type=Path)
+	parser.add_argument("--global-lead-sec", type=float, default=GLOBAL_LEAD_SEC)
+	parser.add_argument("--tail-sec", type=float, default=TAIL_SEC)
+	parser.add_argument("--next-cue-overlap-sec", type=float, default=NEXT_CUE_OVERLAP_SEC)
+	return parser
+
+
+def main() -> int:
+	args = _build_parser().parse_args()
+	result = build_subtitles(args.project_dir.expanduser().resolve(), args.global_lead_sec, args.tail_sec, args.next_cue_overlap_sec)
+	print(json.dumps(result, ensure_ascii=False, indent=2))
+	return 0
+
+
+if __name__ == "__main__":
+	raise SystemExit(main())

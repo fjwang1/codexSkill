@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Voice Prompts"
+  short_description: "Extract source-speaker voice prompts for VibeVoice"
+  default_prompt: "Use $worldview-china-source-voice-prompts to extract two clean VibeVoice speaker references from a downloaded source podcast."

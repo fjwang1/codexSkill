@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouTube 中文配音稿"
+  short_description: "把 YouTube 外文时间轴字幕改写为章节级中文配音稿和语义节点"
+  default_prompt: "使用 $youtube-subtitle-to-chinese 将这份 YouTube 外文字幕 TXT 改写为适合中文 TTS 和视频合成的配音稿。只按外文字幕语义时间线拆章节和节点，不使用画面锚点；输出章节级 Markdown 和带 source_subtitle_ids/source_excerpt 的语义节点 JSON；生成真实 TTS manifest 后按实际时长回改，并只重跑失败或文本 hash 变化的节点。"

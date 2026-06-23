@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v openspec >/dev/null 2>&1; then
+  exec openspec "$@"
+fi
+
+exec node /Users/wangfangjia/code/OpenSpec/bin/openspec.js "$@"

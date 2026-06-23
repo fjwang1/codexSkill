@@ -1,0 +1,7 @@
+interface:
+  display_name: "播客标题写作"
+  short_description: "从英文文章和中文播客稿生成封面大字与B站发布标题资产"
+  default_prompt: "Use $article-podcast-title-writing to generate cover/cover_title.json and video_title.txt from a local article podcast project."
+
+policy:
+  allow_implicit_invocation: true
