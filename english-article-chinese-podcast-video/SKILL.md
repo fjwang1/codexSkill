@@ -1,11 +1,11 @@
 ---
 name: english-article-chinese-podcast-video
-description: 将本地英文文章文件端到端制作成中文双人播客视频，并准备 B 站投稿草稿。只接受本地文章文件路径；默认使用 Speaker 0/Speaker 1 文稿、VibeVoice-1.5B 整篇连续 TTS、最终音频 ASR/forced alignment、PPT Master deck 图片与语义 sidecar、章节图时间线绑定、对齐字幕、硬字幕 MP4、逐句时间线 QA，最后调用 bilibili-video-upload-draft 在用户真实 Chrome 中打开 B 站投稿页、上传视频/封面、填写投稿信息并停在最终提交前。旧 Qwen3 按回合 TTS 仅作为用户明确要求时的 legacy fallback。
+description: 将本地英文文章文件端到端制作成中文双人播客视频，并自动提交 B 站投稿。只接受本地文章文件路径；默认使用 Speaker 0/Speaker 1 文稿、VibeVoice-1.5B 整篇连续 TTS、最终音频 ASR/forced alignment、PPT Master deck 图片与语义 sidecar、章节图时间线绑定、对齐字幕、硬字幕 MP4、逐句时间线 QA，最后调用 bilibili-video-upload-draft 在用户真实 Chrome 中打开 B 站投稿页、上传视频/封面、填写投稿信息、验证字段并点击最终提交按钮一次。旧 Qwen3 按回合 TTS 仅作为用户明确要求时的 legacy fallback。
 ---
 
 # 英文文章转中文播客视频
 
-这是正式生产总控。输入只能是本地文章文件；不要处理 URL，不要主动联网抓网页。产出是一个可发布的中文双人播客视频，并在 B 站创作中心准备投稿草稿：`Speaker 0` 女主持、`Speaker 1` 男分析者、外刊解读式封面/发布标题、VibeVoice 连续播客音轨、最终音频 ASR 对齐时间轴、4K 大字封面、PPT Master deck 图片、对齐中文字幕、最终 MP4、逐句时间线 QA，以及停在最终提交前的 B 站投稿页。
+这是正式生产总控。输入只能是本地文章文件；不要处理 URL，不要主动联网抓网页。产出是一个可发布并已提交到 B 站审核队列的中文双人播客视频：`Speaker 0` 女主持、`Speaker 1` 男分析者、外刊解读式封面/发布标题、VibeVoice 连续播客音轨、最终音频 ASR 对齐时间轴、4K 大字封面、PPT Master deck 图片、对齐中文字幕、最终 MP4、逐句时间线 QA，以及 B 站投稿提交报告。
 
 ## 默认架构
 
@@ -29,7 +29,7 @@ source article
 -> precompose chapter visuals with wipe_with_shadow transitions into visual_base_1x.mp4
 -> final_video.mp4
 -> subtitle timeline QA
--> Bilibili upload draft handoff in real Chrome
+-> Bilibili upload and final submit in real Chrome
 ```
 
 不要把 VibeVoice 音频重新拆成旧 Qwen `draft-turns` 工作流。字幕和最终章节时间轴需要的是最终音频的真实时间轴，不是逐回合 TTS 缓存；PPT Master deck 图片资产可先由定稿播客稿并行生成。
@@ -75,13 +75,13 @@ source article
 12. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-timeline-qa/SKILL.md`
    - 逐 cue/turn 验证字幕、ASR 时间轴、音频和最终视频时间线是否一致；未通过就回到音频对齐、字幕或视频合成阶段修复。
 13. `/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md`
-   - 字幕时间线 QA 通过后，读取本项目的 `bilibili_upload_metadata.json`，在用户已登录的真实 Chrome 会话中打开 B 站创作中心上传页，上传 `video/final_video.mp4` 和 `cover/cover_4k.png`，填写标题、简介、标签、分区、创作声明和可选定时发布时间，验证字段生效后停在最终提交按钮前，并输出 `bilibili_upload_draft_report.json` 和 `bilibili_upload_draft_report.md`。
+   - 字幕时间线 QA 通过后，读取本项目的 `bilibili_upload_metadata.json`，在用户已登录的真实 Chrome 会话中打开 B 站创作中心上传页，上传 `video/final_video.mp4` 和 `cover/cover_4k.png`，填写标题、简介、标签、分区、创作声明和可选定时发布时间，验证字段生效后点击最终提交按钮一次，并输出 `bilibili_upload_draft_report.json` 和 `bilibili_upload_draft_report.md`。
 
 旧 `article-podcast-voice-profile` 和 `article-podcast-cloned-audio` 只在用户明确要求 Qwen3 turn-level clone 时使用。
 
 ## B 站投稿集成
 
-本 skill 是视频生产和 B 站投稿草稿总控。它必须产出标准化的 `bilibili_upload_metadata.json`，然后把该 metadata 交给 `bilibili-video-upload-draft` 作为最后阶段执行。上传草稿阶段只做数据录入和文件上传，永远不得点击最终 `投稿`、`立即投稿`、`提交`、`发布` 或等价最终提交按钮。
+本 skill 是视频生产和 B 站投稿发布总控。它必须产出标准化的 `bilibili_upload_metadata.json`，然后把该 metadata 交给 `bilibili-video-upload-draft` 作为最后阶段执行。投稿阶段完成数据录入、文件上传、字段验证后，必须点击最终 `投稿`、`立即投稿`、`提交`、`发布` 或等价最终提交按钮一次。
 
 当本 skill 在 worker/subagent 中运行时，要先区分“视频生产能力”和“真实 Chrome 控制能力”。如果当前 agent 没有 `chrome:control-chrome` 工具面，但上游主控可能拥有该工具面，本 skill 必须在 Gate 12 通过、metadata 写好、最终视频和 QA 完成后返回 `UPLOAD_READY_CHROME_HANDOFF_REQUIRED`，并记录项目目录、final video、cover、metadata、QA 路径；不得把这种情况写成 `CHROME_EXTENSION_UNAVAILABLE`。真正的 B 站上传仍必须由拥有 `chrome:control-chrome` 的 agent 直接调用 `bilibili-video-upload-draft`，不能由父级手写浏览器脚本替代。
 
@@ -91,14 +91,14 @@ Chrome-capable agent 继续 Gate 13 时，必须使用 Chrome 插件 `control-ch
 
 - `english-article-chinese-podcast-video` 负责生成 `video/final_video.mp4`、`cover/cover_4k.png`、`video_title.txt`、`publish_info.txt`、`bilibili_upload_metadata.json`。
 - `bilibili_upload_metadata.json` 包含标题、简介、标签、固定分区 `知识`、固定创作声明 `含AI生成内容`、视频/封面相对路径和可选 `scheduled_publish_at`。
-- 本通用视频 skill 不自行决定定时发布时间，默认 `scheduled_publish_at=null`；如果上游 orchestration 提供 `scheduled_publish_at`、`scheduled_publish_timezone` 和 `schedule_source`，必须在调用上传草稿前写入并重新验证 `bilibili_upload_metadata.json`。
+- 本通用视频 skill 不自行决定定时发布时间，默认 `scheduled_publish_at=null`；如果上游 orchestration 提供 `scheduled_publish_at`、`scheduled_publish_timezone` 和 `schedule_source`，必须在调用投稿发布前写入并重新验证 `bilibili_upload_metadata.json`。
 - Daily 总控根据选题模式计算 `scheduled_publish_at`，并把排期作为本 skill 的调用上下文传入；本 skill 在 Gate 12 通过后、Gate 13 上传前把该排期写入 metadata。Daily slot 必须是未来时间：当天 11:00/17:00 尚未到达则用当天，已经到达或超过则用下一天同一 slot。
-- `bilibili-video-upload-draft` 是本 pipeline 的强制最终阶段。它负责在用户已登录的 Chrome 中打开新投稿页、上传视频和封面、填入 metadata、按投稿 skill 的动态 slot 规则配置外部传入的定时时间，并停在最终提交前。
+- `bilibili-video-upload-draft` 是本 pipeline 的强制最终阶段。它负责在用户已登录的 Chrome 中打开新投稿页、上传视频和封面、填入 metadata、按投稿 skill 的动态 slot 规则配置外部传入的定时时间，验证后自动点击最终提交按钮一次。
 - Gate 13 只能通过直接调用 `/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md` 完成。不得在本 skill 中手写 B 站 Chrome/Playwright 上传逻辑，不得用 `node_repl`、Chrome snippets、`locator.fill(input[type=file])` 或自制脚本替代投稿 skill。
 - `bilibili_upload_draft_report.json` 必须由 `bilibili-video-upload-draft` 产出，并包含 `skill_name="bilibili-video-upload-draft"`、`skill_path`、`skill_invocation="direct"`、`skill_instructions_read=true`。缺少这些字段时，Gate 13 视为未执行投稿 skill，即使文件存在也不合格。
 - 如果当前 agent 无法调用投稿 skill 但已完成视频和 metadata，优先返回 `UPLOAD_READY_CHROME_HANDOFF_REQUIRED`，交给拥有 `chrome:control-chrome` 的上游 agent 继续调用投稿 skill；不得自行打开 B 站页试错，也不得手写 `bilibili_upload_draft_report.json` 伪装为投稿 skill 输出。只有确认当前调用链没有可用 Chrome 工具面，或投稿 skill 直接执行后阻塞，状态才是 `VIDEO_COMPLETE_UPLOAD_BLOCKED`。
 - 如果 Chrome Extension 不可用、用户未登录、B 站页面不可达、文件上传权限缺失、非 daily slot 的精确定时发布时间已经过期，或同一上传字段连续失败三次，本 skill 不得把整轮标记为完全完成；状态应为 `VIDEO_COMPLETE_UPLOAD_BLOCKED`，保留最终视频和 metadata 路径，并记录具体上传 blocker 和下一步。11:00/17:00 daily slot 过期不应直接阻塞，应由投稿 skill 顺延到下一天同一 slot 并在 report 中记录。
-- 成功 handoff 时，上传草稿阶段必须留下 `bilibili_upload_draft_report.json` 和 `bilibili_upload_draft_report.md`，记录 live tab/handoff 状态、已接受字段、已接受标签、是否设置定时发布、封面预览是否变更、以及 `final_submit_clicked=false`。
+- 成功提交时，投稿阶段必须留下 `bilibili_upload_draft_report.json` 和 `bilibili_upload_draft_report.md`，记录 live tab/audit 状态、已接受字段、已接受标签、是否设置定时发布、封面预览是否变更、`final_submit_clicked=true`、`submission_status=submitted` 以及提交证据。
 
 ## 输入前提
 
@@ -361,7 +361,7 @@ Gate 11 Final Video And Publish:
   render_manifest.json records visual_transition.placement=centered_on_chapter_boundary
   render_manifest.json records visual_timeline_units and video/visual_base_1x.mp4
   frame extraction shows burned subtitles
-  render_manifest proves every burned subtitle block sits above common player controls: 1808 <= top_y <= 1878 and bottom_y <= 1948
+  render_manifest proves every burned subtitle block sits above common player controls: 1904 <= top_y <= 1974 and bottom_y <= 2044
   render_manifest proves burned subtitle line_count <= 1
   video_title.txt exists and passes title attribution rules
   publish_info.txt exists; first line equals video_title.txt and chapter lines are formatted from final chapter visual segments
@@ -379,7 +379,7 @@ Gate 12 Subtitle Timeline QA:
   every subtitle cue maps to dialogue_timeline turn/cue timing
   no subtitle cluster is systematically late or early against ASR timeline
 
-Gate 13 Bilibili Upload Draft:
+Gate 13 Bilibili Upload Publish:
   /Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md was read and followed
   if this agent lacks chrome:control-chrome but video/metadata/QA are complete, status may be UPLOAD_READY_CHROME_HANDOFF_REQUIRED and the parent agent must run this same Gate 13 directly
   the upload stage was executed by bilibili-video-upload-draft itself, not by parent-skill ad hoc Chrome/Playwright code
@@ -394,11 +394,11 @@ Gate 13 Bilibili Upload Draft:
   cover/cover_4k.png is uploaded after video upload succeeds, or the exact cover blocker is recorded
   title, description, tags, category=知识, creation_declaration=含AI生成内容 are filled and read back from the page
   if scheduled_publish_at is present, Bilibili's scheduled publishing controls are set to the effective time and read back
-  final submit/post button is not clicked
+  final submit/post button is clicked exactly once after verification
   bilibili_upload_draft_report.json exists
   bilibili_upload_draft_report.md exists
   bilibili_upload_draft_report.json records skill_name=bilibili-video-upload-draft, skill_path=/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md, skill_invocation=direct, skill_instructions_read=true
-  bilibili_upload_draft_report.json records status HANDOFF_READY or BLOCKED, tab/handoff evidence, field verification, accepted tags, final_submit_clicked=false, blocker if any
+  bilibili_upload_draft_report.json records status SUBMITTED or BLOCKED, tab/audit evidence, field verification, accepted tags, final_submit_clicked=true when submitted, submission_status=submitted when submitted, blocker if any
 ```
 
 ## 经验参考：中文稿字数与音频时长
@@ -441,7 +441,7 @@ Gate 13 Bilibili Upload Draft:
 - 每条正式视频必须有 PPT Master deck 图片，并且最终视频合成只能消费经过 `article-podcast-chapter-timeline-binding` 生成的 timed `chapter_plan.json`；章节转场只在视频合成层生成 `visual_base_1x.mp4`，不得反写或平移 `chapter_plan.json`。
 - 字幕必须先通过字幕对齐 gate，再进入视频合成。默认硬烧录；默认不内嵌软字幕轨，避免重复字幕。
 - 字幕使用 `Noto Sans CJK SC Bold`、96 px、白字、3 px 半透明深灰细描边、轻柔投影、右倾 `faux_italic_shear=0.10`；不得有黑底框、半透明背景条、粗黑描边、阴影色块或发光色块。
-- 硬字幕块的实际文字必须位于播放器控制条上方安全区：`1808 <= top_y <= 1878` 且 `bottom_y <= 1948`；这是字幕烧录坐标，不是章节视觉必须预留固定安全区的设计规则。
+- 硬字幕块的实际文字必须位于播放器控制条上方安全区：`1904 <= top_y <= 1974` 且 `bottom_y <= 2044`；这是字幕烧录坐标，不是章节视觉必须预留固定安全区的设计规则。
 - 正式字幕默认一行显示。长句必须拆成更短 cue 高频切换；`subtitle_manifest.style.max_lines=1` 且 `preferred_lines=1`。
 - 字幕允许非常小的相邻 cue overlap 以保护尾音；视频硬字幕合成必须按真实时间片处理 overlap，重叠区显示后开始的 cue，不得顺延后续字幕。
 - 字幕不得显示句号：中文 `。`、全角 `．`、以及作为句末标点的英文 `.` 不能出现在字幕里；数字小数点和版本号中的点可以保留。
@@ -450,9 +450,9 @@ Gate 13 Bilibili Upload Draft:
 - 最终回复前必须运行字幕时间线逐句 QA。
 - 字幕时间线 QA 通过后必须调用 `bilibili-video-upload-draft` 作为最终阶段，或在当前 agent 缺少 `chrome:control-chrome` 时返回 `UPLOAD_READY_CHROME_HANDOFF_REQUIRED` 给拥有 Chrome 工具面的上游 agent。除非用户在当前请求中明确说“只生成视频、不打开 B 站上传页”，否则不要停在 `bilibili_upload_metadata.json`。
 - 调用 `bilibili-video-upload-draft` 是强制边界，不是建议。不得在本 skill 中用临时 Chrome JS、`node_repl` 代码、直接 DOM 操作或自制脚本替代投稿 skill；不得手写投稿 report。
-- B 站上传草稿必须使用用户真实 Chrome 登录态，通过 Chrome Extension / `chrome:control-chrome` 控制；不得用 in-app browser、CDP、Playwright 新 profile 或临时 Chrome profile。
-- B 站上传草稿阶段永远不得点击最终提交按钮；成功状态是 `HANDOFF_READY`，不是已发布。
-- 如果视频已完成但 B 站上传草稿被环境阻塞，保留并报告 `video/final_video.mp4`、`bilibili_upload_metadata.json`、`bilibili_upload_draft_report.json`，状态使用 `VIDEO_COMPLETE_UPLOAD_BLOCKED`，不要重跑视频生产。
+- B 站投稿发布必须使用用户真实 Chrome 登录态，通过 Chrome Extension / `chrome:control-chrome` 控制；不得用 in-app browser、CDP、Playwright 新 profile 或临时 Chrome profile。
+- B 站投稿阶段必须在字段验证通过后点击最终提交按钮一次；成功状态是 `SUBMITTED`。
+- 如果视频已完成但 B 站投稿发布被环境阻塞，保留并报告 `video/final_video.mp4`、`bilibili_upload_metadata.json`、`bilibili_upload_draft_report.json`，状态使用 `VIDEO_COMPLETE_UPLOAD_BLOCKED`，不要重跑视频生产。
 - 如果能明确确认文章来源，发布标题必须声明来源，格式如 `《经济学人》：中国为什么如此强大？`；不能确认来源时不要添加来源前缀。
 - 如果 `podcast_script.md` 变化，标题、音频、ASR 时间轴、字幕、封面、PPT slide 语义、章节时间线绑定和视频全部失效，必须重做。
 

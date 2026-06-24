@@ -21,9 +21,18 @@ except ModuleNotFoundError as exc:
 CANVAS = (3840, 2160)
 ARTICLE_COVER_SCRIPT = Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/scripts/compose_editorial_cover.py")
 FORBIDDEN_IDENTITY_LABEL_RE = re.compile(r"(来自|中文配音|搬运|油管|YouTube|频道|栏目|播客|Podcast|CGSP)", re.I)
+WEAK_TITLE_CORE_RE = re.compile(r"(变局之后|新格局|新局势|深度解析|未来走向|影响几何|怎么看|怎么了)$")
+DEFAULT_EPISODE_ORDER_MARKER_TEMPLATE = "第{episode_index}集"
+DEFAULT_EPISODE_TITLE_TEMPLATE = "{series_title}·{episode_order_marker}：{subtitle}"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+	return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_json_optional(path: Path) -> dict[str, Any]:
+	if not path.exists():
+		return {}
 	return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -89,6 +98,10 @@ def _validate_title_core(title_core: str) -> str:
 	assert title_core, "Translated title core is empty"
 	assert not re.match(r"^《[^》]+》[:：]", title_core), "Translated title core must not include a channel/program prefix"
 	assert not FORBIDDEN_IDENTITY_LABEL_RE.search(title_core), "Translated title core must not add source/channel/podcast labeling"
+	assert not WEAK_TITLE_CORE_RE.search(title_core), (
+		"Title core is too generic for Bilibili; rewrite it as a specific claim, conflict, consequence, "
+		"or source-speaker quote rather than a background label."
+	)
 	assert len(title_core) <= 42, f"Translated title core is too long for cover title: {len(title_core)} chars"
 	return title_core
 
@@ -96,6 +109,65 @@ def _validate_title_core(title_core: str) -> str:
 def _build_full_title(identity_label: str, title_core: str) -> str:
 	title = f"{identity_label}：{title_core}"
 	assert len(title) <= 58, f"Full title is too long for cover title: {len(title)} chars"
+	return title
+
+
+def _chinese_episode_label(index: int) -> str:
+	values = {
+		1: "一",
+		2: "二",
+		3: "三",
+		4: "四",
+		5: "五",
+		6: "六",
+		7: "七",
+		8: "八",
+		9: "九",
+		10: "十",
+		11: "十一",
+		12: "十二",
+		13: "十三",
+		14: "十四",
+		15: "十五",
+		16: "十六",
+		17: "十七",
+		18: "十八",
+		19: "十九",
+		20: "二十",
+	}
+	return values.get(index, str(index))
+
+
+def _episode_order_marker(episode_index: int, template: str = DEFAULT_EPISODE_ORDER_MARKER_TEMPLATE) -> str:
+	episode_label = _chinese_episode_label(episode_index)
+	marker = template.format(
+		episode_index=episode_index,
+		episode_label=episode_label,
+		episode_number=episode_label,
+	)
+	marker = marker.strip()
+	assert marker, "Episode order marker template produced an empty marker"
+	return marker
+
+
+def _build_series_video_title(identity_label: str, title_core: str, episode_index: int, title_template: str, order_marker_template: str) -> str:
+	episode_label = _chinese_episode_label(episode_index)
+	order_marker = _episode_order_marker(episode_index, order_marker_template)
+	title = title_template.format(
+		series_title=identity_label,
+		series_title_prefix=identity_label,
+		episode_index=episode_index,
+		episode_label=episode_label,
+		episode_number=episode_label,
+		episode_order_marker=order_marker,
+		order_marker=order_marker,
+		subtitle=title_core,
+		episode_subtitle=title_core,
+	)
+	assert identity_label in title, "Series title template must include the shared title"
+	assert title_core in title, "Series title template must include the episode subtitle"
+	assert order_marker in title or str(episode_index) in title or episode_label in title, "Series title template must include an episode order marker"
+	assert len(title) <= 62, f"Series episode video title is too long: {len(title)} chars"
 	return title
 
 
@@ -218,6 +290,10 @@ def build_title_cover(
 	frame_key: str,
 	source_time_sec: float | None,
 	highlight_texts: list[str] | None,
+	episode_index: int | None,
+	episode_title_template: str,
+	episode_order_marker_template: str,
+	cover_include_episode_index: bool,
 	force: bool,
 ) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
@@ -228,13 +304,30 @@ def build_title_cover(
 	metadata = _source_metadata(run_dir)
 	source_title = str(metadata.get("title") or metadata.get("fulltitle") or "").strip()
 	assert source_title, "Source YouTube title is missing"
+	if episode_index is not None:
+		assert episode_index > 0, f"episode_index must be positive: {episode_index}"
+	episode_manifest = _read_json_optional(run_dir / "episode_manifest.json")
 	identity_label = _validate_identity_label(source_identity_label)
 	title_core = _validate_title_core(translated_title_core)
-	title = _build_full_title(identity_label, title_core)
-	lines = _default_lines(title, identity_label=identity_label, title_core=title_core)
-	highlights = highlight_texts or _default_highlights(title, identity_label=identity_label)
+	manifest_video_title = str(episode_manifest.get("video_title") or "").strip()
+	manifest_cover_title = str(episode_manifest.get("cover_title") or "").strip()
+	resolved_episode_title_template = str(episode_manifest.get("episode_title_template") or episode_title_template)
+	resolved_episode_order_marker_template = str(episode_manifest.get("episode_order_marker_template") or episode_order_marker_template)
+	cover_title_text = manifest_cover_title or _build_full_title(identity_label, title_core)
+	video_title = cover_title_text
+	if episode_index is not None:
+		video_title = manifest_video_title or _build_series_video_title(
+			identity_label,
+			title_core,
+			episode_index,
+			resolved_episode_title_template,
+			resolved_episode_order_marker_template,
+		)
+	render_title = video_title if cover_include_episode_index else cover_title_text
+	lines = _default_lines(render_title, identity_label=identity_label, title_core=title_core)
+	highlights = highlight_texts or _default_highlights(render_title, identity_label=identity_label)
 	for item in highlights:
-		assert item in title, f"highlight_text not found in translated title: {item!r}"
+		assert item in render_title, f"highlight_text not found in rendered cover title: {item!r}"
 
 	background_raw, frame_meta = _select_background_frame(run_dir, frame, frame_key, source_time_sec)
 	raw_copy = cover_dir / "background_raw.png"
@@ -248,12 +341,21 @@ def build_title_cover(
 	title_json = cover_dir / "cover_title.json"
 	cover_title = {
 		"schema_version": "worldview-china-podcast-title-cover.v1",
-		"title_source": "youtube_original_title_translated_with_source_identity",
+		"title_source": "podcast_source_identity_plus_platform_native_hook",
 		"source_title": source_title,
+		"source_title_reference_policy": "original_youtube_title_is_reference_not_boundary",
 		"source_identity_label": identity_label,
 		"source_identity_basis": identity_basis,
 		"translated_title_core": title_core,
-		"title_text": title,
+		"title_text": render_title,
+		"video_title_text": video_title,
+		"series_episode": episode_index is not None,
+		"episode_index": episode_index,
+		"episode_label": _chinese_episode_label(episode_index) if episode_index is not None else None,
+		"episode_order_marker": episode_manifest.get("episode_order_marker") or (_episode_order_marker(episode_index, resolved_episode_order_marker_template) if episode_index is not None else None),
+		"episode_title_template": resolved_episode_title_template if episode_index is not None else None,
+		"episode_order_marker_template": resolved_episode_order_marker_template if episode_index is not None else None,
+		"cover_title_omits_episode_index": episode_index is not None and not cover_include_episode_index,
 		"title_lines": lines,
 		"preserve_title_lines": True,
 		"highlight_text": highlights[0],
@@ -261,16 +363,23 @@ def build_title_cover(
 		"highlight_style": {"color": "yellow", "font_weight": "bold"},
 		"read_aloud_self_check": {
 			"status": "PASS",
-			"read_aloud_version": title,
+			"read_aloud_version": render_title,
 			"is_smooth_spoken_chinese": True,
 			"is_attractive": True,
 			"not_keyword_stack": True,
 			"issue_if_any": None,
-			"revision_note": "Title uses a justified speaker/source-identity prefix plus a smooth Chinese translation of the YouTube source title."
+			"revision_note": "Title uses a justified speaker/source-identity prefix plus a platform-native claim, conflict, consequence, or source-speaker quote; the original YouTube title is only a reference signal."
+		},
+		"attractive_title_policy": {
+			"status": "PASS",
+			"requires_podcast_identity": True,
+			"requires_specific_eye": True,
+			"allowed_hook_types": ["sharp_claim", "conflict_question", "consequence", "counterintuitive_quote"],
+			"rejects_generic_background_titles": True,
 		},
 	}
 	_write_json(title_json, cover_title)
-	(run_dir / "video_title.txt").write_text(title + "\n", encoding="utf-8")
+	(run_dir / "video_title.txt").write_text(video_title + "\n", encoding="utf-8")
 
 	visual_subject = {
 		"schema_version": "worldview-china-podcast-cover-visual-subject.v1",
@@ -325,7 +434,14 @@ def build_title_cover(
 		"source_identity_label": identity_label,
 		"source_identity_basis": identity_basis,
 		"translated_title_core": title_core,
-		"translated_title": title,
+		"translated_title": video_title,
+		"cover_title_text": render_title,
+		"series_episode": episode_index is not None,
+		"episode_index": episode_index,
+		"episode_order_marker": episode_manifest.get("episode_order_marker") or (_episode_order_marker(episode_index, resolved_episode_order_marker_template) if episode_index is not None else None),
+		"episode_title_template": resolved_episode_title_template if episode_index is not None else None,
+		"episode_order_marker_template": resolved_episode_order_marker_template if episode_index is not None else None,
+		"cover_title_omits_episode_index": episode_index is not None and not cover_include_episode_index,
 		"video_title": "video_title.txt",
 		"cover_title_json": str(title_json),
 		"background_raw": str(raw_copy),
@@ -334,7 +450,12 @@ def build_title_cover(
 		"cover_4k_sha256": _sha256(cover_out),
 		"frame_selection": frame_meta,
 		"title_layout": "center",
-		"title_policy": "source_identity_prefix_plus_youtube_original_title_translated_smoothly",
+		"title_policy": (
+			"series_episode_indexed_video_title_plus_unindexed_cover_title"
+			if episode_index is not None and not cover_include_episode_index
+			else "source_identity_prefix_plus_platform_native_hook_title"
+		),
+		"source_title_reference_policy": "original_youtube_title_is_reference_not_boundary",
 	}
 	_write_json(node_dir / "title_cover_manifest.json", manifest)
 	report = [
@@ -344,14 +465,16 @@ def build_title_cover(
 		f"- source_identity_label: {identity_label}",
 		f"- source_identity_basis: {identity_basis or ''}",
 		f"- translated_title_core: {title_core}",
-		f"- translated_title: {title}",
+		f"- translated_title: {video_title}",
+		f"- cover_title_text: {render_title}",
+		f"- series_episode: {str(episode_index is not None).lower()}",
 		f"- video_title: `{run_dir / 'video_title.txt'}`",
 		f"- cover_title_json: `{title_json}`",
 		f"- background: `{background}`",
 		f"- cover_4k: `{cover_out}`",
 		f"- frame_selection: {frame_meta['selection']}",
 		"- title_layout: center",
-		"- policy: source identity prefix plus reused YouTube title meaning; no lazy channel/source/program label; source video frame background; same Chinese title for video title and cover.",
+		"- policy: source identity prefix plus platform-native hook title; original YouTube title is a reference signal, not a mandatory translation boundary; no lazy channel/source/program label; source video frame background.",
 	]
 	(node_dir / "title_cover_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
 	return manifest
@@ -368,6 +491,18 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--frame", type=Path, help="Explicit source-video frame image to use as cover background.")
 	parser.add_argument("--frame-key", choices=["auto", "middle", "opening", "end"], default="auto")
 	parser.add_argument("--source-time-sec", type=float, help="Extract a frame from source.mp4 at this time if no frame QA image is used.")
+	parser.add_argument("--episode-index", type=int, help="Series episode index. Video title uses episode_manifest.json or --episode-title-template, while cover title omits the index by default.")
+	parser.add_argument(
+		"--episode-title-template",
+		default=DEFAULT_EPISODE_TITLE_TEMPLATE,
+		help="Template used only when episode_manifest.json does not already provide video_title. Fields: {series_title}, {episode_index}, {episode_label}, {episode_order_marker}, {subtitle}.",
+	)
+	parser.add_argument(
+		"--episode-order-marker-template",
+		default=DEFAULT_EPISODE_ORDER_MARKER_TEMPLATE,
+		help="Series-wide order marker template used only when episode_manifest.json does not provide one. Fields: {episode_index}, {episode_label}.",
+	)
+	parser.add_argument("--cover-include-episode-index", action="store_true", help="Render the episode index on the cover too. Default series behavior omits it.")
 	parser.add_argument("--force", action="store_true")
 	return parser.parse_args()
 
@@ -386,6 +521,10 @@ def main() -> None:
 		frame_key=args.frame_key,
 		source_time_sec=args.source_time_sec,
 		highlight_texts=args.highlight_texts,
+		episode_index=args.episode_index,
+		episode_title_template=args.episode_title_template,
+		episode_order_marker_template=args.episode_order_marker_template,
+		cover_include_episode_index=args.cover_include_episode_index,
 		force=args.force,
 	)
 	print(json.dumps({

@@ -212,6 +212,108 @@ def _parse_caption_timeline(path: Path) -> list[TimelineSegment]:
 	return turns
 
 
+def _plain_caption_text(text: str) -> str:
+	text = re.sub(r">>+", " ", text)
+	text = re.sub(r"\[[^\]]+\]", " ", text)
+	return re.sub(r"\s+", " ", text).strip()
+
+
+def _caption_event_time(item: dict[str, Any]) -> float | None:
+	text = str(item.get("text") or "").strip()
+	if ">>" not in text:
+		return None
+	start_value = item.get("start_sec", item.get("start"))
+	end_value = item.get("end_sec", item.get("end"))
+	if start_value is None or end_value is None:
+		return None
+	start = _parse_time(start_value)
+	end = _parse_time(end_value)
+	return start if text.startswith(">>") else end
+
+
+def _collapse_event_times(times: list[float], min_gap_sec: float = 1.5) -> list[float]:
+	collapsed: list[float] = []
+	for value in sorted(times):
+		if collapsed and value - collapsed[-1] <= min_gap_sec:
+			collapsed[-1] = min(collapsed[-1], value)
+			continue
+		collapsed.append(value)
+	return collapsed
+
+
+def _interval_text(raw_segments: list[dict[str, Any]], start: float, end: float, max_chars: int = 500) -> str:
+	parts: list[str] = []
+	seen: set[str] = set()
+	for item in raw_segments:
+		start_value = item.get("start_sec", item.get("start"))
+		end_value = item.get("end_sec", item.get("end"))
+		if start_value is None or end_value is None:
+			continue
+		seg_start = _parse_time(start_value)
+		seg_end = _parse_time(end_value)
+		midpoint = (seg_start + seg_end) / 2.0
+		if not (start <= midpoint <= end):
+			continue
+		text = _plain_caption_text(str(item.get("text") or ""))
+		if not text or text in seen:
+			continue
+		seen.add(text)
+		parts.append(text)
+		if sum(len(part) for part in parts) >= max_chars:
+			break
+	return " ".join(parts).strip()[:max_chars]
+
+
+def _parse_unlabeled_transcript_json_timeline(path: Path) -> list[TimelineSegment]:
+	if not path.exists():
+		return []
+	data = _read_json(path)
+	raw_segments = data.get("segments") if isinstance(data, dict) else data
+	if not isinstance(raw_segments, list):
+		return []
+	segments = [item for item in raw_segments if isinstance(item, dict)]
+	if not segments:
+		return []
+	duration = 0.0
+	for item in segments:
+		end_value = item.get("end_sec", item.get("end"))
+		if end_value is not None:
+			duration = max(duration, _parse_time(end_value))
+	if duration <= 0:
+		return []
+	event_times = _collapse_event_times([
+		event
+		for item in segments
+		for event in [_caption_event_time(item)]
+		if event is not None
+	])
+	if len(event_times) < 2:
+		return []
+	timeline: list[TimelineSegment] = []
+	current_speaker = "Speaker 0"
+	current_start = 0.0
+	for event_time in event_times:
+		if event_time - current_start >= 2.0:
+			timeline.append(TimelineSegment(
+				speaker=current_speaker,
+				start=current_start,
+				end=event_time,
+				text=_interval_text(segments, current_start, event_time),
+				source=f"{path}:unlabeled_caption_speaker_change_fallback",
+			))
+		current_speaker = "Speaker 1" if current_speaker == "Speaker 0" else "Speaker 0"
+		current_start = event_time
+	if duration - current_start >= 2.0:
+		timeline.append(TimelineSegment(
+			speaker=current_speaker,
+			start=current_start,
+			end=duration,
+			text=_interval_text(segments, current_start, duration),
+			source=f"{path}:unlabeled_caption_speaker_change_fallback",
+		))
+	return timeline
+
+
 def _discover_timeline(run_dir: Path, explicit: Path | None) -> tuple[str, list[TimelineSegment]]:
 	if explicit is not None:
 		segments = _load_timeline_json(explicit)
@@ -226,6 +328,10 @@ def _discover_timeline(run_dir: Path, explicit: Path | None) -> tuple[str, list[
 			segments = _load_timeline_json(candidate)
 			if segments:
 				return str(candidate), segments
+	transcript_json = run_dir / "02-source-capture" / "source_transcript.en.json"
+	segments = _parse_unlabeled_transcript_json_timeline(transcript_json)
+	if segments:
+		return f"{transcript_json}:unlabeled_caption_speaker_change_fallback", segments
 	caption_path = run_dir / "02-source-capture" / "source_transcript.en.txt"
 	segments = _parse_caption_timeline(caption_path)
 	if segments:
@@ -245,6 +351,8 @@ def _build_candidates(
 	result: dict[str, list[CandidateClip]] = {"Speaker 0": [], "Speaker 1": []}
 	for segment in sorted(segments, key=lambda item: (item.start, item.end)):
 		if segment.speaker not in result:
+			continue
+		if _reference_text_is_noisy(segment.text):
 			continue
 		safe_start = max(segment.start, skip_before_sec) + boundary_trim_sec
 		safe_end = segment.end - boundary_trim_sec
@@ -267,6 +375,19 @@ def _build_candidates(
 				break
 			pos = end + 2.0
 	return result
+
+
+def _reference_text_is_noisy(text: str) -> bool:
+	lower = text.lower()
+	return any(pattern in lower for pattern in (
+		"[music]",
+		"sponsor",
+		"patreon",
+		"my debt clinic",
+		"provision capital",
+		"visit ",
+		".com",
+	))
 
 
 def _parse_volume(stderr: str) -> dict[str, float | None]:

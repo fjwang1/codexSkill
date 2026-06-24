@@ -19,12 +19,30 @@ RESIDENT_BATCH_SCRIPT = Path("/Users/wangfangjia/.codex/skills/vibevoice-dialogu
 VIBEVOICE_PYTHON = Path("/Users/wangfangjia/code/VibeVoice/.venv/bin/python")
 RUNTIME_PYTHON = Path("/Users/wangfangjia/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3")
 
-TARGET_CHARS = 600
-MIN_SPLIT_CHARS = 350
-HARD_MAX_CHARS = 800
+TARGET_CHARS = 360
+MIN_SPLIT_CHARS = 180
+HARD_MAX_CHARS = 430
 DEFAULT_SPLIT_LONG_TURN_MAX_CHARS = 220
 MIN_SPEAKER_TURNS_PER_CHUNK = 0
 INTER_CHUNK_PAUSE_SEC = 0.5
+DROP_TINY_TTS_TURNS = {
+	"啊",
+	"呃",
+	"嗯",
+	"哦",
+	"喔",
+	"和",
+	"好",
+	"好的",
+	"是的",
+	"对",
+	"对的",
+	"哈哈",
+	"笑声",
+}
+DEFAULT_VIBEVOICE_DEVICE = "mps"
+DEFAULT_VIBEVOICE_TORCH_DTYPE = "auto"
+DEFAULT_VIBEVOICE_ATTN_IMPLEMENTATION = "auto"
 DEFAULT_SPEAKER_VOICES = {
 	"Speaker 0": "Xinran",
 	"Speaker 1": "BowenClean",
@@ -150,6 +168,25 @@ def _split_long_turns(turns: list[dict[str, Any]], max_chars: int) -> list[dict[
 	for index, turn in enumerate(result, start=1):
 		turn["turn_index"] = index
 	return result
+
+
+def _tiny_turn_key(text: str) -> str:
+	value = re.sub(r"[\s，,。.!！?？:：；;、“”\"'‘’（）()\[\]【】]+", "", text)
+	return value.strip()
+
+
+def _drop_tiny_tts_turns(turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+	kept: list[dict[str, Any]] = []
+	dropped: list[dict[str, Any]] = []
+	for turn in turns:
+		key = _tiny_turn_key(str(turn.get("text") or ""))
+		if key in DROP_TINY_TTS_TURNS or (len(key) == 1 and not key.isdigit()):
+			dropped.append(dict(turn))
+			continue
+		kept.append(turn)
+	for index, turn in enumerate(kept, start=1):
+		turn["turn_index"] = index
+	return kept, dropped
 
 
 def _speaker_counts(turns: list[dict[str, Any]]) -> dict[str, int]:
@@ -344,6 +381,18 @@ def _write_chunk_script(path: Path, turns: list[dict[str, Any]]) -> None:
 	path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _chunk_generation_state(final_wav: Path, raw_wav: Path, force: bool, force_chunk: bool) -> dict[str, bool]:
+	raw_exists = raw_wav.exists()
+	final_exists = final_wav.exists()
+	raw_newer_than_final = raw_exists and final_exists and raw_wav.stat().st_mtime > final_wav.stat().st_mtime + 0.001
+	needs_generation = force or force_chunk or (not final_exists and not raw_exists)
+	needs_postprocess = force or force_chunk or not final_exists or raw_newer_than_final
+	return {
+		"needs_generation": needs_generation,
+		"needs_postprocess": needs_postprocess,
+	}
+
+
 def _run_logged(cmd: list[str], cwd: Path, stdout_path: Path, stderr_path: Path, heartbeat_path: Path, label: str) -> int:
 	stdout_path.parent.mkdir(parents=True, exist_ok=True)
 	heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
@@ -415,11 +464,17 @@ def run_chunks(
 	device: str,
 	torch_dtype: str,
 	attn_implementation: str,
+	generation_seed: int | None,
 ) -> dict[str, Any]:
 	assert PREPARE_SCRIPT.exists()
 	assert RUN_SCRIPT.exists()
 	assert POSTPROCESS_SCRIPT.exists()
 	assert generation_runner in GENERATION_RUNNERS
+	if generation_runner == "legacy_per_chunk" and device != "cpu":
+		raise RuntimeError(
+			"legacy_per_chunk uses the older article VibeVoice script with locked CPU settings. "
+			"Use generation_runner=resident_batch for MPS, or pass --device cpu explicitly for this debug fallback."
+		)
 	if generation_runner == "resident_batch":
 		assert RESIDENT_BATCH_SCRIPT.exists(), f"Missing resident batch script: {RESIDENT_BATCH_SCRIPT}"
 		assert VIBEVOICE_PYTHON.exists(), f"Missing VibeVoice Python: {VIBEVOICE_PYTHON}"
@@ -428,6 +483,8 @@ def run_chunks(
 	speaker_voices, voice_prompt_manifest = _load_speaker_voices(run_dir, voice_prompt_policy)
 	turns = _parse_turns(script_path)
 	turns = _split_long_turns(turns, split_long_turn_max_chars)
+	turns, dropped_tiny_turns = _drop_tiny_tts_turns(turns)
+	assert turns, "No TTS turns remain after dropping tiny filler turns"
 	if split_long_turn_max_chars > 0:
 		max_turn_chars = max(int(turn["char_count"]) for turn in turns)
 		assert max_turn_chars <= split_long_turn_max_chars, (
@@ -470,6 +527,15 @@ def run_chunks(
 		"split_max_chars": split_max_chars if split_chunk_indices or split_all_chunks else None,
 		"split_long_turn_max_chars": split_long_turn_max_chars if split_long_turn_max_chars > 0 else None,
 		"default_split_long_turn_max_chars": DEFAULT_SPLIT_LONG_TURN_MAX_CHARS,
+		"dropped_tiny_tts_turn_count": len(dropped_tiny_turns),
+		"dropped_tiny_tts_turns": [
+			{
+				"source_turn_index": turn.get("source_turn_index", turn.get("turn_index")),
+				"speaker": turn.get("speaker"),
+				"text": turn.get("text"),
+			}
+			for turn in dropped_tiny_turns[:200]
+		],
 		"fixed_chunk_plan_json": str(fixed_chunk_plan_json) if fixed_chunk_plan_json is not None else None,
 		"force_chunk_ids": sorted(force_chunk_ids),
 		"speaker_voices": speaker_voices,
@@ -479,6 +545,7 @@ def run_chunks(
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
 		"vibevoice_attn_implementation": attn_implementation,
+		"vibevoice_generation_seed": generation_seed,
 		"chunk_count": len(chunk_plan),
 		"chunks": chunk_plan,
 	})
@@ -493,22 +560,24 @@ def run_chunks(
 		chunk_dir = chunks_dir / chunk_id
 		audio_dir = chunk_dir / "audio"
 		final_wav = audio_dir / "final_podcast.wav"
+		raw_wav = audio_dir / "vibevoice_raw" / "vibevoice_dialogue_generated.wav"
 		chunk_dir.mkdir(parents=True, exist_ok=True)
 		audio_dir.mkdir(parents=True, exist_ok=True)
 		_write_chunk_script(chunk_dir / "podcast_script.md", chunk_turns)
-		needs_generation = not final_wav.exists() or force or chunk_id in force_chunk_ids
+		state = _chunk_generation_state(final_wav, raw_wav, force, chunk_id in force_chunk_ids)
 		context = {
 			"chunk_id": chunk_id,
 			"chunk_turns": chunk_turns,
 			"chunk_dir": chunk_dir,
 			"audio_dir": audio_dir,
 			"final_wav": final_wav,
+			"raw_wav": raw_wav,
 			"vibevoice_mode": vibevoice_mode,
 			"speaker_names": speaker_names,
-			"needs_generation": needs_generation,
+			**state,
 		}
 		chunk_contexts.append(context)
-		if not needs_generation:
+		if not state["needs_generation"]:
 			continue
 		prepare_code = _run_quick(
 			[
@@ -532,6 +601,7 @@ def run_chunks(
 				"speaker_names": speaker_names,
 				"force": True,
 				"speaker_index_base": "auto",
+				"seed": generation_seed,
 			})
 			continue
 		run_cmd = [
@@ -556,19 +626,6 @@ def run_chunks(
 		)
 		(chunk_dir / "vibevoice.exitcode").write_text(str(run_code) + "\n", encoding="utf-8")
 		assert run_code == 0, f"VibeVoice failed for {chunk_id}; see {chunk_dir / 'vibevoice.stderr.txt'}"
-		post_code = _run_quick(
-			[
-				str(python_for_post),
-				str(POSTPROCESS_SCRIPT),
-				"--project-dir",
-				str(chunk_dir),
-				"--min-source-max-volume",
-				str(postprocess_min_source_max_volume),
-			],
-			chunk_dir / "postprocess.stdout.json",
-			chunk_dir / "postprocess.stderr.txt",
-		)
-		assert post_code == 0, f"postprocess failed for {chunk_id}; see {chunk_dir / 'postprocess.stderr.txt'}"
 
 	if resident_jobs:
 		resident_jobs_path = node_dir / "resident_batch_jobs.json"
@@ -608,23 +665,24 @@ def run_chunks(
 		)
 		(node_dir / "resident_batch.exitcode").write_text(str(resident_code) + "\n", encoding="utf-8")
 		assert resident_code == 0, f"Resident VibeVoice batch failed; see {node_dir / 'resident_batch.stderr.txt'}"
-		for context in chunk_contexts:
-			if not context["needs_generation"]:
-				continue
-			chunk_dir = context["chunk_dir"]
-			post_code = _run_quick(
-				[
-					str(python_for_post),
-					str(POSTPROCESS_SCRIPT),
-					"--project-dir",
-					str(chunk_dir),
-					"--min-source-max-volume",
-					str(postprocess_min_source_max_volume),
-				],
-				chunk_dir / "postprocess.stdout.json",
-				chunk_dir / "postprocess.stderr.txt",
-			)
-			assert post_code == 0, f"postprocess failed for {context['chunk_id']}; see {chunk_dir / 'postprocess.stderr.txt'}"
+
+	for context in chunk_contexts:
+		if not context["needs_postprocess"]:
+			continue
+		chunk_dir = context["chunk_dir"]
+		post_code = _run_quick(
+			[
+				str(python_for_post),
+				str(POSTPROCESS_SCRIPT),
+				"--project-dir",
+				str(chunk_dir),
+				"--min-source-max-volume",
+				str(postprocess_min_source_max_volume),
+			],
+			chunk_dir / "postprocess.stdout.json",
+			chunk_dir / "postprocess.stderr.txt",
+		)
+		assert post_code == 0, f"postprocess failed for {context['chunk_id']}; see {chunk_dir / 'postprocess.stderr.txt'}"
 
 	chunk_results: list[dict[str, Any]] = []
 	for context in chunk_contexts:
@@ -702,6 +760,7 @@ def run_chunks(
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
 		"vibevoice_attn_implementation": attn_implementation,
+		"vibevoice_generation_seed": generation_seed,
 		"resident_batch_report": "05-vibevoice-chunks/resident_batch_report.json" if generation_runner == "resident_batch" else None,
 		"script": "podcast_script.md",
 		"script_sha256": _sha256(run_dir / "podcast_script.md"),
@@ -769,6 +828,7 @@ def run_chunks(
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
 		"vibevoice_attn_implementation": attn_implementation,
+		"vibevoice_generation_seed": generation_seed,
 	}
 	_write_json(run_manifest_path, run_manifest)
 	return run_manifest["nodes"]["05-vibevoice-chunks"]
@@ -788,9 +848,10 @@ def main() -> int:
 	parser.add_argument("--fixed-chunk-plan-json", type=Path)
 	parser.add_argument("--postprocess-min-source-max-volume", type=float, default=-8.0)
 	parser.add_argument("--generation-runner", choices=sorted(GENERATION_RUNNERS), default="resident_batch")
-	parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default="cpu")
-	parser.add_argument("--torch-dtype", choices=("float32", "float16", "bfloat16"), default="float32")
-	parser.add_argument("--attn-implementation", default="eager")
+	parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=DEFAULT_VIBEVOICE_DEVICE, help="Default is mps. Use cpu only as an explicit fallback.")
+	parser.add_argument("--torch-dtype", choices=("auto", "float32", "float16", "bfloat16"), default=DEFAULT_VIBEVOICE_TORCH_DTYPE, help="Default auto resolves to float16 on mps and float32 on cpu in the resident runner.")
+	parser.add_argument("--attn-implementation", choices=("auto", "eager", "sdpa", "flash_attention_2"), default=DEFAULT_VIBEVOICE_ATTN_IMPLEMENTATION, help="Default auto resolves to sdpa on mps and eager on cpu in the resident runner.")
+	parser.add_argument("--generation-seed", type=int, default=42, help="Seed passed to resident VibeVoice jobs. Change only for targeted regeneration of bad chunks.")
 	parser.add_argument(
 		"--voice-prompt-policy",
 		choices=sorted(VOICE_PROMPT_POLICIES),
@@ -818,6 +879,7 @@ def main() -> int:
 		args.device,
 		args.torch_dtype,
 		args.attn_implementation,
+		args.generation_seed,
 	)
 	print(json.dumps(result, ensure_ascii=False, indent=2))
 	return 0

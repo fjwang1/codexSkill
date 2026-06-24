@@ -54,7 +54,7 @@ def _check_model(model_path: Path) -> None:
 
 
 def _resolve_torch_dtype(value: str | None, device: str) -> torch.dtype:
-	if value is not None:
+	if value is not None and value != "auto":
 		return {
 			"float32": torch.float32,
 			"float16": torch.float16,
@@ -62,17 +62,19 @@ def _resolve_torch_dtype(value: str | None, device: str) -> torch.dtype:
 		}[value]
 	if device == "cuda":
 		return torch.bfloat16
+	if device == "mps":
+		return torch.float16
 	return torch.float32
 
 
 def _resolve_attn_implementation(value: str | None, device: str) -> str:
-	if value:
+	if value and value != "auto":
 		return value
 	if device == "cuda":
 		return "flash_attention_2"
 	if device == "mps":
 		return "sdpa"
-	return "sdpa"
+	return "eager"
 
 
 def _load_vibevoice_modules(repo: Path) -> tuple[Any, Any, Any]:
@@ -467,9 +469,9 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--speaker-mode", default="dialogue", choices=("dialogue", "single", "auto"))
 	parser.add_argument("--speaker-names", nargs="+", default=None)
 	parser.add_argument("--single-speaker-id", default="1", choices=("0", "1"))
-	parser.add_argument("--device", default="cpu", choices=("cpu", "mps", "cuda"))
-	parser.add_argument("--torch-dtype", default="float32", choices=("float32", "float16", "bfloat16"))
-	parser.add_argument("--attn-implementation", default="eager")
+	parser.add_argument("--device", default="mps", choices=("cpu", "mps", "cuda"), help="Inference device. MPS is the default/recommended path on this Mac; use cpu as an explicit fallback.")
+	parser.add_argument("--torch-dtype", default="auto", choices=("auto", "float32", "float16", "bfloat16"))
+	parser.add_argument("--attn-implementation", default="auto", choices=("auto", "eager", "sdpa", "flash_attention_2"))
 	parser.add_argument("--cfg-scale", default=1.3, type=float)
 	parser.add_argument("--seed", default=42, type=int)
 	parser.set_defaults(do_sample=True)

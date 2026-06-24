@@ -175,6 +175,8 @@ def _load_existing_schedule(path: Path) -> dict[str, Any]:
 		"scheduled_publish_at": existing.get("scheduled_publish_at"),
 		"scheduled_publish_timezone": existing.get("scheduled_publish_timezone") or "Asia/Shanghai",
 		"schedule_source": existing.get("schedule_source"),
+		"series_episode_index": existing.get("series_episode_index"),
+		"series_episode_count": existing.get("series_episode_count"),
 	}
 
 
@@ -189,6 +191,7 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 	title = _read_text_optional(title_path).strip()
 	assert title, f"Empty {title_path}"
 	cover_title = _read_json_optional(run_dir / "cover/cover_title.json")
+	episode_manifest = _read_json_optional(run_dir / "episode_manifest.json")
 	source_metadata = _source_metadata(run_dir)
 	tags, tag_sources = _build_tags(run_dir, title, source_metadata, cover_title)
 	if len(tags) < 8:
@@ -217,6 +220,13 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 		"source_url": source_metadata.get("webpage_url") or source_metadata.get("original_url") or source_metadata.get("url"),
 		"source_identity_label": cover_title.get("source_identity_label"),
 		"translated_title_core": cover_title.get("translated_title_core"),
+		"series_episode": bool(episode_manifest),
+		"series_title_prefix": episode_manifest.get("series_title_prefix"),
+		"episode_index": episode_manifest.get("episode_index"),
+		"episode_count": episode_manifest.get("episode_count"),
+		"episode_label": episode_manifest.get("episode_label"),
+		"episode_subtitle": episode_manifest.get("episode_subtitle"),
+		"cover_title_text": cover_title.get("title_text"),
 		"topic_keywords": tags[4:],
 		"video_path": "video/final_video.mp4",
 		"cover_path": "cover/cover_4k.png",
@@ -230,6 +240,12 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 		"tags": tags,
 		"tag_sources": tag_sources,
 		"tag_count": len(tags),
+		"series_episode": bool(episode_manifest),
+		"episode_index": episode_manifest.get("episode_index"),
+		"episode_count": episode_manifest.get("episode_count"),
+		"scheduled_publish_at": metadata.get("scheduled_publish_at"),
+		"scheduled_publish_timezone": metadata.get("scheduled_publish_timezone"),
+		"schedule_source": metadata.get("schedule_source"),
 		"strategy": "Worldview China 外网播客视频标签：外网/海外视角定位优先，中国主题和具体议题其次；不使用外刊文章专属标签。",
 		"warnings": [] if len(tags) >= 8 else ["bilibili tags underfilled"],
 	}

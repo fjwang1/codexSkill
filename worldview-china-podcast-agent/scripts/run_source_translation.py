@@ -149,6 +149,75 @@ def _clean_space(text: str) -> str:
 	return text.strip()
 
 
+def _dedupe_repeated_caption_lines(text: str) -> str:
+	lines: list[str] = []
+	last_norm = ""
+	for raw_line in text.replace("\r", "\n").splitlines():
+		line = re.sub(r"[ \t]+", " ", raw_line).strip()
+		if not line:
+			continue
+		norm = line.lower()
+		if norm == last_norm:
+			continue
+		if lines and line.startswith(">>") == lines[-1].startswith(">>"):
+			if norm.startswith(last_norm) and len(norm) > len(last_norm):
+				lines[-1] = line
+				last_norm = norm
+				continue
+			if last_norm.startswith(norm):
+				continue
+		lines.append(line)
+		last_norm = norm
+	return "\n".join(lines)
+
+
+def _caption_tokens(text: str) -> list[str]:
+	return re.findall(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[^\w\s]", text, flags=re.UNICODE)
+
+
+def _normalize_caption_token(token: str) -> str:
+	return token.lower()
+
+
+def _join_caption_tokens(tokens: list[str]) -> str:
+	text = " ".join(tokens)
+	text = re.sub(r"\s+([,.;:!?%)\]\}])", r"\1", text)
+	text = re.sub(r"([(\[\{])\s+", r"\1", text)
+	text = re.sub(r"\s+(['’])\s+", r"\1", text)
+	return _clean_space(text)
+
+
+def _dedupe_rolling_caption_text(text: str, min_overlap_tokens: int = 2, max_overlap_tokens: int = 36) -> str:
+	tokens = _caption_tokens(text)
+	if len(tokens) < min_overlap_tokens * 2:
+		return _clean_space(text)
+	output: list[str] = []
+	index = 0
+	while index < len(tokens):
+		limit = min(max_overlap_tokens, len(output), len(tokens) - index)
+		overlap = 0
+		for size in range(limit, min_overlap_tokens - 1, -1):
+			left = [_normalize_caption_token(token) for token in output[-size:]]
+			right = [_normalize_caption_token(token) for token in tokens[index:index + size]]
+			if left == right:
+				overlap = size
+				break
+		if overlap:
+			index += overlap
+			continue
+		output.append(tokens[index])
+		index += 1
+	return _join_caption_tokens(output)
+
+
+def _clean_source_caption_text(text: str) -> str:
+	text = text.replace(">>", " ")
+	text = _clean_space(text)
+	if not text:
+		return ""
+	return _dedupe_rolling_caption_text(text)
+
+
 def _fix_source_text(text: str) -> str:
 	value = text
 	for pattern, replacement in SOURCE_FIXES:
@@ -185,6 +254,66 @@ def _segment_offsets(transcript: dict[str, Any]) -> list[dict[str, Any]]:
 		})
 		cursor = end + 1
 	return offsets
+
+
+def _source_duration_sec(run_dir: Path) -> float:
+	candidates = [
+		run_dir / "02-source-capture/youtube-media/probe.json",
+		run_dir / "02-source-capture/youtube-media/metadata.json",
+		run_dir / "02-source-capture/source_metadata.json",
+	]
+	for path in candidates:
+		if not path.exists():
+			continue
+		try:
+			data = _read_json(path)
+		except Exception:
+			continue
+		values = [
+			data.get("duration_seconds"),
+			data.get("duration"),
+			(data.get("format") or {}).get("duration") if isinstance(data.get("format"), dict) else None,
+		]
+		for value in values:
+			try:
+				duration = float(value)
+			except (TypeError, ValueError):
+				continue
+			if duration > 0:
+				return duration
+	return 0.0
+
+
+def _transcript_text_char_count(transcript: dict[str, Any]) -> int:
+	payload = transcript.get("transcript") if isinstance(transcript.get("transcript"), dict) else transcript
+	if not isinstance(payload, dict):
+		return 0
+	text = str(payload.get("text") or "")
+	segments = payload.get("segments")
+	if isinstance(segments, list):
+		return sum(len(str(item.get("text") or "")) for item in segments if isinstance(item, dict))
+	return len(text)
+
+
+def _load_source_transcript(run_dir: Path) -> tuple[dict[str, Any], Path, str]:
+	source_dir = run_dir / "02-source-capture"
+	json_path = source_dir / "source_transcript.en.json"
+	txt_path = source_dir / "source_transcript.en.txt"
+	transcript = _read_json(json_path)
+	json_chars = _transcript_text_char_count(transcript)
+	if txt_path.exists():
+		plain_text = txt_path.read_text(encoding="utf-8", errors="replace").strip()
+		if plain_text and len(plain_text) > max(1000, int(json_chars * 1.2)):
+			return {
+				"schema_version": "worldview-china-plain-source-transcript.v1",
+				"source": str(txt_path),
+				"source_duration_sec": _source_duration_sec(run_dir),
+				"transcript": {
+					"text": plain_text,
+					"plain_text_no_timing": True,
+				},
+			}, txt_path, "plain_txt_preferred_over_shorter_json"
+	return transcript, json_path, "json"
 
 
 def _time_for_offsets(offsets: list[dict[str, Any]], start_offset: int, end_offset: int) -> tuple[float, float]:
@@ -253,6 +382,16 @@ def _sentence_split_zh(text: str, max_chars: int) -> list[str]:
 
 
 def _parse_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+	payload = transcript.get("transcript") if isinstance(transcript.get("transcript"), dict) else {}
+	if payload.get("plain_text_no_timing"):
+		return _dedupe_adjacent_source_turns(_parse_plain_source_turns(
+			str(payload.get("text") or ""),
+			float(transcript.get("source_duration_sec") or 0.0),
+		))
+	segmented_turns = _parse_segmented_source_turns(transcript)
+	if segmented_turns:
+		return _dedupe_adjacent_source_turns(segmented_turns)
+
 	text = transcript["transcript"]["text"]
 	offsets = _segment_offsets(transcript)
 	markers = list(re.finditer(r">>\s*", text))
@@ -269,7 +408,8 @@ def _parse_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
 
 	turns: list[dict[str, Any]] = []
 	for raw_start, raw_end, speaker in bounds:
-		source_text = _clean_space(text[raw_start:raw_end].replace(">>", ""))
+		raw_source_text = _clean_space(text[raw_start:raw_end].replace(">>", ""))
+		source_text = _clean_source_caption_text(raw_source_text)
 		if len(source_text) < 3:
 			continue
 		fixed = _fix_source_text(source_text)
@@ -286,6 +426,141 @@ def _parse_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
 				"source_start": _seconds_to_stamp(piece_start),
 				"source_end": _seconds_to_stamp(piece_end),
 				"source_text": piece,
+				"source_text_raw_char_count": len(raw_source_text) if piece_index == 0 else 0,
+				"source_text_cleaned_char_count": len(source_text) if piece_index == 0 else 0,
+			})
+	return _dedupe_adjacent_source_turns(turns)
+
+
+def _source_compare_text(text: str) -> str:
+	return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _dedupe_adjacent_source_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	result: list[dict[str, Any]] = []
+	for turn in turns:
+		if not result:
+			result.append(turn)
+			continue
+		prev = result[-1]
+		prev_norm = _source_compare_text(str(prev.get("source_text") or ""))
+		current_norm = _source_compare_text(str(turn.get("source_text") or ""))
+		if not prev_norm or not current_norm:
+			result.append(turn)
+			continue
+		if prev_norm == current_norm:
+			continue
+		prev_is_short_prefix = current_norm.startswith(prev_norm) and len(prev_norm) <= max(80, int(len(current_norm) * 0.72))
+		current_is_short_prefix = prev_norm.startswith(current_norm) and len(current_norm) <= max(80, int(len(prev_norm) * 0.72))
+		if prev_is_short_prefix:
+			merged = dict(turn)
+			for key in ("source_start_sec", "source_start"):
+				merged[key] = prev.get(key, merged.get(key))
+			result[-1] = merged
+			continue
+		if current_is_short_prefix:
+			continue
+		result.append(turn)
+	for index, turn in enumerate(result, start=1):
+		turn["source_turn_index"] = index
+	return result
+
+
+def _parse_plain_source_turns(text: str, duration_sec: float) -> list[dict[str, Any]]:
+	text = _dedupe_repeated_caption_lines(text)
+	text = _clean_space(text)
+	if not text:
+		return []
+	markers = list(re.finditer(r">>\s*", text))
+	bounds: list[tuple[int, int, str]] = []
+	if markers:
+		bounds.append((0, markers[0].start(), "Speaker 0"))
+		speaker = "Speaker 1"
+		for index, marker in enumerate(markers):
+			next_start = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+			bounds.append((marker.end(), next_start, speaker))
+			speaker = "Speaker 0" if speaker == "Speaker 1" else "Speaker 1"
+	else:
+		bounds.append((0, len(text), "Speaker 0"))
+
+	turns: list[dict[str, Any]] = []
+	total_chars = max(1, len(text))
+	for raw_start, raw_end, speaker in bounds:
+		raw_source_text = _clean_space(text[raw_start:raw_end].replace(">>", ""))
+		source_text = _clean_source_caption_text(raw_source_text)
+		if len(source_text) < 3:
+			continue
+		fixed = _fix_source_text(source_text)
+		start_sec = duration_sec * raw_start / total_chars if duration_sec > 0 else 0.0
+		end_sec = duration_sec * raw_end / total_chars if duration_sec > 0 else start_sec
+		pieces = _sentence_split_en(fixed, TRANSLATE_MAX_CHARS)
+		for piece_index, piece in enumerate(pieces):
+			piece_start = start_sec + (end_sec - start_sec) * piece_index / max(1, len(pieces))
+			piece_end = start_sec + (end_sec - start_sec) * (piece_index + 1) / max(1, len(pieces))
+			turns.append({
+				"source_turn_index": len(turns) + 1,
+				"speaker": speaker,
+				"source_start_sec": round(piece_start, 3),
+				"source_end_sec": round(piece_end, 3),
+				"source_start": _seconds_to_stamp(piece_start),
+				"source_end": _seconds_to_stamp(piece_end),
+				"source_text": piece,
+				"source_text_raw_char_count": len(raw_source_text) if piece_index == 0 else 0,
+				"source_text_cleaned_char_count": len(source_text) if piece_index == 0 else 0,
+			})
+	return turns
+
+
+def _parse_segmented_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+	payload = transcript.get("transcript") if isinstance(transcript.get("transcript"), dict) else transcript
+	raw_segments = payload.get("segments") if isinstance(payload, dict) else None
+	if not isinstance(raw_segments, list):
+		return []
+	turns: list[dict[str, Any]] = []
+	current_speaker = "Speaker 0"
+	for item in raw_segments:
+		if not isinstance(item, dict):
+			continue
+		raw_text = _clean_space(str(item.get("text") or ""))
+		if not raw_text:
+			continue
+		speaker = str(item.get("speaker") or "").strip()
+		if speaker in {"0", "1"}:
+			speaker = f"Speaker {speaker}"
+		if speaker not in {"Speaker 0", "Speaker 1"}:
+			if raw_text.lstrip().startswith(">>"):
+				current_speaker = "Speaker 1" if current_speaker == "Speaker 0" else "Speaker 0"
+			speaker = current_speaker
+		else:
+			current_speaker = speaker
+		source_text = _clean_source_caption_text(raw_text)
+		if len(source_text) < 3:
+			continue
+		fixed = _fix_source_text(source_text)
+		start_value = item.get("start_sec", item.get("start", 0.0))
+		start_sec = float(start_value or 0.0)
+		if item.get("end_sec") is not None:
+			end_sec = float(item["end_sec"])
+		elif item.get("end") is not None:
+			end_sec = float(item["end"])
+		else:
+			end_sec = start_sec + float(item.get("duration") or 0.0)
+		if end_sec <= start_sec:
+			end_sec = start_sec
+		pieces = _sentence_split_en(fixed, TRANSLATE_MAX_CHARS)
+		for piece_index, piece in enumerate(pieces):
+			piece_start = start_sec + (end_sec - start_sec) * piece_index / max(1, len(pieces))
+			piece_end = start_sec + (end_sec - start_sec) * (piece_index + 1) / max(1, len(pieces))
+			turns.append({
+				"source_turn_index": len(turns) + 1,
+				"speaker": speaker,
+				"source_start_sec": round(piece_start, 3),
+				"source_end_sec": round(piece_end, 3),
+				"source_start": _seconds_to_stamp(piece_start),
+				"source_end": _seconds_to_stamp(piece_end),
+				"source_text": piece,
+				"source_text_raw_char_count": len(raw_text) if piece_index == 0 else 0,
+				"source_text_cleaned_char_count": len(source_text) if piece_index == 0 else 0,
 			})
 	return turns
 
@@ -345,6 +620,13 @@ def _smaller_translation_parts(text: str) -> list[str]:
 	if cut < 80:
 		cut = mid
 	return [text[:cut].strip(), text[cut:].strip()]
+
+
+def _source_text_count(turn: dict[str, Any], key: str) -> int:
+	value = turn.get(key)
+	if value is None:
+		return len(str(turn.get("source_text") or ""))
+	return int(value)
 
 
 def _expand_translated_turns(source_turns: list[dict[str, Any]], translated: list[str]) -> list[dict[str, Any]]:
@@ -437,14 +719,15 @@ def run_translation(run_dir: Path, sleep_sec: float) -> dict[str, Any]:
 	source_dir = run_dir / "02-source-capture"
 	output_dir = run_dir / "03-source-translation"
 	output_dir.mkdir(parents=True, exist_ok=True)
-	transcript_path = source_dir / "source_transcript.en.json"
 	metadata_path = source_dir / "source_metadata.json"
-	transcript = _read_json(transcript_path)
+	transcript, transcript_path, transcript_input_mode = _load_source_transcript(run_dir)
 	metadata = _read_json(metadata_path)
 	cache_path = output_dir / "translation_cache.json"
 	cache = _read_json(cache_path) if cache_path.exists() else {}
 	translator = _translator()
 	source_turns = _parse_source_turns(transcript)
+	raw_source_chars = sum(_source_text_count(turn, "source_text_raw_char_count") for turn in source_turns)
+	cleaned_source_chars = sum(_source_text_count(turn, "source_text_cleaned_char_count") for turn in source_turns)
 	translated = []
 	for index, turn in enumerate(source_turns, start=1):
 		translated.append(_translate_text(translator, str(turn["source_text"]), cache, sleep_sec))
@@ -473,7 +756,14 @@ def run_translation(run_dir: Path, sleep_sec: float) -> dict[str, Any]:
 		"schema_version": "worldview-china-source-translation.v1",
 		"content_coverage": "full_translation",
 		"source_transcript": str(transcript_path),
+		"source_transcript_input_mode": transcript_input_mode,
 		"translation_method": "GoogleTranslator en->zh-CN with source ASR cleanup and no summarization",
+		"source_caption_cleanup": {
+			"method": "rolling_caption_suffix_prefix_dedupe",
+			"raw_source_chars": raw_source_chars,
+			"cleaned_source_chars": cleaned_source_chars,
+			"removed_source_chars": max(0, raw_source_chars - cleaned_source_chars),
+		},
 		"segments": segments,
 	}
 	_write_json(output_dir / "source_transcript.zh.json", translation_json)
@@ -489,7 +779,13 @@ def run_translation(run_dir: Path, sleep_sec: float) -> dict[str, Any]:
 		"",
 		"- status: PASS",
 		"- content_coverage: full_translation",
+		f"- source_transcript: {transcript_path}",
+		f"- source_transcript_input_mode: {transcript_input_mode}",
 		"- method: source ASR cleanup + GoogleTranslator en->zh-CN + Chinese turn splitting",
+		"- source_caption_cleanup: rolling_caption_suffix_prefix_dedupe",
+		f"- raw_source_chars: {raw_source_chars}",
+		f"- cleaned_source_chars: {cleaned_source_chars}",
+		f"- removed_source_chars: {max(0, raw_source_chars - cleaned_source_chars)}",
 		f"- source_turns: {len(source_turns)}",
 		f"- translated_segments: {len(segments)}",
 		f"- chapter_count: {len(chapters)}",

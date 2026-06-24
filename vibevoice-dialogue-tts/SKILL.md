@@ -14,8 +14,11 @@ Use this skill to generate single-speaker or dialogue audio with the local commu
 - Repo: `/Users/wangfangjia/code/VibeVoice`
 - Python: `/Users/wangfangjia/code/VibeVoice/.venv/bin/python`
 - Model: `/Volumes/GT34/AI/code-models/VibeVoice-1.5B-modelscope-clean`
-- Stable device path: `cpu`
-- Stable dtype/attention: `float32`, `eager`
+- Default/recommended device path: `mps`
+- Default MPS dtype/attention: `float16`, `sdpa`
+- MPS environment: set `PYTORCH_ENABLE_MPS_FALLBACK=1` and `TOKENIZERS_PARALLELISM=false`
+- Stable fallback device path: `cpu`
+- CPU fallback dtype/attention: `float32`, `eager`
 - Voices:
   - `Speaker 0` -> `Xinran` -> `demo/voices/zh-Xinran_woman.wav`
   - `Speaker 1` -> `BowenClean` -> `demo/voices/zh-BowenClean_man.wav`
@@ -50,7 +53,7 @@ Next single host line.
 
 When plain text is used, the wrapper writes a temporary `Speaker 1:` tagged copy before calling `demo/inference_from_file.py`, because VibeVoice's processor treats plain text as `Speaker 1` but the file inference demo requires explicit speaker tags.
 
-If the user provides a DOCX or Markdown script, first extract only the requested portion and write a clean `.txt` file in the format above. Keep turns reasonably short. For Chinese production audio on this Mac, split any single `Speaker N:` turn longer than about `220` Chinese characters at natural sentence or clause boundaries before calling VibeVoice. Do not send `400+` character monologues as one speaker turn; they can make CPU generation run for a long time without writing any WAV or report until completion.
+If the user provides a DOCX or Markdown script, first extract only the requested portion and write a clean `.txt` file in the format above. Keep turns reasonably short. For Chinese production audio on this Mac, split any single `Speaker N:` turn longer than about `220` Chinese characters at natural sentence or clause boundaries before calling VibeVoice. Do not send `400+` character monologues as one speaker turn; they can make CPU generation run for a long time without writing any WAV or report until completion. For long-form production, keep chunks around `350-650` Chinese spoken characters, hard max about `800`, unless the user explicitly wants a stress test.
 
 ## Recommended Command
 
@@ -82,17 +85,36 @@ For single-host long-form audio, use exactly one speaker:
   --speaker-names Xinran
 ```
 
-The wrapper checks the local paths and runs:
+The wrapper checks the local paths and runs the recommended MPS path by default:
 
 - `demo/inference_from_file.py`
 - `--speaker_names Xinran BowenClean` in dialogue mode, or `--speaker_names Xinran` in single mode
-- `--device cpu`
-- `--attn_implementation eager`
-- `--torch_dtype float32`
+- `--device mps`
+- `--attn_implementation sdpa`
+- `--torch_dtype float16`
 - `--cfg_scale 1.3`
 - `--do_sample --temperature 0.9 --top_p 0.9`
 - `--max_length_times 1.6`
 - default `--ddpm_steps 10`
+
+The wrapper's `--torch-dtype auto` and `--attn-implementation auto` resolve by device:
+
+- `cpu` -> `float32`, `eager`
+- `mps` -> `float16`, `sdpa`
+- `cuda` -> `bfloat16`, `flash_attention_2`
+
+To force the CPU fallback path:
+
+```bash
+/Users/wangfangjia/.codex/skills/vibevoice-dialogue-tts/scripts/run_vibevoice_dialogue.py \
+  --txt-path /absolute/path/dialogue.txt \
+  --output-dir /absolute/path/vibevoice_outputs \
+  --speaker-mode dialogue \
+  --speaker-names Xinran BowenClean \
+  --device cpu
+```
+
+CPU fallback resolves to `float32` + `eager`. Use it when MPS is unavailable or produces invalid audio, but do not prefer it for routine production on this Mac.
 
 Do not lower `ddpm_steps` or heavily reduce `max_length_times` for anything that will be judged as publishable audio. Low-step / low-length experiments are acceptable only for smoke tests, and should be labeled as such.
 
@@ -107,11 +129,10 @@ For multi-chunk production, prefer the resident batch runner so VibeVoice loads 
   /Users/wangfangjia/.codex/skills/vibevoice-dialogue-tts/scripts/run_vibevoice_resident_batch.py \
   --jobs-json /absolute/path/vibevoice_jobs.json \
   --report-json /absolute/path/vibevoice_batch_report.json \
-  --device cpu \
-  --torch-dtype float32 \
-  --attn-implementation eager \
   --no-progress-bar
 ```
+
+The resident runner defaults to `--device mps` and auto-selects `float16` + `sdpa`. To force the CPU fallback, add `--device cpu`; that auto-selects `float32` + `eager`.
 
 `vibevoice_jobs.json` must contain:
 
@@ -153,7 +174,7 @@ If there is no meaningful resource contention and a production VibeVoice process
 4. If the estimated completion time is impractical for the current automation window, stop that process and retry once with the resident batch runner after fixing input shape.
 5. If resident batch fails to produce the first chunk WAV after a realistic wait for the current chunk length without a competing heavy job, retry the same first chunk once. Do not use a fixed 20-minute cutoff for `900+` character chunks or chunks with long turns; first split them smaller.
 6. If the repeated first-chunk attempt also produces no WAV after long-turn splitting and a realistic wait, stop and report `AUDIO_GENERATION_VIBEVOICE_TIMEOUT`.
-7. Do not switch to Qwen/Qwen3-TTS, MPS, lower `ddpm_steps`, or heavily reduce `max_length_times` unless the user explicitly approves a different quality/backend policy.
+7. Do not switch to Qwen/Qwen3-TTS, lower `ddpm_steps`, or heavily reduce `max_length_times` unless the user explicitly approves a different quality/backend policy. MPS is the default backend; CPU is an explicit fallback, not the first retry choice on this Mac.
 
 Always distinguish:
 
@@ -177,13 +198,24 @@ ffmpeg -hide_banner -i /absolute/path/output.wav -af volumedetect -f null - 2>&1
 ffmpeg -hide_banner -i /absolute/path/output.wav -af silencedetect=noise=-45dB:d=2 -f null - 2>&1 | rg 'silence_(start|end)' || true
 ```
 
-Report the final WAV path, duration, sample rate, channels, and any warning. Mention that CPU is slow but stable if runtime matters.
+Report the final WAV path, duration, sample rate, channels, and any warning. Mention that MPS is the recommended fast path and CPU is a slower fallback if runtime matters.
 
 ## Known Behavior
 
 - Clean model hashes were verified for `/Volumes/GT34/AI/code-models/VibeVoice-1.5B-modelscope-clean`.
-- On this Mac, `mps` with `float16` produced NaN probabilities, and `mps` with `float32` stalled in testing.
+- Earlier MPS attempts failed: `mps` with `float16` produced NaN probabilities, and `mps` with `float32` stalled in testing. On 2026-06-24, with torch 2.12.0 on this Mac, `mps` + `float16` + `sdpa` completed sampled VibeVoice smoke tests and real article chunks without NaN.
+- `mps` + `float32` + `sdpa` can load and enter generation, but it is impractically slow here: a 3-turn smoke ran about 60-80 seconds per token and was stopped.
+- `mps` + `float16` + `sdpa` smoke results on 2026-06-24:
+  - tiny 1-turn, `ddpm_steps=10`: 4.27s WAV, 13.28s generation, RTF 3.11x, mean/max volume -26.5/-7.6 dB.
+  - 3-turn dialogue, `ddpm_steps=10`: 28.80s WAV, 81.51s generation, RTF 2.83x, mean/max volume -24.9/-5.5 dB, no >2s silence.
+- `mps` + `float16` + `sdpa` real article result on 2026-06-24:
+  - Prabowo resource nationalism single-speaker Chinese translation, `Xinran`, `ddpm_steps=10`, `max_length_times=1.6`, chunks of 634 and 650 spoken Chinese characters.
+  - `chunk_01`: 141.20s WAV, mean/max volume -25.0/-7.4 dB, no >2s silence.
+  - `chunk_02`: 130.93s WAV, mean/max volume -25.4/-7.5 dB, no >2s silence.
+  - Combined first two chunks: 272.13s WAV, mean/max volume -25.2/-7.4 dB, no >2s silence.
+  - Observed wall time was materially better than CPU on the same first chunk; use MPS as default/recommended backend.
 - CPU `float32` generated a 212.8 second two-speaker WAV from the first two chapters successfully.
+- CPU `float32`/`eager` fallback can still work, but it is not the preferred path on this Mac. On 2026-06-24, the same 634-character Prabowo `chunk_01` ran for more than 21 minutes without writing a WAV before being stopped by the user; MPS had already produced a usable 141.20s WAV for that chunk.
 - That successful reference used a substantive script: 21 turns, about 1169 Chinese characters, and 212.8 seconds of output. Ultra-short 6-turn scripts have produced low-level, raspy, dragged, or mispronounced audio on the same model. Prefer realistic context length when judging VibeVoice quality.
 - 2026-06-22 Worldview podcast run showed a different failure mode: a 916-character chunk with a single 458-character speaker turn ran CPU `model.generate(...)` for over 20 minutes without writing a WAV/report. The fix is not to abandon VibeVoice; split long same-speaker turns first and keep production chunks around `350-600` Chinese characters, hard max `800`, max single turn about `220`.
 - If the raw VibeVoice wav is suspiciously quiet, for example `mean_volume < -30 dB` or `max_volume < -8 dB`, rerun generation instead of rescuing it with loudness normalization; normalization will amplify generation artifacts.

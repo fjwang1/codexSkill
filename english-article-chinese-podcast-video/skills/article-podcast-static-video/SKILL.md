@@ -110,7 +110,7 @@ qa_report.md
 - 字幕硬烧录专用字体必须使用 `Noto Sans CJK SC Bold`，字体文件为 `/Volumes/GT34/Downloads/podcast_visual_style_prototypes/fonts/NotoSansCJKsc-Bold.otf`，对应 ASS `Fontname=NotoSansCJKsc-Bold`。这条只适用于字幕 overlay 和 ASS 旁路；不要改封面字体，封面仍由 `bilibili-podcast-cover` 的固定封面字体负责。
 - 4K 固定字号为 96 px，白字、3 px 半透明深灰细描边、轻柔投影、右倾 `faux_italic_shear=0.10`，默认一行；不要主动换成两行，也不要为长句自动缩小字号。Pillow 硬字幕 renderer 必须给首尾 glyph 留足左右防裁切边距：`glyph_edge_pad_px >= 48` 且 `shear_edge_pad_px >= 16`，默认实现使用 `glyph_edge_pad_px=72`、`shear_edge_pad_px=24`。斜体/shear 变换必须使用正向 padding，不能把首字采样到临时图层外。
 - 4K 硬字幕默认使用轻微字距，`subtitle_manifest.style.letter_spacing_px=6`；本地烧录 overlay 必须实际按这个 tracking 绘制，`render_manifest.json` 为每个字幕 segment 记录 `subtitle_layout.letter_spacing_px`。如果字距导致单行过宽，先拆 cue 轮播，不要缩成拥挤字距或缩小字号。
-- 视频合成器把硬字幕文字放在常见播放器进度条和控制条上方，实际文字必须满足 `1808 <= top_y <= 1878` 且 `bottom_y <= 1948`。这是字幕渲染规则，不是章节视觉必须预留固定安全区的设计规则。
+- 视频合成器把硬字幕文字放在常见播放器进度条和控制条上方，实际文字必须满足 `1904 <= top_y <= 1974` 且 `bottom_y <= 2044`。这是字幕渲染规则，不是章节视觉必须预留固定安全区的设计规则；相对旧版位置下移了一个 96 px 字体高度。
 - 视频合成必须在 `render_manifest.json` 为每个带字幕 segment 记录 `subtitle_layout.top_y/bottom_y/font_size_px/line_count`，用于 QA 验收。
 - 字幕不得有黑底框、半透明背景条、粗黑描边、阴影色块或发光色块；只允许 3 px 以内半透明深灰细描边和轻柔投影增强可读性。
 - 字幕位置偏下但必须在播放器控制条上方，避免压到封面/章节画面的主体文字。
@@ -219,13 +219,13 @@ render_manifest.json records audio_video_check
 render_manifest.json audio_video_check.status is PASS
 render_manifest.json audio_video_check.sample_correlation >= 0.995
 render_manifest.json records playback_speed_factor=1.0
-render_manifest.json records subtitle_layout_rule.subtitle_block_top_min_y=1808, subtitle_block_top_max_y=1878, subtitle_block_bottom_max_y=1948
+render_manifest.json records subtitle_layout_rule.subtitle_block_top_min_y=1904, subtitle_block_top_max_y=1974, subtitle_block_bottom_max_y=2044
 render_manifest.json records subtitle_layout_rule.glyph_edge_pad_px >= 48 and subtitle_layout_rule.shear_edge_pad_px >= 16
 render_manifest.json records subtitle_layout_rule.shear_transform=forward_x_plus_shear_y_with_positive_padding
 render_manifest.json records subtitle_layout_rule.font_family=NotoSansCJKsc-Bold
 render_manifest.json records subtitle_layout_rule.font_file=/Volumes/GT34/Downloads/podcast_visual_style_prototypes/fonts/NotoSansCJKsc-Bold.otf
 render_manifest.json records subtitle_layout_rule.overlap_policy=latest_started_cue_visible
-every burned subtitle segment has 1808 <= subtitle_layout.top_y <= 1878 and subtitle_layout.bottom_y <= 1948
+every burned subtitle segment has 1904 <= subtitle_layout.top_y <= 1974 and subtitle_layout.bottom_y <= 2044
 every burned subtitle segment records glyph_edge_pad_px >= 48 and shear_edge_pad_px >= 16 so the first and last glyph are not clipped
 every burned subtitle segment has subtitle_layout.line_count <= 1
 video/final_subtitles.srt exists
@@ -325,7 +325,7 @@ final_video.mp4, cover_4k.png, final_subtitles.srt, video_title.txt, publish_inf
 video/visual_base_1x.mp4 exists
 render_manifest.json records visual_transition.effect=wipe_with_shadow and visual_timeline_units
 final_video.mp4 is 1.0x and sidecar subtitles match the final normal-speed timeline
-burned subtitle text top_y is 1808..1878 and bottom_y <= 1948
+burned subtitle text top_y is 1904..1974 and bottom_y <= 2044
 burned subtitles are one visible line by default; long sentences are split into shorter cues
 subtitle text has no displayed sentence periods
 if publication is visible, video_title.txt uses 《<中文来源名>》：前缀 and does not keep raw English publication names

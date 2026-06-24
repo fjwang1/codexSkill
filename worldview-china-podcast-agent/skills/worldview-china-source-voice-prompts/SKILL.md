@@ -64,7 +64,8 @@ The script discovers timeline evidence in this order:
 2. `<run_dir>/02b-source-voice-prompts/source_speaker_timeline.json`.
 3. `<run_dir>/02-source-capture/source_speaker_timeline.json`.
 4. `<run_dir>/03-source-translation/source_transcript.zh.json`, useful when validating on an already translated run.
-5. `<run_dir>/02-source-capture/source_transcript.en.txt` parsed with `>>` speaker-change markers.
+5. `<run_dir>/02-source-capture/source_transcript.en.json` parsed from unlabeled caption segments with `>>` speaker-change markers. This is a lower-confidence fallback for YouTube auto captions that do not expose speaker labels.
+6. `<run_dir>/02-source-capture/source_transcript.en.txt` parsed with timestamped `>>` speaker-change markers.
 
 Formal production should prefer a timeline created immediately after source capture, before translation. Using `03-source-translation/source_transcript.zh.json` is acceptable for backfilling and validation on existing runs, but do not make the production node depend on translation.
 

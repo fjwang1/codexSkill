@@ -48,9 +48,9 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--speaker-mode", default="dialogue", choices=("dialogue", "single", "auto"), help="VibeVoice input mode. Default dialogue preserves the original two-speaker wrapper behavior.")
 	parser.add_argument("--speaker-names", nargs="+", default=None, help="VibeVoice speaker names. Dialogue mode requires two names; single mode uses one name.")
 	parser.add_argument("--single-speaker-id", default="1", choices=("0", "1"), help="Speaker id used when single mode receives plain text without Speaker tags. VibeVoice's processor treats plain text as Speaker 1.")
-	parser.add_argument("--device", default="cpu", choices=("cpu", "mps", "cuda"), help="Inference device. CPU is stable on this Mac.")
-	parser.add_argument("--torch-dtype", default="float32", choices=("float32", "float16", "bfloat16"), help="Torch dtype.")
-	parser.add_argument("--attn-implementation", default="eager", help="Attention implementation.")
+	parser.add_argument("--device", default="mps", choices=("cpu", "mps", "cuda"), help="Inference device. MPS is the default/recommended path on this Mac; use cpu as an explicit fallback.")
+	parser.add_argument("--torch-dtype", default="auto", choices=("auto", "float32", "float16", "bfloat16"), help="Torch dtype. auto => cpu/float32, mps/float16, cuda/bfloat16.")
+	parser.add_argument("--attn-implementation", default="auto", choices=("auto", "eager", "sdpa", "flash_attention_2"), help="Attention implementation. auto => cpu/eager, mps/sdpa, cuda/flash_attention_2.")
 	parser.add_argument("--cfg-scale", default="1.3", help="Classifier-free guidance scale.")
 	parser.add_argument("--seed", default="42", help="Random seed.")
 	parser.add_argument("--temperature", default="0.9", help="Sampling temperature.")
@@ -89,6 +89,26 @@ def _resolve_speaker_names(mode: str, provided: list[str] | None) -> list[str]:
 	else:
 		assert len(names) == 2, f"dialogue mode requires exactly two --speaker-names values, got {len(names)}"
 	return names
+
+
+def _resolve_torch_dtype_arg(value: str, device: str) -> str:
+	if value != "auto":
+		return value
+	if device == "cuda":
+		return "bfloat16"
+	if device == "mps":
+		return "float16"
+	return "float32"
+
+
+def _resolve_attn_implementation_arg(value: str, device: str) -> str:
+	if value != "auto":
+		return value
+	if device == "cuda":
+		return "flash_attention_2"
+	if device == "mps":
+		return "sdpa"
+	return "eager"
 
 
 def _write_single_speaker_tagged_copy(source: Path, output_dir: Path, text: str, speaker_id: str) -> Path:
@@ -132,6 +152,8 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 def _build_command(args: argparse.Namespace, prepared_txt_path: Path, speaker_names: list[str]) -> list[str]:
 	python_bin = args.repo / ".venv/bin/python"
+	torch_dtype = _resolve_torch_dtype_arg(args.torch_dtype, args.device)
+	attn_implementation = _resolve_attn_implementation_arg(args.attn_implementation, args.device)
 	command = [
 		str(python_bin),
 		"demo/inference_from_file.py",
@@ -146,9 +168,9 @@ def _build_command(args: argparse.Namespace, prepared_txt_path: Path, speaker_na
 		"--device",
 		args.device,
 		"--attn_implementation",
-		args.attn_implementation,
+		attn_implementation,
 		"--torch_dtype",
-		args.torch_dtype,
+		torch_dtype,
 		"--cfg_scale",
 		args.cfg_scale,
 		"--seed",

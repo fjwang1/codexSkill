@@ -47,6 +47,12 @@ def _read_json(path: Path) -> dict[str, Any]:
 	return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_json_optional(path: Path) -> dict[str, Any]:
+	if not path.exists():
+		return {}
+	return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _duration(path: Path) -> float:
 	result = _run([
 		"ffprobe",
@@ -153,6 +159,18 @@ def _first_stream(probe: dict[str, Any], codec_type: str) -> dict[str, Any]:
 		if stream.get("codec_type") == codec_type:
 			return stream
 	raise AssertionError(f"Missing {codec_type} stream")
+
+
+def _resolve_optional_path(run_dir: Path, value: Any) -> Path | None:
+	if value is None:
+		return None
+	text = str(value).strip()
+	if not text:
+		return None
+	path = Path(text)
+	if not path.is_absolute():
+		path = run_dir / path
+	return path.resolve()
 
 
 def _ffconcat_path(path: Path) -> str:
@@ -573,7 +591,18 @@ def run_revoice(
 	update_root: bool,
 ) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
-	source = (source_video or run_dir / "02-source-capture/youtube-media/source.mp4").resolve()
+	episode_manifest_path = run_dir / "episode_manifest.json"
+	episode_manifest = _read_json_optional(episode_manifest_path)
+	series_episode = episode_manifest.get("schema_version") == "worldview-china-podcast-series-episode.v1"
+	episode_source_video = _resolve_optional_path(run_dir, episode_manifest.get("source_episode_video")) if series_episode else None
+	source_is_preclipped_episode = source_video is None and episode_source_video is not None and episode_source_video.exists()
+	semantic_source_start_sec = source_start_sec
+	if semantic_source_start_sec is None and series_episode and episode_manifest.get("source_start_sec") is not None:
+		semantic_source_start_sec = float(episode_manifest["source_start_sec"])
+	cut_source_start_sec = None if source_is_preclipped_episode else semantic_source_start_sec
+	if series_episode and (semantic_source_start_sec is not None or source_is_preclipped_episode) and not match_audio_duration:
+		match_audio_duration = True
+	source = (source_video or episode_source_video or run_dir / "02-source-capture/youtube-media/source.mp4").resolve()
 	audio_path = (audio or run_dir / "audio/final_podcast.wav").resolve()
 	assert source.exists(), f"Missing source video: {source}"
 	assert audio_path.exists(), f"Missing Chinese audio: {audio_path}"
@@ -586,20 +615,24 @@ def run_revoice(
 
 	source_duration = _duration(source)
 	audio_duration = _duration(audio_path)
-	trim_to_audio_duration = source_start_sec is None and match_audio_duration
-	review_sample = source_start_sec is not None
+	trim_to_audio_duration = semantic_source_start_sec is None and not source_is_preclipped_episode and match_audio_duration
+	episode_segment_to_audio_duration = series_episode and (semantic_source_start_sec is not None or source_is_preclipped_episode) and match_audio_duration
+	review_sample = cut_source_start_sec is not None and not series_episode
 	if match_audio_duration:
 		target_duration = audio_duration
 	else:
 		target_duration = source_duration
-	if source_start_sec is not None:
+	if source_is_preclipped_episode:
+		video_input = source
+		video_copy_policy = "source_episode_precut_video_stream_copy_to_audio_duration"
+	elif cut_source_start_sec is not None:
 		video_input = _extract_review_video_segment(
 			source,
 			work_dir / "source_review_segment.mp4",
-			source_start_sec,
+			cut_source_start_sec,
 			target_duration,
 		)
-		video_copy_policy = "source_segment_reencoded_review_sample"
+		video_copy_policy = "source_episode_segment_reencoded_to_audio_duration" if series_episode else "source_segment_reencoded_review_sample"
 	else:
 		video_input = source
 		video_copy_policy = "source_video_stream_copy_trimmed_to_audio_duration" if trim_to_audio_duration else "source_video_stream_copy"
@@ -638,7 +671,11 @@ def run_revoice(
 	if update_root:
 		shutil.copy2(final_video, video_root / "final_video.mp4")
 	visual_mode = (
-		"source_video_revoice_burned_subtitles_trim_to_audio_duration"
+		"source_video_revoice_episode_segment_burned_subtitles"
+		if burn_subtitles and episode_segment_to_audio_duration
+		else "source_video_revoice_episode_segment"
+		if episode_segment_to_audio_duration
+		else "source_video_revoice_burned_subtitles_trim_to_audio_duration"
 		if burn_subtitles and trim_to_audio_duration
 		else "source_video_revoice_burned_subtitles"
 		if burn_subtitles
@@ -653,13 +690,22 @@ def run_revoice(
 		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
 		"visual_mode": visual_mode,
 		"review_sample": review_sample,
+		"series_episode": series_episode,
+		"episode_manifest": str(episode_manifest_path) if series_episode else None,
+		"episode_index": episode_manifest.get("episode_index") if series_episode else None,
+		"episode_count": episode_manifest.get("episode_count") if series_episode else None,
+		"episode_source_end_sec": episode_manifest.get("source_end_sec") if series_episode else None,
+		"source_episode_video": str(episode_source_video) if episode_source_video is not None else None,
+		"source_episode_video_used": source_is_preclipped_episode,
+		"source_episode_video_manifest": str(_resolve_optional_path(run_dir, episode_manifest.get("source_episode_video_manifest"))) if episode_manifest.get("source_episode_video_manifest") else None,
 		"playback_speed": 1.0,
 		"subtitle_mode": "burned_ass" if burn_subtitles else "sidecar_not_burned",
 		"burned_subtitle_render": burned_subtitle_render,
 		"source_video": str(source),
 		"source_video_sha256": _sha256(source),
 		"source_duration_sec": round(source_duration, 3),
-		"source_start_sec": source_start_sec,
+		"source_start_sec": semantic_source_start_sec,
+		"cut_source_start_sec": cut_source_start_sec,
 		"video_input": str(video_input),
 		"video_copy_policy": video_copy_policy,
 		"audio": str(audio_path),
@@ -696,7 +742,8 @@ def run_revoice(
 		f"- review_sample: {str(review_sample).lower()}",
 		f"- source_video: `{source}`",
 		f"- source_duration_sec: {source_duration:.3f}",
-		f"- source_start_sec: {source_start_sec if source_start_sec is not None else 'full_source'}",
+		f"- source_start_sec: {semantic_source_start_sec if semantic_source_start_sec is not None else 'full_source'}",
+		f"- source_episode_video_used: {str(source_is_preclipped_episode).lower()}",
 		f"- chinese_audio: `{audio_path}`",
 		f"- audio_duration_sec: {audio_duration:.3f}",
 		f"- target_duration_sec: {target_duration:.3f}",

@@ -75,9 +75,20 @@ def _forbidden_chinese_leader_names(text: str) -> list[str]:
 	return sorted(set(found))
 
 
+def _source_frame_report_has_podcast_pass(text: str) -> bool:
+	return bool(
+		re.search(r"(?im)^\s*video_podcast_form\s*[:=]\s*PASS\s*$", text)
+		or re.search(r"(?im)^\s*video_podcast_form:\s*PASS\s*$", text)
+		or "Video podcast / interview form: PASS" in text
+	)
+
+
 def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	failures: list[str] = []
 	warnings: list[str] = []
+	episode_manifest_path = run_dir / "episode_manifest.json"
+	episode_manifest = _read_json(episode_manifest_path) if episode_manifest_path.exists() else {}
+	series_episode = episode_manifest.get("schema_version") == "worldview-china-podcast-series-episode.v1"
 	source_voice_prompt_manifest = run_dir / "02b-source-voice-prompts/voice_prompt_manifest.json"
 	qwen_voice_prompt_manifest = run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json"
 	voice_prompt_manifest = qwen_voice_prompt_manifest if qwen_voice_prompt_manifest.exists() else source_voice_prompt_manifest
@@ -141,7 +152,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	audio_format = source_manifest.get("selected_audio_format") or {}
 	if "original" not in str(audio_format.get("format_note", "")).lower() and "default" not in str(audio_format.get("format_note", "")).lower():
 		failures.append("selected source audio is not original/default")
-	if "video_podcast_form: PASS" not in _read_text(paths["frame_report"]) and "Video podcast / interview form: PASS" not in _read_text(paths["frame_report"]):
+	if not _source_frame_report_has_podcast_pass(_read_text(paths["frame_report"])):
 		failures.append("source frame QA does not record podcast form PASS")
 	video_title = _read_text(paths["video_title"]).strip()
 	if not video_title:
@@ -149,20 +160,51 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	if "：" not in video_title:
 		failures.append("video_title.txt must contain a justified source identity prefix followed by `：`")
 	title_prefix, title_core = video_title.split("：", 1) if "：" in video_title else ("", video_title)
+	base_title_prefix = title_prefix
+	if series_episode:
+		base_title_prefix = str(episode_manifest.get("series_title_prefix") or "")
+		episode_subtitle = str(episode_manifest.get("episode_subtitle") or "")
+		episode_order_marker = str(episode_manifest.get("episode_order_marker") or episode_manifest.get("episode_index") or "")
+		expected_video_title = str(episode_manifest.get("video_title") or "")
+		if expected_video_title and video_title != expected_video_title:
+			failures.append("series episode video_title.txt does not match episode_manifest video_title")
+		if base_title_prefix and base_title_prefix not in video_title:
+			failures.append("series episode video_title does not contain the shared series title")
+		if episode_subtitle and episode_subtitle not in video_title:
+			failures.append("series episode video_title does not contain the episode subtitle")
+		if episode_order_marker and episode_order_marker not in video_title:
+			failures.append("series episode video_title does not contain the episode order marker")
+		title_core = episode_subtitle or title_core
 	if not title_prefix or not title_core:
 		failures.append("video_title.txt source identity prefix or translated title core is empty")
-	if len(title_prefix) > 16:
-		failures.append(f"video_title.txt source identity prefix is too long: {len(title_prefix)} chars")
-	if re.search(r"(来自|中文配音|搬运|油管|YouTube|频道|栏目|播客|Podcast|CGSP)", title_prefix, re.I):
+	if len(base_title_prefix) > 16:
+		failures.append(f"video_title.txt source identity prefix is too long: {len(base_title_prefix)} chars")
+	if re.search(r"(来自|中文配音|搬运|油管|YouTube|频道|栏目|播客|Podcast|CGSP)", base_title_prefix, re.I):
 		failures.append("video_title.txt source identity prefix is a lazy source/channel/platform label")
-	if re.match(r"^《[^》]+》$", title_prefix):
+	if re.match(r"^《[^》]+》$", base_title_prefix):
 		failures.append("video_title.txt source identity prefix must describe a person or role, not a decorated channel/program name")
 	cover_title = _read_json(paths["cover_title"])
-	if str(cover_title.get("title_text") or "").strip() != video_title:
-		failures.append("cover_title.json title_text does not equal video_title.txt")
-	if cover_title.get("title_source") != "youtube_original_title_translated_with_source_identity":
-		failures.append("cover_title.json title_source is not youtube_original_title_translated_with_source_identity")
-	if str(cover_title.get("source_identity_label") or "").strip() != title_prefix:
+	if series_episode:
+		expected_cover_title = str(episode_manifest.get("cover_title") or f"{base_title_prefix}：{title_core}")
+		if str(cover_title.get("video_title_text") or "").strip() != video_title:
+			failures.append("series cover_title.json video_title_text does not equal video_title.txt")
+		if str(cover_title.get("title_text") or "").strip() != expected_cover_title:
+			failures.append("series cover_title.json title_text must omit episode index but keep the episode subtitle")
+		if cover_title.get("cover_title_omits_episode_index") is not True:
+			failures.append("series cover_title.json must record cover_title_omits_episode_index=true")
+	else:
+		if str(cover_title.get("title_text") or "").strip() != video_title:
+			failures.append("cover_title.json title_text does not equal video_title.txt")
+	if cover_title.get("title_source") not in {
+		"youtube_original_title_translated_with_source_identity",
+		"podcast_source_identity_plus_platform_native_hook",
+	}:
+		failures.append("cover_title.json title_source is not an accepted Worldview podcast title source policy")
+	if cover_title.get("title_source") == "podcast_source_identity_plus_platform_native_hook":
+		attractive_policy = cover_title.get("attractive_title_policy") or {}
+		if attractive_policy.get("status") != "PASS":
+			failures.append("cover_title.json attractive_title_policy.status is not PASS")
+	if str(cover_title.get("source_identity_label") or "").strip() != base_title_prefix:
 		failures.append("cover_title.json source_identity_label does not equal video_title prefix")
 	if str(cover_title.get("translated_title_core") or "").strip() != title_core:
 		failures.append("cover_title.json translated_title_core does not equal video_title core")
@@ -172,7 +214,13 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	title_cover_manifest = _read_json(paths["title_cover_manifest"])
 	if title_cover_manifest.get("title_layout") != "center":
 		failures.append("title_cover_manifest title_layout is not center")
-	if title_cover_manifest.get("title_policy") != "source_identity_prefix_plus_youtube_original_title_translated_smoothly":
+	expected_title_policies = {
+		"source_identity_prefix_plus_youtube_original_title_translated_smoothly",
+		"source_identity_prefix_plus_platform_native_hook_title",
+	}
+	if series_episode:
+		expected_title_policies.add("series_episode_indexed_video_title_plus_unindexed_cover_title")
+	if title_cover_manifest.get("title_policy") not in expected_title_policies:
 		failures.append("title_cover_manifest title_policy is not source_identity_prefix_plus_youtube_original_title_translated_smoothly")
 	cover_compositor_manifest = _read_json(paths["cover_compositor_manifest"])
 	if cover_compositor_manifest.get("layout", {}).get("mode") != "center":
@@ -206,22 +254,39 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		speaker_voice_names[speaker] = vibevoice_name
 		reference = Path(str(info.get("reference_wav") or ""))
 		registered = Path(str(info.get("registered_path") or ""))
-		if not reference.exists():
+		local_registered_value = str(info.get("local_registered_wav") or "").strip()
+		local_registered = Path(local_registered_value) if local_registered_value else None
+		validation_reference = local_registered if is_qwen_chinese_prompt and local_registered and local_registered.exists() else reference
+		if not validation_reference.exists():
+			failures.append(f"voice reference wav missing for {speaker}: {validation_reference}")
+			continue
+		if is_qwen_chinese_prompt and local_registered and local_registered.exists() and reference != local_registered and not reference.exists():
+			warnings.append(f"global VibeVoice reference missing for {speaker}, validated local_registered_wav instead: {reference}")
+		elif not reference.exists():
 			failures.append(f"voice reference wav missing for {speaker}: {reference}")
 			continue
 		if not registered.exists():
-			failures.append(f"registered VibeVoice reference missing for {speaker}: {registered}")
+			if is_qwen_chinese_prompt and local_registered and local_registered.exists():
+				warnings.append(f"global VibeVoice registered reference missing for {speaker}, validated local_registered_wav instead: {registered}")
+			else:
+				failures.append(f"registered VibeVoice reference missing for {speaker}: {registered}")
 		expected_sha = str(info.get("sha256") or "")
 		if expected_sha:
-			actual_sha = _sha256(reference)
+			actual_sha = _sha256(validation_reference)
 			if actual_sha != expected_sha:
-				failures.append(f"voice reference sha256 mismatch for {speaker}: {reference}")
+				failures.append(f"voice reference sha256 mismatch for {speaker}: {validation_reference}")
 			if registered.exists() and _sha256(registered) != expected_sha:
-				failures.append(f"registered voice reference sha256 mismatch for {speaker}: {registered}")
-		probe = _probe(reference)
+				if is_qwen_chinese_prompt and local_registered and local_registered.exists():
+					warnings.append(
+						f"global VibeVoice registered reference sha256 differs for {speaker}; "
+						f"validated immutable local_registered_wav instead: {registered}"
+					)
+				else:
+					failures.append(f"registered voice reference sha256 mismatch for {speaker}: {registered}")
+		probe = _probe(validation_reference)
 		audio_streams = [stream for stream in probe.get("streams", []) if stream.get("codec_type") == "audio"]
 		if not audio_streams:
-			failures.append(f"voice reference has no audio stream for {speaker}: {reference}")
+			failures.append(f"voice reference has no audio stream for {speaker}: {validation_reference}")
 			continue
 		stream = audio_streams[0]
 		if stream.get("codec_name") != "pcm_s16le":
@@ -307,6 +372,16 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 			failures.append(f"source-video revoice duration mismatch: video={video_duration:.2f} target={target_duration:.2f}")
 		if visual_mode == "source_video_revoice_strict" and render_manifest.get("subtitle_mode") != "sidecar_not_burned":
 			failures.append("strict source-video revoice must keep subtitles sidecar-only, not burned into frames")
+		if series_episode and render_manifest.get("series_episode") is not True:
+			failures.append("series episode render_manifest does not record series_episode=true")
+		if series_episode and "episode_segment" not in visual_mode:
+			failures.append("series episode render visual_mode must be an episode segment render")
+		if series_episode and episode_manifest.get("source_episode_video_status") == "pass":
+			source_episode_video = Path(str(episode_manifest.get("source_episode_video") or ""))
+			if not source_episode_video.exists():
+				failures.append(f"series episode source_episode_video is missing: {source_episode_video}")
+			if render_manifest.get("source_episode_video_used") is not True:
+				failures.append("series episode render did not use the pre-cut source_episode_video")
 	else:
 		if abs(video_duration - audio_duration) > 2.0:
 			failures.append(f"final video/audio duration mismatch: video={video_duration:.2f} audio={audio_duration:.2f}")

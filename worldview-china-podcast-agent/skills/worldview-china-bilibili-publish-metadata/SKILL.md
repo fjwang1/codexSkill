@@ -28,6 +28,7 @@ Rules:
 - Set `category` to `知识`.
 - Set `creation_declaration` to `含AI生成内容`.
 - Preserve existing schedule fields from an existing `bilibili_upload_metadata.json` when present.
+- For series episode runs, preserve the schedule seed written by `04b-series-episodes`, where episode 1 uses the user-provided publish time and episode N adds N-1 hours. Record `episode_index`, `episode_count`, `episode_subtitle`, `series_title_prefix`, and `cover_title_text` from `episode_manifest.json` / `cover_title.json`.
 
 ## Inputs
 
@@ -132,6 +133,10 @@ metadata.creation_declaration == 含AI生成内容
 metadata.tags has 8-10 unique tags
 metadata.tags does not contain 外刊解读, 外刊精读, 英语学习, or 英语听力 unless explicitly justified by source type
 metadata.description does not contain local file paths, model names, manifest paths, or internal QA notes
+if episode_manifest.json exists, metadata.title equals the ordered episode title in video_title.txt
+if episode_manifest.json exists, metadata.episode_index and metadata.episode_count match episode_manifest.json
+if episode_manifest.json exists, metadata.cover_title_text equals cover/cover_title.json.title_text
+if scheduled_publish_at exists, metadata preserves scheduled_publish_at, scheduled_publish_timezone, and schedule_source from the preexisting metadata seed
 metadata.description is exactly one public-facing summary sentence:
 本期是基于外网公开播客/访谈视频制作的中文配音版本：保留原视频画面，替换为中文对话音频，方便中文观众理解原对话内容。
 metadata.description does not include title/source/channel/url/tag/chapter blocks such as 观点身份, 核心议题, 身份依据, 原视频标题, 来源频道, 原链接, 标签, or 章节

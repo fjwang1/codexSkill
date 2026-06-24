@@ -1,4 +1,4 @@
 interface:
-  display_name: "Bilibili Upload Draft"
-  short_description: "Prepare Bilibili video drafts safely"
-  default_prompt: "Use $bilibili-video-upload-draft to upload a local video and cover into a Bilibili draft, fill metadata, and stop before final submission."
+  display_name: "Bilibili Upload Publish"
+  short_description: "Upload and submit Bilibili videos"
+  default_prompt: "Use $bilibili-video-upload-draft to upload a local video and cover to Bilibili, fill metadata, verify the form, and click the final submit button once."

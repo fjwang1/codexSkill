@@ -25,7 +25,7 @@ YouTube API key 读取顺序仍然遵循 canonical skill：命令行 `--api-key`
 
 ## 本机 YouTube 授权与 transcript 依赖
 
-2026-06-22 起，用户已对本机 Worldview China 播客自动化给出长期授权：当 YouTube 字幕或下载返回 bot/sign-in/IP 风控时，执行 agent 可直接使用 `yt-dlp --cookies-from-browser chrome` 重试，不需要再向用户确认。仍然不得导出、打印或保存 cookie 原文；日志和报告只能记录 `cookies_from_browser=chrome` 或 `provided`。
+2026-06-22 起，用户已对本机 Worldview China 播客生产流程给出长期授权：当 YouTube 字幕或下载返回 bot/sign-in/IP 风控时，执行 agent 可直接使用 `yt-dlp --cookies-from-browser chrome` 重试，不需要再向用户确认。仍然不得导出、打印或保存 cookie 原文；日志和报告只能记录 `cookies_from_browser=chrome` 或 `provided`。
 
 `youtube-transcript-api` 缺包必须先修复后重试，不能算候选失败。若 `get_transcript.py` 返回 `Install youtube-transcript-api`、`ModuleNotFoundError: youtube_transcript_api` 或等价错误，改用：
 
@@ -64,6 +64,14 @@ uv run --with youtube-transcript-api python "$BASE/scripts/get_transcript.py" \
 /Volumes/GT34/Generated/world_and_china/final-videos.json
 ```
 
+同时读取并过滤近 5 天已被播客 Agent 选中过的视频：
+
+```text
+/Volumes/GT34/world_and_china_podcast/selected-videos.json
+```
+
+这个 registry 在视频被选为 `best_video` 后立刻写入，不等最终成片完成。它用于防止同一天或近几天多次运行时重复制作同一个 YouTube 视频。
+
 ## Hard Requirements
 
 默认硬过滤：
@@ -73,6 +81,7 @@ uv run --with youtube-transcript-api python "$BASE/scripts/get_transcript.py" \
 视频时长：20 分钟 <= duration <= 180 分钟
 视频形态：横向长视频；不是 Shorts、trailer、纯 clip、短切片、普通新闻包或普通视频 essay
 主题：China 必须是主轴，不是描述、标签或章节里的偶然关键词
+去重：过去 5 天已写入 selected-videos.json 的 video_id 必须硬拒绝，不得成为 best_video
 最终输出：只有通过字幕/ASR 内容验收的候选才能成为 best_video
 ```
 
@@ -122,13 +131,35 @@ Beijing podcast
 2. 对关键词批量运行 `search_list.py`，每个关键词默认 `--max-results 20`。
 3. 合并所有 `.videos[]`，按 `video_id` 全局去重，保留 `query_hits`。
 4. 读取 `final-videos.json`，过滤已经正式成片的视频。
-5. 分批运行 `detail_list.py`，默认 `--min-duration-seconds 1200 --max-duration-seconds 10800`。
-6. 应用发布时间、时长、视频形态和 podcast form 硬过滤。
-7. 用标题、频道、描述和互动数据做 metadata 粗评，选出 `top_k_transcripts=12`。
-8. 拉字幕：先 `get_transcript.py`；如果缺 `youtube-transcript-api`，按上面的 `uv run --with youtube-transcript-api` 重试；仍失败后用 `yt-dlp --write-subs --write-auto-subs --skip-download` 只抓字幕。
-9. 如果 YouTube 要求 bot/sign-in 校验，本机已有长期授权，直接用 `yt-dlp --cookies-from-browser chrome` 对同一候选重试；cookie 原文不得出现在任何日志或报告中。
-10. 对拿到字幕或抽样 ASR 的候选做内容评分。
-11. 从 `accept` 候选中选择排序第一的视频作为 `best_video`；没有 accept 时输出明确失败原因，不硬选。
+5. 调用 podcast agent 的 selected registry，导出过去 5 天已选视频，写入 `<run_dir>/recent-selected-videos.json` 或总控 run 的 `<run_dir>/01-topic-selection/recent-selected-videos.json`：
+
+```bash
+python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/selected_video_registry.py \
+  recent \
+  --run-dir <run_dir> \
+  --days 5 \
+  --out <run_dir>/recent-selected-videos.json
+```
+
+6. 将 `recent-selected-videos.json.recent_video_ids` 作为硬排除列表加入 search/detail/filter/ranking 上下文；这些视频不能成为本轮 `best_video`。
+7. 分批运行 `detail_list.py`，默认 `--min-duration-seconds 1200 --max-duration-seconds 10800`。
+8. 应用发布时间、时长、视频形态、podcast form 和近 5 天已选视频硬过滤。
+9. 用标题、频道、描述和互动数据做 metadata 粗评，选出 `top_k_transcripts=12`。
+10. 拉字幕：先 `get_transcript.py`；如果缺 `youtube-transcript-api`，按上面的 `uv run --with youtube-transcript-api` 重试；仍失败后用 `yt-dlp --write-subs --write-auto-subs --skip-download` 只抓字幕。
+11. 如果 YouTube 要求 bot/sign-in 校验，本机已有长期授权，直接用 `yt-dlp --cookies-from-browser chrome` 对同一候选重试；cookie 原文不得出现在任何日志或报告中。
+12. 对拿到字幕或抽样 ASR 的候选做内容评分。
+13. 从 `accept` 候选中选择排序第一且不在近 5 天 selected registry 中的视频作为 `best_video`；没有 accept 时输出明确失败原因，不硬选。
+14. 写出 `best_video.json` 后，立刻登记本次选择，防止下一轮重复选中：
+
+```bash
+python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/selected_video_registry.py \
+  record \
+  --run-dir <run_dir> \
+  --best-video-json <run_dir>/best_video.json \
+  --out <run_dir>/selected-video-record.json
+```
+
+如果 `ranked-shortlist.json.best_video` 写出后才发现命中过去 5 天 selected registry，必须先用 `selected_video_registry.py filter` 生成 dedupe report 并选择下一个 `accept` / `backup`，不要把重复视频交给 02 下载。
 
 ## Scoring
 

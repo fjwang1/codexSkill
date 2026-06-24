@@ -1,11 +1,11 @@
 ---
 name: article-bilibili-publish-metadata
-description: Generate and validate Bilibili upload metadata for an English-article-to-Chinese video project after video_title.txt and publish_info.txt exist. Use for article podcast or explainer projects that need bilibili_upload_metadata.json with title, description, high-signal Bilibili tags, category, AI declaration, file paths, and tag provenance before handing off to bilibili-video-upload-draft.
+description: Generate and validate Bilibili upload metadata for an English-article-to-Chinese video project after video_title.txt and publish_info.txt exist. Use for article podcast or explainer projects that need bilibili_upload_metadata.json with title, description, high-signal Bilibili tags, category, AI declaration, file paths, and tag provenance before invoking bilibili-video-upload-draft.
 ---
 
 # Article Bilibili Publish Metadata
 
-Generate `bilibili_upload_metadata.json` as the source of truth for Bilibili upload drafts. This node owns the publishing description and tag strategy; video rendering should not hard-code platform tags.
+Generate `bilibili_upload_metadata.json` as the source of truth for Bilibili upload and submission. This node owns the publishing description and tag strategy; video rendering should not hard-code platform tags.
 
 ## Inputs
 
