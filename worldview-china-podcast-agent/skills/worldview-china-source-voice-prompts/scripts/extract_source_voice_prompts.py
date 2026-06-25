@@ -218,6 +218,20 @@ def _plain_caption_text(text: str) -> str:
 	return re.sub(r"\s+", " ", text).strip()
 
 
+def _has_rolling_caption_repetition(text: str) -> bool:
+	words = re.findall(r"[A-Za-z][A-Za-z']+|[\u4e00-\u9fff]", text.lower())
+	if len(words) < 12:
+		return False
+	for size in range(4, 9):
+		seen: dict[tuple[str, ...], int] = {}
+		for index in range(0, len(words) - size + 1):
+			gram = tuple(words[index:index + size])
+			seen[gram] = seen.get(gram, 0) + 1
+			if seen[gram] >= 3:
+				return True
+	return False
+
+
 def _caption_event_time(item: dict[str, Any]) -> float | None:
 	text = str(item.get("text") or "").strip()
 	if ">>" not in text:
@@ -379,15 +393,105 @@ def _build_candidates(
 
 def _reference_text_is_noisy(text: str) -> bool:
 	lower = text.lower()
-	return any(pattern in lower for pattern in (
+	return _has_rolling_caption_repetition(text) or any(pattern in lower for pattern in (
 		"[music]",
 		"sponsor",
 		"patreon",
 		"my debt clinic",
+		"debt clinic",
+		"credit card",
+		"personal loans",
+		"partnering with",
 		"provision capital",
+		"become a member",
+		"membership",
+		"subscribe",
+		"use code",
+		"www.",
+		"http",
 		"visit ",
 		".com",
 	))
+
+
+def _build_speaker_roster(
+	segments: list[TimelineSegment],
+	voice_names: dict[str, str],
+	*,
+	analysis_window_sec: float,
+) -> dict[str, Any]:
+	speakers: dict[str, Any] = {}
+	for speaker in ("Speaker 0", "Speaker 1"):
+		speaker_segments = [segment for segment in segments if segment.speaker == speaker]
+		window_speech_sec = 0.0
+		for segment in speaker_segments:
+			overlap = max(0.0, min(segment.end, analysis_window_sec) - max(segment.start, 0.0))
+			window_speech_sec += overlap
+		speakers[speaker] = {
+			"speaker": speaker,
+			"vibevoice_name": voice_names[speaker],
+			"segment_count": len(speaker_segments),
+			"first_seen_sec": round(min((segment.start for segment in speaker_segments), default=0.0), 3),
+			"first_6min_speech_sec": round(window_speech_sec, 3),
+			"sample_texts": [
+				segment.text[:180]
+				for segment in speaker_segments[:3]
+				if segment.text
+			],
+		}
+	observed_in_window = [
+		speaker
+		for speaker, info in speakers.items()
+		if float(info["first_6min_speech_sec"]) > 0
+	]
+	status = "frozen" if all(info["segment_count"] > 0 for info in speakers.values()) else "needs_review"
+	return {
+		"schema_version": "worldview-china-source-speaker-roster.v1",
+		"status": status,
+		"speaker_count": 2,
+		"analysis_window_sec": analysis_window_sec,
+		"observed_speakers_in_first_6min": observed_in_window,
+		"policy": "freeze_two_speaker_roster_before_episode_split_and_tts",
+		"speakers": speakers,
+	}
+
+
+def _load_frozen_speaker_census(run_dir: Path, voice_names: dict[str, str]) -> dict[str, Any]:
+	census_path = run_dir / "02a-speaker-census" / "speaker_roster.json"
+	if not census_path.exists():
+		raise RuntimeError(
+			"Missing frozen speaker census. Run "
+			"/Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/run_speaker_census.py "
+			f"--run-dir {run_dir} before 02b source voice extraction."
+		)
+	census = _read_json(census_path)
+	if census.get("status") != "frozen":
+		raise RuntimeError(f"Speaker census is not frozen: {census_path}")
+	if int(census.get("speaker_count") or 0) != 2 or int(census.get("voice_count") or 0) != 2:
+		raise RuntimeError(f"Speaker census must freeze exactly two speakers and two voices: {census_path}")
+	source_speakers = census.get("speakers") or {}
+	speakers: dict[str, Any] = {}
+	for speaker in ("Speaker 0", "Speaker 1"):
+		info = dict(source_speakers.get(speaker) or {})
+		if not info:
+			raise RuntimeError(f"Speaker census missing {speaker}: {census_path}")
+		info["speaker"] = speaker
+		info["vibevoice_name"] = voice_names[speaker]
+		speakers[speaker] = info
+	return {
+		"schema_version": "worldview-china-source-speaker-roster.v1",
+		"status": "frozen",
+		"speaker_count": 2,
+		"voice_count": 2,
+		"analysis_window_sec": float(census.get("analysis_window_sec") or 360.0),
+		"observed_speakers_in_first_6min": census.get("observed_speakers_in_first_6min") or [],
+		"policy": "freeze_two_speaker_roster_before_voice_extraction_episode_split_and_tts",
+		"source_census_roster_path": str(census_path),
+		"source_census_roster_sha256": _sha256(census_path),
+		"census_schema_version": census.get("schema_version"),
+		"census_reviewer": census.get("reviewer"),
+		"speakers": speakers,
+	}
 
 
 def _parse_volume(stderr: str) -> dict[str, float | None]:
@@ -555,6 +659,19 @@ def extract_voice_prompts(
 		"Speaker 0": f"WC{run_slug}Speaker0",
 		"Speaker 1": f"WC{run_slug}Speaker1",
 	}
+	timeline_roster_evidence = _build_speaker_roster(
+		segments,
+		voice_names,
+		analysis_window_sec=360.0,
+	)
+	speaker_roster = _load_frozen_speaker_census(run_dir, voice_names)
+	speaker_roster["timeline_evidence_at_extraction"] = timeline_roster_evidence
+	_write_json(output_dir / "speaker_roster.json", speaker_roster)
+	if speaker_roster["status"] != "frozen":
+		raise RuntimeError(
+			"Speaker roster could not be frozen before voice extraction. "
+			f"Inspect {run_dir / '02a-speaker-census/speaker_roster.json'} and rerun 02a speaker census."
+		)
 	selected_summary: dict[str, Any] = {}
 	for speaker in ("Speaker 0", "Speaker 1"):
 		speaker_dir = output_dir / speaker.lower().replace(" ", "")
@@ -630,10 +747,14 @@ def extract_voice_prompts(
 		"status": "pass",
 		"source_audio": str(source_audio),
 		"source_audio_duration_sec": round(source_duration, 3),
-		"timeline_source": timeline_source,
-		"output_dir": str(output_dir),
-		"method": "speaker_timeline_guided_ffmpeg_reference_extraction",
-		"parameters": {
+			"timeline_source": timeline_source,
+			"output_dir": str(output_dir),
+			"method": "speaker_timeline_guided_ffmpeg_reference_extraction",
+			"speaker_census_roster_path": speaker_roster["source_census_roster_path"],
+			"speaker_census_roster_sha256": speaker_roster["source_census_roster_sha256"],
+			"speaker_roster_path": str(output_dir / "speaker_roster.json"),
+			"speaker_roster": speaker_roster,
+			"parameters": {
 			"target_sec_per_speaker": target_sec,
 			"min_total_sec_per_speaker": min_total_sec,
 			"max_clip_sec": max_clip_sec,
@@ -652,6 +773,7 @@ def extract_voice_prompts(
 			"- status: PASS",
 			f"- source_audio: {source_audio}",
 			f"- timeline_source: {timeline_source}",
+			f"- speaker_roster: {output_dir / 'speaker_roster.json'}",
 			f"- target_sec_per_speaker: {target_sec}",
 			"",
 			"## Speaker Voices",
@@ -676,6 +798,7 @@ def extract_voice_prompts(
 	run_manifest.setdefault("nodes", {})["02b-source-voice-prompts"] = {
 		"status": "pass",
 		"voice_prompt_manifest": str(output_dir / "voice_prompt_manifest.json"),
+		"speaker_roster": str(output_dir / "speaker_roster.json"),
 		"speaker_names": {
 			speaker: info["vibevoice_name"]
 			for speaker, info in selected_summary.items()

@@ -851,7 +851,7 @@ def split_series(
 	for plan in episode_plans:
 		episode_dir = node_dir / f"episode_{plan.episode_index:03d}"
 		episode_dir.mkdir(parents=True, exist_ok=True)
-		for name in ("02-source-capture", "02b-source-voice-prompts", "02c-qwen-vibevoice-prompts"):
+		for name in ("02-source-capture", "02a-speaker-census", "02b-source-voice-prompts", "02c-qwen-vibevoice-prompts"):
 			_symlink_or_copy(run_dir / name, episode_dir / name, force)
 		renumbered_segments, segment_mapping = _renumber_segments(plan.segments)
 		renumbered_turns = _renumber_turns(plan.turns, segment_mapping)

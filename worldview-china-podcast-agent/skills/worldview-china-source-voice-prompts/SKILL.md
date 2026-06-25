@@ -23,8 +23,10 @@ For English or other non-Chinese source videos, Qwen3 uses these WAVs plus match
 
 - `source.wav` must exist and ffprobe successfully.
 - Prefer a speaker-labeled timeline with `Speaker 0` / `Speaker 1` and start/end times.
+- Before extraction, the parent workflow must have already produced `<run_dir>/02a-speaker-census/speaker_roster.json` with `status=frozen`, `speaker_count=2`, and `voice_count=2` by checking the first 6 minutes of the source video/audio.
+- This 02b node consumes the frozen 02a roster. It must not re-infer speaker count or create a new voice roster from local extraction candidates.
 - If no timeline exists, use source transcript speaker markers such as `>>` as a fallback; treat that result as lower confidence.
-- Extract only clean single-speaker audio: no overlapping speech, no music, no intro/outro bed, no applause, no long silence.
+- Extract only clean single-speaker audio: no overlapping speech, no music, no intro/outro bed, no sponsor/ad read, no rolling-caption repetition, no applause, no long silence.
 - Target `30-60` seconds per speaker; accept at least `25` seconds only for smoke or constrained sources.
 - Keep each selected clip around `8-18` seconds, then concatenate multiple clips into one reference per speaker.
 - Convert references to WAV, mono, 24 kHz, PCM s16le.
@@ -42,7 +44,9 @@ Run the bundled script from the podcast run directory:
 Outputs:
 
 ```text
+<run_dir>/02a-speaker-census/speaker_roster.json
 <run_dir>/02b-source-voice-prompts/
+├── speaker_roster.json
 ├── source_speaker_timeline.normalized.json
 ├── voice_prompt_manifest.json
 ├── voice_prompt_report.md
@@ -60,12 +64,13 @@ By default the script also copies the two final reference WAVs to VibeVoice's vo
 
 The script discovers timeline evidence in this order:
 
-1. `--timeline-json <path>` if provided.
-2. `<run_dir>/02b-source-voice-prompts/source_speaker_timeline.json`.
-3. `<run_dir>/02-source-capture/source_speaker_timeline.json`.
-4. `<run_dir>/03-source-translation/source_transcript.zh.json`, useful when validating on an already translated run.
-5. `<run_dir>/02-source-capture/source_transcript.en.json` parsed from unlabeled caption segments with `>>` speaker-change markers. This is a lower-confidence fallback for YouTube auto captions that do not expose speaker labels.
-6. `<run_dir>/02-source-capture/source_transcript.en.txt` parsed with timestamped `>>` speaker-change markers.
+1. `<run_dir>/02a-speaker-census/speaker_roster.json` for the fixed speaker/voice roster. This is mandatory for formal production.
+2. `--timeline-json <path>` if provided, only for locating clean candidate clips after the roster is frozen.
+3. `<run_dir>/02b-source-voice-prompts/source_speaker_timeline.json`.
+4. `<run_dir>/02-source-capture/source_speaker_timeline.json`.
+5. `<run_dir>/03-source-translation/source_transcript.zh.json`, useful when validating on an already translated run.
+6. `<run_dir>/02-source-capture/source_transcript.en.json` parsed from unlabeled caption segments with `>>` speaker-change markers. This is a lower-confidence fallback for YouTube auto captions that do not expose speaker labels.
+7. `<run_dir>/02-source-capture/source_transcript.en.txt` parsed with timestamped `>>` speaker-change markers.
 
 Formal production should prefer a timeline created immediately after source capture, before translation. Using `03-source-translation/source_transcript.zh.json` is acceptable for backfilling and validation on existing runs, but do not make the production node depend on translation.
 
@@ -83,9 +88,11 @@ ffmpeg -hide_banner -i <reference.wav> -af silencedetect=noise=-45dB:d=1 -f null
 
 Require:
 
+- `02a-speaker-census/speaker_roster.json.status == "frozen"`, `speaker_count == 2`, and `voice_count == 2`;
+- `02b-source-voice-prompts/voice_prompt_manifest.json.speaker_census_roster_path` points to the current 02a roster;
 - each reference duration is at least 25 seconds, ideally 30-60 seconds;
 - `sample_rate=24000`, `channels=1`, `codec_name=pcm_s16le`;
-- no large silent block;
+- no large silent block, music, sponsor language, URL/contact read, or rolling-caption repeated phrases;
 - voice names in `voice_prompt_manifest.json` are present in `/Users/wangfangjia/code/VibeVoice/demo/voices/`.
 
 For publishable runs, generate a short VibeVoice audition before committing to the full chunked audio run.
@@ -118,3 +125,5 @@ Speaker 1 -> speaker_voices["Speaker 1"].vibevoice_name
 ```
 
 If both 02c and 02b manifests are absent, formal production must stop. Default `Xinran` / `BowenClean` preset voices are allowed only for explicit debugging or smoke validation, and the run report must make that fallback explicit.
+
+Downstream chunks must preserve this frozen roster for every episode and chunk. A chunk that contains only one speaker still belongs to the same two-speaker roster; it must not trigger a new voice choice, voice name, speaker numbering scheme, or default preset fallback.

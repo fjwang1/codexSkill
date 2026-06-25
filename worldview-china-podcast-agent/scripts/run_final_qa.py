@@ -75,6 +75,55 @@ def _forbidden_chinese_leader_names(text: str) -> list[str]:
 	return sorted(set(found))
 
 
+def _has_rolling_caption_repetition(text: str) -> bool:
+	words = re.findall(r"[A-Za-z][A-Za-z']+|[\u4e00-\u9fff]", text.lower())
+	if len(words) < 12:
+		return False
+	for size in range(4, 9):
+		seen: dict[tuple[str, ...], int] = {}
+		for index in range(0, len(words) - size + 1):
+			gram = tuple(words[index:index + size])
+			seen[gram] = seen.get(gram, 0) + 1
+			if seen[gram] >= 3:
+				return True
+	return False
+
+
+def _reference_text_noise_reasons(text: str) -> list[str]:
+	lower = text.lower()
+	reasons = []
+	for label, patterns in {
+		"music_or_non_speech": ("[music]", "[laughter]"),
+		"sponsor_or_ad": ("sponsor", "patreon", "my debt clinic", "debt clinic", "provision capital", "partnering with"),
+		"contact_or_url": ("visit ", ".com", "www.", "http", "use code", "subscribe", "become a member", "membership"),
+		"finance_ad_terms": ("credit card", "personal loans", "debt relief", "across the nation"),
+	}.items():
+		if any(pattern in lower for pattern in patterns):
+			reasons.append(label)
+	if _has_rolling_caption_repetition(text):
+		reasons.append("rolling_caption_repetition")
+	return sorted(set(reasons))
+
+
+def _resolve_run_path(run_dir: Path, value: Any) -> Path:
+	path = Path(str(value))
+	return path if path.is_absolute() else run_dir / path
+
+
+def _resolved_path_set(values: Any) -> set[str]:
+	if not isinstance(values, list):
+		return set()
+	resolved: set[str] = set()
+	for value in values:
+		if not isinstance(value, str) or not value.strip():
+			continue
+		try:
+			resolved.add(str(Path(value).expanduser().resolve()))
+		except OSError:
+			resolved.add(str(Path(value).expanduser()))
+	return resolved
+
+
 def _source_frame_report_has_podcast_pass(text: str) -> bool:
 	return bool(
 		re.search(r"(?im)^\s*video_podcast_form\s*[:=]\s*PASS\s*$", text)
@@ -100,6 +149,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	paths = {
 		"source_video": run_dir / "02-source-capture/youtube-media/source.mp4",
 		"source_audio": run_dir / "02-source-capture/youtube-media/source.wav",
+		"speaker_census": run_dir / "02a-speaker-census/speaker_roster.json",
 		"source_voice_prompt_manifest": source_voice_prompt_manifest,
 		"voice_prompt_manifest": voice_prompt_manifest,
 		"source_manifest": run_dir / "02-source-capture/youtube-media/media_manifest.json",
@@ -114,11 +164,13 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		"translation_json": translation_json_path,
 		"translation_md": translation_md_path,
 		"chapter_segments": chapter_segments_path,
+		"text_compliance": run_dir / "04c-bilibili-text-compliance/text-compliance-review-result.json",
 		"podcast_script": run_dir / "podcast_script.md",
 		"script_report": run_dir / "04-podcast-script/script_report.md",
 		"chunk_plan": run_dir / "05-vibevoice-chunks/chunk_plan.json",
 		"final_audio": run_dir / "audio/final_podcast.wav",
 		"audio_manifest": run_dir / "audio/audio_manifest.json",
+		"audio_transcript_integrity": run_dir / "06b-audio-transcript-integrity/audio-transcript-integrity-result.json",
 		"dialogue_timeline": run_dir / "audio/dialogue_timeline.json",
 		"subtitles_srt": run_dir / "video/final_subtitles.srt",
 		"subtitles_ass": run_dir / "video/final_subtitles.ass",
@@ -234,9 +286,48 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		if int(cover_stream.get("width") or 0) != 3840 or int(cover_stream.get("height") or 0) != 2160:
 			failures.append(f"cover_4k.png is not 3840x2160: {cover_stream.get('width')}x{cover_stream.get('height')}")
 
+	speaker_census = _read_json(paths["speaker_census"])
+	if speaker_census.get("status") != "frozen":
+		failures.append("02a speaker census status is not frozen")
+	if int(speaker_census.get("speaker_count") or 0) != 2:
+		failures.append("02a speaker census speaker_count is not 2")
+	if int(speaker_census.get("voice_count") or 0) != 2:
+		failures.append("02a speaker census voice_count is not 2")
+	if float(speaker_census.get("analysis_window_sec") or 0) < 300:
+		failures.append("02a speaker census analysis window is shorter than 5 minutes")
+	for speaker in ("Speaker 0", "Speaker 1"):
+		if speaker not in (speaker_census.get("speakers") or {}):
+			failures.append(f"02a speaker census missing {speaker}")
+
 	source_voice_prompt_manifest_data = _read_json(paths["source_voice_prompt_manifest"])
 	if source_voice_prompt_manifest_data.get("status") != "pass":
 		failures.append("source_voice_prompt_manifest status is not pass")
+	source_census_value = source_voice_prompt_manifest_data.get("speaker_census_roster_path")
+	if not source_census_value:
+		failures.append("source voice prompt manifest missing speaker_census_roster_path")
+	else:
+		source_census_path = _resolve_run_path(run_dir, source_census_value)
+		if source_census_path.resolve() != paths["speaker_census"].resolve():
+			failures.append("source voice prompt manifest does not reference the current 02a speaker census")
+	expected_census_sha = str(source_voice_prompt_manifest_data.get("speaker_census_roster_sha256") or "")
+	if expected_census_sha and expected_census_sha != _sha256(paths["speaker_census"]):
+		failures.append("source voice prompt manifest speaker census sha256 does not match current 02a roster")
+	source_speaker_roster = source_voice_prompt_manifest_data.get("speaker_roster") or {}
+	if source_speaker_roster.get("status") != "frozen":
+		failures.append("source voice prompt manifest does not include a frozen speaker_roster")
+	if int(source_speaker_roster.get("speaker_count") or 0) != 2:
+		failures.append("source speaker_roster speaker_count is not 2")
+	if int(source_speaker_roster.get("voice_count") or 0) != 2:
+		failures.append("source speaker_roster voice_count is not 2")
+	for speaker in ("Speaker 0", "Speaker 1"):
+		info = source_voice_prompt_manifest_data.get("speaker_voices", {}).get(speaker) or {}
+		for clip in info.get("selected_clips") or []:
+			text_preview = str(clip.get("text_preview") or "")
+			noise_reasons = _reference_text_noise_reasons(text_preview)
+			if noise_reasons:
+				failures.append(
+					f"source voice selected clip for {speaker} is noisy: {', '.join(noise_reasons)}"
+				)
 	voice_prompt_manifest_data = _read_json(paths["voice_prompt_manifest"])
 	if voice_prompt_manifest_data.get("status") != "pass":
 		failures.append("voice_prompt_manifest status is not pass")
@@ -299,6 +390,12 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		if is_qwen_chinese_prompt:
 			if duration < 5 or duration > 35:
 				failures.append(f"Qwen Chinese voice prompt duration is outside 5-35s for {speaker}: {duration:.2f}s")
+			reference_text = str(info.get("reference_text") or "")
+			noise_reasons = _reference_text_noise_reasons(reference_text)
+			if noise_reasons:
+				failures.append(
+					f"Qwen Chinese prompt reference_text for {speaker} is noisy: {', '.join(noise_reasons)}"
+				)
 		elif duration < 25:
 			failures.append(f"voice reference is shorter than 25s for {speaker}: {duration:.2f}s")
 
@@ -335,6 +432,23 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		failures.append("script_report does not record content_coverage=full_translation")
 	if re.search(r"(?m)^Speaker [^01]:", _read_text(paths["podcast_script"])):
 		failures.append("podcast_script contains unsupported Speaker labels")
+	text_compliance = _read_json(paths["text_compliance"])
+	if text_compliance.get("status") != "PASS":
+		failures.append("Bilibili text compliance review status is not PASS")
+	if int(text_compliance.get("summary", {}).get("fail_findings") or 0) != 0:
+		failures.append("Bilibili text compliance review still has fail findings")
+	reviewed_files = _resolved_path_set(text_compliance.get("reviewed_files"))
+	for label, path in {
+		"podcast_script": paths["podcast_script"],
+		"video_title": paths["video_title"],
+		"cover_title": paths["cover_title"],
+		"audio_manifest": paths["audio_manifest"],
+		"subtitle_manifest": paths["subtitle_manifest"],
+		"subtitles_srt": paths["subtitles_srt"],
+		"subtitles_ass": paths["subtitles_ass"],
+	}.items():
+		if str(path.resolve()) not in reviewed_files:
+			failures.append(f"Bilibili text compliance review did not cover current {label}: {path}")
 	translation_display_text = "\n".join(str(segment.get("zh_text") or "") for segment in translation.get("segments") or [])
 	for label, text in {
 		"translation zh_text": translation_display_text,
@@ -345,6 +459,13 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 			failures.append(f"{label} contains forbidden Chinese contemporary leader names: {', '.join(forbidden)}")
 
 	audio_manifest = _read_json(paths["audio_manifest"])
+	audio_integrity = _read_json(paths["audio_transcript_integrity"])
+	if audio_integrity.get("status") != "PASS":
+		failures.append("audio transcript integrity QA is not PASS")
+	if float(audio_integrity.get("summary", {}).get("matched_script_ratio") or 0) < 0.95:
+		failures.append("audio transcript integrity matched_script_ratio is below 0.95")
+	if audio_integrity.get("summary", {}).get("repair_target_chunks"):
+		failures.append("audio transcript integrity QA still has repair target chunks")
 	audio_manifest_text = "\n".join(
 		f"{turn.get('text') or ''}\n{turn.get('tts_text') or ''}"
 		for turn in audio_manifest.get("turns") or []
@@ -356,12 +477,47 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		failures.append("audio_manifest audio_backend is not vibevoice_chunked_dialogue")
 	if audio_manifest.get("speaker_voices") != speaker_voice_names:
 		failures.append("audio_manifest speaker_voices does not match voice_prompt_manifest")
+	if audio_manifest.get("voice_context_policy") != "locked_two_speaker_roster":
+		failures.append("audio_manifest voice_context_policy is not locked_two_speaker_roster")
 	if not audio_manifest.get("voice_prompt_manifest"):
 		failures.append("audio_manifest missing voice_prompt_manifest")
 	if not audio_manifest.get("chunks"):
 		failures.append("audio_manifest has no chunks")
 	if not audio_manifest.get("turns"):
 		failures.append("audio_manifest has no turns")
+	expected_locked_speaker_names = [speaker_voice_names.get("Speaker 0"), speaker_voice_names.get("Speaker 1")]
+	chunk_plan = _read_json(paths["chunk_plan"])
+	if chunk_plan.get("voice_context_policy") != "locked_two_speaker_roster":
+		failures.append("chunk_plan voice_context_policy is not locked_two_speaker_roster")
+	for chunk in chunk_plan.get("chunks") or []:
+		if chunk.get("vibevoice_mode") != "dialogue":
+			failures.append(f"{chunk.get('chunk_id')} chunk_plan is not dialogue mode under locked roster")
+		if list(chunk.get("speaker_names") or []) != expected_locked_speaker_names:
+			failures.append(f"{chunk.get('chunk_id')} chunk_plan speaker_names do not match locked roster")
+	for chunk in audio_manifest.get("chunks") or []:
+		if chunk.get("vibevoice_mode") != "dialogue":
+			failures.append(f"{chunk.get('chunk_id')} audio_manifest chunk is not dialogue mode under locked roster")
+		if list(chunk.get("speaker_names") or []) != expected_locked_speaker_names:
+			failures.append(f"{chunk.get('chunk_id')} audio_manifest speaker_names do not match locked roster")
+	if audio_manifest.get("vibevoice_runner") == "resident_batch":
+		resident_report_value = audio_manifest.get("resident_batch_report")
+		if not resident_report_value:
+			failures.append("audio_manifest missing resident_batch_report for resident_batch generation")
+		else:
+			resident_report_path = _resolve_run_path(run_dir, resident_report_value)
+			if not resident_report_path.exists():
+				failures.append(f"resident_batch_report is missing: {resident_report_path}")
+			else:
+				resident_report = _read_json(resident_report_path)
+				if int(resident_report.get("job_count") or 0) != len(audio_manifest.get("chunks") or []):
+					failures.append("resident_batch_report job_count does not cover every final chunk")
+				for job in resident_report.get("jobs") or []:
+					if job.get("status") != "pass":
+						failures.append(f"resident batch job {job.get('job_id')} status is not pass")
+					if job.get("speaker_mode") != "dialogue":
+						failures.append(f"resident batch job {job.get('job_id')} is not dialogue mode")
+					if list(job.get("speaker_names") or []) != expected_locked_speaker_names:
+						failures.append(f"resident batch job {job.get('job_id')} speaker_names do not match locked roster")
 	audio_duration = _duration(paths["final_audio"])
 	video_duration = _duration(paths["final_video"])
 	render_manifest = _read_json(paths["render_manifest"])
@@ -370,7 +526,16 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		target_duration = float(render_manifest.get("target_duration_sec") or render_manifest.get("source_duration_sec") or 0)
 		if abs(video_duration - target_duration) > 0.5:
 			failures.append(f"source-video revoice duration mismatch: video={video_duration:.2f} target={target_duration:.2f}")
-		if visual_mode == "source_video_revoice_strict" and render_manifest.get("subtitle_mode") != "sidecar_not_burned":
+		subtitle_mode = str(render_manifest.get("subtitle_mode") or "")
+		subtitle_delivery_policy = str(render_manifest.get("subtitle_delivery_policy") or "")
+		sidecar_exception = subtitle_delivery_policy == "sidecar_user_requested_no_burn_subtitles"
+		if subtitle_mode != "burned_ass" and not sidecar_exception:
+			failures.append("formal source-video revoice must burn subtitles into final_video.mp4 by default")
+		if subtitle_mode == "burned_ass" and "burned_subtitles" not in visual_mode:
+			failures.append("burned subtitle render must record burned_subtitles in visual_mode")
+		if subtitle_mode == "burned_ass" and not render_manifest.get("burned_subtitle_render"):
+			failures.append("burned subtitle render is missing burned_subtitle_render evidence")
+		if visual_mode == "source_video_revoice_strict" and subtitle_mode != "sidecar_not_burned":
 			failures.append("strict source-video revoice must keep subtitles sidecar-only, not burned into frames")
 		if series_episode and render_manifest.get("series_episode") is not True:
 			failures.append("series episode render_manifest does not record series_episode=true")

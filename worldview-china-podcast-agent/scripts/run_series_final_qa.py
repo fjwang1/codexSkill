@@ -75,6 +75,19 @@ def _parse_dt(value: Any) -> datetime | None:
 	return datetime.fromisoformat(str(value))
 
 
+def _upload_report_has_final_submit_proof(upload_report: dict[str, Any]) -> bool:
+	if upload_report.get("final_submit_clicked") is True:
+		return True
+	if str(upload_report.get("submission_status") or "") == "submitted":
+		return True
+	evidence_text = json.dumps({
+		"success_evidence": upload_report.get("success_evidence"),
+		"submission_evidence": upload_report.get("submission_evidence"),
+		"post_submit_state": upload_report.get("post_submit_state"),
+	}, ensure_ascii=False)
+	return "稿件投递成功" in evidence_text and "上传成功" in evidence_text
+
+
 def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: bool) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
 	series_manifest_path = run_dir / "04b-series-episodes/series_manifest.json"
@@ -109,6 +122,10 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 		cover_title = _read_json_optional(episode_dir / "cover/cover_title.json")
 		title_cover_manifest = _read_json_optional(episode_dir / "02d-title-cover/title_cover_manifest.json")
 		final_qa = _read_json_optional(episode_dir / "09-final-qa/final-qa-result.json")
+		render_manifest = _read_json_optional(episode_dir / "video/render_manifest.json")
+		audio_manifest = _read_json_optional(episode_dir / "audio/audio_manifest.json")
+		chunk_plan = _read_json_optional(episode_dir / "05-vibevoice-chunks/chunk_plan.json")
+		speaker_census = _read_json_optional(episode_dir / "02a-speaker-census/speaker_roster.json")
 		metadata = _read_json_optional(episode_dir / "bilibili_upload_metadata.json")
 		upload_report = _read_json_optional(episode_dir / "bilibili_upload_draft_report.json")
 		if int(episode_manifest.get("episode_index") or 0) != expected_index:
@@ -160,6 +177,45 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			failures.append(f"episode_{expected_index:03d} does not use the shared series cover background frame")
 		if final_qa.get("overall_status") != "PASS":
 			failures.append(f"episode_{expected_index:03d} final QA is not PASS")
+		if str(render_manifest.get("subtitle_mode") or "") != "burned_ass":
+			failures.append(f"episode_{expected_index:03d} render_manifest subtitle_mode is not burned_ass")
+		if "burned_subtitles" not in str(render_manifest.get("visual_mode") or ""):
+			failures.append(f"episode_{expected_index:03d} render_manifest visual_mode does not record burned_subtitles")
+			if render_manifest.get("series_episode") is not True:
+				failures.append(f"episode_{expected_index:03d} render_manifest does not record series_episode=true")
+			if speaker_census.get("status") != "frozen":
+				failures.append(f"episode_{expected_index:03d} speaker census is not frozen")
+			if int(speaker_census.get("speaker_count") or 0) != 2 or int(speaker_census.get("voice_count") or 0) != 2:
+				failures.append(f"episode_{expected_index:03d} speaker census is not locked to two speakers/two voices")
+			if audio_manifest.get("voice_context_policy") != "locked_two_speaker_roster":
+				failures.append(f"episode_{expected_index:03d} audio_manifest voice_context_policy is not locked_two_speaker_roster")
+		if chunk_plan.get("voice_context_policy") != "locked_two_speaker_roster":
+			failures.append(f"episode_{expected_index:03d} chunk_plan voice_context_policy is not locked_two_speaker_roster")
+		locked_names = [
+			(audio_manifest.get("speaker_voices") or {}).get("Speaker 0"),
+			(audio_manifest.get("speaker_voices") or {}).get("Speaker 1"),
+		]
+		for chunk in audio_manifest.get("chunks") or []:
+			if chunk.get("vibevoice_mode") != "dialogue":
+				failures.append(f"episode_{expected_index:03d} {chunk.get('chunk_id')} is not dialogue mode")
+			if list(chunk.get("speaker_names") or []) != locked_names:
+				failures.append(f"episode_{expected_index:03d} {chunk.get('chunk_id')} speaker_names do not match locked roster")
+		if audio_manifest.get("vibevoice_runner") == "resident_batch":
+			report_value = audio_manifest.get("resident_batch_report")
+			if not report_value:
+				failures.append(f"episode_{expected_index:03d} resident_batch_report missing")
+			else:
+				report_path = episode_dir / str(report_value) if not Path(str(report_value)).is_absolute() else Path(str(report_value))
+				resident_report = _read_json_optional(report_path)
+				if not resident_report:
+					failures.append(f"episode_{expected_index:03d} resident_batch_report missing")
+				elif int(resident_report.get("job_count") or 0) != len(audio_manifest.get("chunks") or []):
+					failures.append(f"episode_{expected_index:03d} resident_batch_report job_count does not cover every chunk")
+				for job in resident_report.get("jobs") or []:
+					if job.get("speaker_mode") != "dialogue":
+						failures.append(f"episode_{expected_index:03d} resident job {job.get('job_id')} is not dialogue mode")
+					if list(job.get("speaker_names") or []) != locked_names:
+						failures.append(f"episode_{expected_index:03d} resident job {job.get('job_id')} speaker_names do not match locked roster")
 		if metadata.get("workflow") != "worldview-china-podcast-agent":
 			failures.append(f"episode_{expected_index:03d} metadata workflow mismatch")
 		if metadata.get("title") != video_title:
@@ -179,8 +235,8 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			failures.append(f"episode_{expected_index:03d} upload report status is not SUBMITTED")
 		elif not require_upload_submitted and status not in {"SUBMITTED", "BLOCKED"}:
 			failures.append(f"episode_{expected_index:03d} upload report status is neither SUBMITTED nor BLOCKED")
-		if status == "SUBMITTED" and upload_report.get("final_submit_clicked") is not True:
-			failures.append(f"episode_{expected_index:03d} upload submitted without final_submit_clicked=true")
+		if status == "SUBMITTED" and not _upload_report_has_final_submit_proof(upload_report):
+			failures.append(f"episode_{expected_index:03d} upload submitted without final submit proof")
 	return _write_result(run_dir, failures, warnings, write_history)
 
 
@@ -223,12 +279,21 @@ def _write_result(run_dir: Path, failures: list[str], warnings: list[str], write
 		history_path = run_dir.parent / "final-podcast-videos.json"
 		history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
 		series_manifest = _read_json(run_dir / "04b-series-episodes/series_manifest.json")
-		history.append({
+		entry = {
 			"run_dir": str(run_dir),
 			"series_manifest": str(run_dir / "04b-series-episodes/series_manifest.json"),
 			"episode_count": len(series_manifest.get("episodes") or []),
 			"series_qa_result": str(output_dir / "series-final-qa-result.json"),
-		})
+		}
+		history = [
+			item for item in history
+			if not (
+				isinstance(item, dict)
+				and item.get("run_dir") == entry["run_dir"]
+				and item.get("series_manifest") == entry["series_manifest"]
+			)
+		]
+		history.append(entry)
 		history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 	return result
 

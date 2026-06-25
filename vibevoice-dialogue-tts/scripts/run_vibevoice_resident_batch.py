@@ -210,7 +210,8 @@ def _prepare_input_for_mode(
 	unique = sorted(set(detected), key=lambda value: int(value))
 	if mode == "dialogue":
 		assert detected, "dialogue mode requires explicit Speaker N: lines"
-		assert len(set(detected)) == 2, f"dialogue mode requires exactly two speakers in the txt file, got {unique}"
+		assert len(set(detected)) <= 2, f"dialogue mode supports at most two speakers in the txt file, got {unique}"
+		assert set(detected).issubset({"0", "1"}), f"dialogue mode requires global Speaker 0/1 ids, got {unique}"
 		return txt_path, mode, _resolve_speaker_names(mode, speaker_names)
 	assert len(set(detected)) <= 1, f"single mode requires zero or one speaker in the txt file, got {unique}"
 	if detected:
@@ -342,7 +343,7 @@ def _run_job(
 
 	speaker_name_mapping: dict[str, str] = {}
 	if speaker_index_base_value == "auto":
-		speaker_index_base = min(int(speaker_num) for speaker_num in speaker_numbers)
+		speaker_index_base = 0 if resolved_mode == "dialogue" and len(resolved_speaker_names) == 2 else min(int(speaker_num) for speaker_num in speaker_numbers)
 	else:
 		speaker_index_base = int(speaker_index_base_value)
 	for offset, name in enumerate(resolved_speaker_names, speaker_index_base):

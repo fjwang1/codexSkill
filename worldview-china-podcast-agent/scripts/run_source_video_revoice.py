@@ -700,6 +700,7 @@ def run_revoice(
 		"source_episode_video_manifest": str(_resolve_optional_path(run_dir, episode_manifest.get("source_episode_video_manifest"))) if episode_manifest.get("source_episode_video_manifest") else None,
 		"playback_speed": 1.0,
 		"subtitle_mode": "burned_ass" if burn_subtitles else "sidecar_not_burned",
+		"subtitle_delivery_policy": "burned_subtitles_default" if burn_subtitles else "sidecar_user_requested_no_burn_subtitles",
 		"burned_subtitle_render": burned_subtitle_render,
 		"source_video": str(source),
 		"source_video_sha256": _sha256(source),
@@ -768,13 +769,16 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--source-start-sec", type=float)
 	parser.add_argument("--match-audio-duration", action="store_true", help="Review-sample mode: cut source visuals to the Chinese audio duration.")
 	parser.add_argument("--allow-trim-audio", action="store_true", help="Allow cutting Chinese audio to target video duration; use only for review samples.")
-	parser.add_argument("--burn-subtitles", action="store_true", help="Burn subtitles into the source-video render using video/subtitle_manifest.json timings and article-video subtitle style. This re-encodes the video.")
+	subtitle_group = parser.add_mutually_exclusive_group()
+	subtitle_group.add_argument("--burn-subtitles", dest="burn_subtitles", action="store_true", help="Burn subtitles into the source-video render. This is the formal-production default.")
+	subtitle_group.add_argument("--no-burn-subtitles", dest="burn_subtitles", action="store_false", help="Explicit exception for user-requested strict visual/source-copy delivery with sidecar subtitles only.")
 	parser.add_argument("--subtitle-manifest", type=Path, help="Subtitle manifest to burn. Defaults to <run_dir>/video/subtitle_manifest.json.")
 	parser.add_argument("--subtitles-ass", type=Path, help="Sidecar ASS subtitle path to copy. Defaults to <run_dir>/video/final_subtitles.ass.")
 	parser.add_argument("--video-encoder", choices=["h264_videotoolbox", "libx264"], default="h264_videotoolbox")
 	parser.add_argument("--video-bitrate", default="18000k", help="Bitrate used by h264_videotoolbox burned-subtitle renders.")
 	parser.add_argument("--no-update-root", action="store_true")
 	parser.add_argument("--force", action="store_true")
+	parser.set_defaults(burn_subtitles=True)
 	return parser.parse_args()
 
 

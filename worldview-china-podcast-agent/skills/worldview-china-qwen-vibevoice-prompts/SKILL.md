@@ -15,10 +15,12 @@ Required:
 
 ```text
 <run_dir>/02b-source-voice-prompts/voice_prompt_manifest.json
+<run_dir>/02b-source-voice-prompts/speaker_roster.json
+<run_dir>/02a-speaker-census/speaker_roster.json
 <run_dir>/02-source-capture/source_transcript.en.json
 ```
 
-`source_transcript.en.json` is used to recover the English `reference_text` matching the selected source clip. If it is absent, the script falls back to `selected_clips[].text_preview`; if no usable text exists, stop and fix the source capture or 02b manifest. Do not skip this node for English source videos.
+`02b-source-voice-prompts/speaker_roster.json` must be derived from the frozen 02a census roster, not re-created during Qwen prompt generation. `source_transcript.en.json` is used to recover the English `reference_text` matching the selected source clip. If it is absent, the script falls back to `selected_clips[].text_preview`; if no usable text exists, stop and fix the source capture or 02b manifest. Do not skip this node for English source videos.
 
 Local Qwen3 defaults:
 
@@ -77,7 +79,8 @@ For each `Speaker 0` / `Speaker 1`:
 1. Read `02b-source-voice-prompts/voice_prompt_manifest.json`.
 2. Prefer one clean selected source clip of about `8-20s`; fall back to the 02b concatenated reference only when no selected clip exists.
 3. Extract the matching English `reference_text` from `source_transcript.en.json` by time overlap.
-4. Ask Qwen3-TTS for a short Chinese target sentence using:
+4. Reject the clip if `reference_text` contains music markers, sponsor/ad copy, URLs/contact reads, finance-ad language, or obvious rolling-caption repetition.
+5. Ask Qwen3-TTS for a short Chinese target sentence using:
 
 ```text
 reference_audio = clean original English speaker clip
@@ -86,8 +89,8 @@ target_text     = short Chinese natural speech prompt
 lang_code       = zh
 ```
 
-5. Normalize Qwen output to mono 24 kHz PCM WAV with loudness around `I=-18`, `TP=-1.5`.
-6. Register the result as a VibeVoice voice named like:
+6. Normalize Qwen output to mono 24 kHz PCM WAV with loudness around `I=-18`, `TP=-1.5`.
+7. Register the result as a VibeVoice voice named like:
 
 ```text
 WC<Run>Speaker0QwenZH
@@ -106,6 +109,7 @@ After generation, require:
 - WAV format is `pcm_s16le`, `24000 Hz`, `mono`.
 - Duration is normally `5-30s`.
 - No long silence; `silence_ratio` should be low.
+- `reference_text` must correspond to the frozen source speaker and must not be sponsor/music/rolling-caption noise.
 
 Useful checks:
 

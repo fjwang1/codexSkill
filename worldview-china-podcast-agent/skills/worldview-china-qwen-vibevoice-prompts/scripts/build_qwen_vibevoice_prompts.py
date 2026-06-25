@@ -118,6 +118,36 @@ def _clean_reference_text(text: str) -> str:
 	return text
 
 
+def _has_rolling_caption_repetition(text: str) -> bool:
+	words = re.findall(r"[A-Za-z][A-Za-z']+|[\u4e00-\u9fff]", text.lower())
+	if len(words) < 12:
+		return False
+	for size in range(4, 9):
+		seen: dict[tuple[str, ...], int] = {}
+		for index in range(0, len(words) - size + 1):
+			gram = tuple(words[index:index + size])
+			seen[gram] = seen.get(gram, 0) + 1
+			if seen[gram] >= 3:
+				return True
+	return False
+
+
+def _reference_text_noise_reasons(text: str) -> list[str]:
+	lower = text.lower()
+	reasons = []
+	for label, patterns in {
+		"music_or_non_speech": ("[music]", "[laughter]"),
+		"sponsor_or_ad": ("sponsor", "patreon", "my debt clinic", "debt clinic", "provision capital", "partnering with"),
+		"contact_or_url": ("visit ", ".com", "www.", "http", "use code", "subscribe", "become a member", "membership"),
+		"finance_ad_terms": ("credit card", "personal loans", "debt relief", "across the nation"),
+	}.items():
+		if any(pattern in lower for pattern in patterns):
+			reasons.append(label)
+	if _has_rolling_caption_repetition(text):
+		reasons.append("rolling_caption_repetition")
+	return sorted(set(reasons))
+
+
 def _coerce_transcript_segment(item: dict[str, Any]) -> TranscriptSegment | None:
 	start_value = item.get("start", item.get("start_sec", item.get("source_start")))
 	end_value = item.get("end", item.get("end_sec", item.get("source_end")))
@@ -382,6 +412,19 @@ def build_prompts(
 	assert source_manifest.exists(), f"Missing source voice prompt manifest: {source_manifest}"
 	source_data = _read_json(source_manifest)
 	assert source_data.get("status") == "pass", f"Source voice prompt manifest is not pass: {source_manifest}"
+	census_roster_path = source_data.get("speaker_census_roster_path")
+	if not census_roster_path:
+		raise RuntimeError("Source voice prompt manifest missing speaker_census_roster_path; run 02a speaker census and rerun 02b.")
+	census_roster = Path(str(census_roster_path))
+	if not census_roster.is_absolute():
+		census_roster = run_dir / census_roster
+	if not census_roster.exists():
+		raise RuntimeError(f"Missing speaker census roster referenced by 02b: {census_roster}")
+	if str(source_data.get("speaker_census_roster_sha256") or "") != _sha256(census_roster):
+		raise RuntimeError(f"Speaker census roster sha256 mismatch: {census_roster}")
+	source_roster = source_data.get("speaker_roster") or {}
+	if source_roster.get("status") != "frozen" or int(source_roster.get("speaker_count") or 0) != 2 or int(source_roster.get("voice_count") or 0) != 2:
+		raise RuntimeError("Source voice prompt manifest does not carry a frozen two-speaker/two-voice roster.")
 	speaker_voices = source_data.get("speaker_voices")
 	assert isinstance(speaker_voices, dict), "source manifest missing speaker_voices"
 	transcript_segments = _load_transcript_segments(run_dir)
@@ -404,6 +447,12 @@ def build_prompts(
 		) or _clean_reference_text(str(chosen.get("text_preview") or ""))
 		if not reference_text:
 			raise RuntimeError(f"Cannot determine English reference text for {speaker}; provide transcript JSON or selected clip text.")
+		noise_reasons = _reference_text_noise_reasons(reference_text)
+		if noise_reasons:
+			raise RuntimeError(
+				f"Rejected noisy Qwen reference text for {speaker}: {', '.join(noise_reasons)}. "
+				"Rerun 02b with a corrected speaker timeline/reference clip."
+			)
 		source_name = str(info.get("vibevoice_name") or f"WC{_safe_name(run_dir.name)}Speaker{_speaker_index(speaker)}")
 		vibevoice_name = f"{_safe_name(source_name)}QwenZH"
 		seed_speakers[speaker] = {
@@ -496,10 +545,12 @@ def build_prompts(
 	manifest = {
 		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
 		"status": "pass",
-		"method": "source_english_reference_to_qwen3_chinese_prompt_to_vibevoice_voice",
-		"run_dir": str(run_dir),
-		"source_voice_prompt_manifest": str(source_manifest),
-		"output_dir": str(output_dir),
+			"method": "source_english_reference_to_qwen3_chinese_prompt_to_vibevoice_voice",
+			"run_dir": str(run_dir),
+			"source_voice_prompt_manifest": str(source_manifest),
+			"speaker_census_roster_path": str(census_roster),
+			"speaker_census_roster_sha256": _sha256(census_roster),
+			"output_dir": str(output_dir),
 		"qwen_repo": str(qwen_repo),
 		"qwen_model": str(qwen_model),
 		"registered_to_vibevoice": register_voices,

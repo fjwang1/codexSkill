@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worldview China Bilibili Text Compliance Review"
+  short_description: "Review generated podcast text for Bilibili terminology and mainland publish safety"
+  default_prompt: "Use $worldview-china-bilibili-text-compliance-review to audit a Worldview China podcast run before TTS, subtitle rendering, metadata generation, or Bilibili upload."

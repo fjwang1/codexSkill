@@ -32,6 +32,11 @@ series_qa = _load_module("run_series_final_qa", SKILL_DIR / "scripts/run_series_
 revoice = _load_module("run_source_video_revoice", SKILL_DIR / "scripts/run_source_video_revoice.py")
 final_qa_script = _load_module("run_final_qa", SKILL_DIR / "scripts/run_final_qa.py")
 vibevoice_chunks = _load_module("run_vibevoice_chunks", SKILL_DIR / "scripts/run_vibevoice_chunks.py")
+audio_integrity = _load_module("run_audio_transcript_integrity_qa", SKILL_DIR / "scripts/run_audio_transcript_integrity_qa.py")
+text_compliance = _load_module(
+	"run_bilibili_text_compliance_review",
+	SKILL_DIR / "skills/worldview-china-bilibili-text-compliance-review/scripts/run_bilibili_text_compliance_review.py",
+)
 selected_registry = _load_module("selected_video_registry", SKILL_DIR / "scripts/selected_video_registry.py")
 source_translation = _load_module("run_source_translation", SKILL_DIR / "scripts/run_source_translation.py")
 source_voice_prompts = _load_module(
@@ -450,6 +455,109 @@ def test_revoice_prefers_precut_episode_source_video(tmp_path: Path) -> None:
 	assert manifest["visual_mode"] == "source_video_revoice_episode_segment"
 
 
+def test_revoice_cli_defaults_to_burned_subtitles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+	monkeypatch.setattr(sys, "argv", ["run_source_video_revoice.py", "--run-dir", str(tmp_path)])
+	args = revoice.parse_args()
+	assert args.burn_subtitles is True
+	monkeypatch.setattr(sys, "argv", ["run_source_video_revoice.py", "--run-dir", str(tmp_path), "--no-burn-subtitles"])
+	args = revoice.parse_args()
+	assert args.burn_subtitles is False
+
+
+def test_audio_transcript_integrity_qa_uses_complete_audio_asr_before_timeline(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	_make_silent_wav(run_dir / "audio/final_podcast.wav", duration=1.0)
+	_write_json(run_dir / "audio/audio_manifest.json", {
+		"turns": [
+			{"turn_index": 1, "speaker": "Speaker 0", "text": "中国经济韧性很重要", "chunk_id": "chunk_001"},
+			{"turn_index": 2, "speaker": "Speaker 1", "text": "外部观察者也在重新评估中国市场", "chunk_id": "chunk_002"},
+		],
+	})
+	_write_json(run_dir / "audio/asr_alignment.json", {
+		"segments": [{
+			"start": 0.0,
+			"end": 1.0,
+			"text": "中国经济韧性很重要外部观察者也在重新评估中国市场",
+		}],
+	})
+	result = audio_integrity.run_integrity_qa(
+		run_dir,
+		min_global_matched_ratio=0.95,
+		min_long_turn_ratio=0.80,
+		min_medium_turn_ratio=0.60,
+		min_short_turn_ratio=0.60,
+		max_unmatched_script_run_chars=12,
+		max_unmatched_asr_run_chars=20,
+	)
+	assert result["status"] == "PASS"
+	assert result["inputs"]["dialogue_timeline"] is None
+	_write_json(run_dir / "audio/asr_alignment.json", {
+		"segments": [{
+			"start": 0.0,
+			"end": 1.0,
+			"text": "中国经济韧性很重要",
+		}],
+	})
+	result = audio_integrity.run_integrity_qa(
+		run_dir,
+		min_global_matched_ratio=0.95,
+		min_long_turn_ratio=0.80,
+		min_medium_turn_ratio=0.60,
+		min_short_turn_ratio=0.60,
+		max_unmatched_script_run_chars=12,
+		max_unmatched_asr_run_chars=20,
+	)
+	assert result["status"] == "FAIL"
+	assert result["summary"]["repair_target_chunks"] == ["chunk_002"]
+
+
+def test_bilibili_text_compliance_review_flags_platform_terminology(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	(run_dir / "04-podcast-script").mkdir(parents=True)
+	(run_dir / "04-podcast-script/podcast_script.md").write_text(
+		"Speaker 0: 中国台湾这个国家这样的称呼不合规，香港也不能简称。\n"
+		"Speaker 1: Mainland China 和南京大屠杀纪念馆、新疆维吾尔族自治区也都不合规。\n",
+		encoding="utf-8",
+	)
+	(run_dir / "video_title.txt").write_text("嘉宾观察·第1集：穆斯林该押注中国吗？\n", encoding="utf-8")
+	_write_json(run_dir / "cover/cover_title.json", {"title_text": "嘉宾观察：押注中国吗"})
+	result = text_compliance.run_review(run_dir, stage="test")
+	assert result["status"] == "FAIL"
+	rule_ids = {finding["rule_id"] for finding in result["findings"]}
+	assert "taiwan_hongkong_abbreviation" in rule_ids
+	assert "taiwan_named_as_country" in rule_ids
+	assert "wrong_chinese_mainland_english_term" in rule_ids
+	assert "wrong_nanjing_memorial_name" in rule_ids
+	assert "wrong_xinjiang_autonomous_region_name" in rule_ids
+	assert "polarizing_bilibili_title_or_metadata" in rule_ids
+
+
+def test_bilibili_text_compliance_review_accepts_required_terms(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	(run_dir / "04-podcast-script").mkdir(parents=True)
+	(run_dir / "04-podcast-script/podcast_script.md").write_text(
+		"Speaker 0: 中国台湾和中国香港的市场联系，需要放在 Chinese mainland 的区域背景下理解。\n"
+		"Speaker 1: 侵华日军南京大屠杀遇难同胞纪念馆与新疆维吾尔自治区都使用规范全称。\n",
+		encoding="utf-8",
+	)
+	result = text_compliance.run_review(run_dir, stage="test")
+	assert result["status"] == "PASS"
+	assert result["summary"]["fail_findings"] == 0
+
+
+def test_bilibili_text_compliance_review_ignores_source_text_fields(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	_write_json(run_dir / "03-source-translation/source_transcript.zh.json", {
+		"segments": [{
+			"source_text": "The guest said Mainland China and Taiwan in the original transcript.",
+			"zh_text": "嘉宾谈到 Chinese mainland 与中国台湾。",
+		}],
+	})
+	result = text_compliance.run_review(run_dir, stage="test")
+	assert result["status"] == "PASS"
+	assert result["summary"]["fail_findings"] == 0
+
+
 def test_vibevoice_chunks_dry_run_defaults_to_mps_auto(tmp_path: Path) -> None:
 	run_dir = tmp_path / "run"
 	(run_dir / "04-podcast-script").mkdir(parents=True)
@@ -483,6 +591,7 @@ def test_vibevoice_chunks_dry_run_defaults_to_mps_auto(tmp_path: Path) -> None:
 		postprocess_min_source_max_volume=-8.0,
 		voice_prompt_policy="qwen_chinese_required",
 		generation_runner="resident_batch",
+		voice_context_policy="locked_two_speaker_roster",
 		device=vibevoice_chunks.DEFAULT_VIBEVOICE_DEVICE,
 		torch_dtype=vibevoice_chunks.DEFAULT_VIBEVOICE_TORCH_DTYPE,
 		attn_implementation=vibevoice_chunks.DEFAULT_VIBEVOICE_ATTN_IMPLEMENTATION,
@@ -495,6 +604,9 @@ def test_vibevoice_chunks_dry_run_defaults_to_mps_auto(tmp_path: Path) -> None:
 	assert plan["vibevoice_torch_dtype"] == "auto"
 	assert plan["vibevoice_attn_implementation"] == "auto"
 	assert plan["vibevoice_generation_seed"] == 42
+	assert plan["target_chars"] == 600
+	assert plan["min_split_chars"] == 350
+	assert plan["hard_max_chars"] == 800
 
 
 def test_vibevoice_chunk_state_reuses_existing_raw_for_postprocess_only(tmp_path: Path) -> None:
@@ -732,6 +844,99 @@ def test_source_translation_dedupes_adjacent_short_prefix_turns() -> None:
 	assert "how many Taiwanese people" in turns[0]["source_text"]
 
 
+def _write_minimal_series_episode_runtime_contracts(episode_dir: Path) -> None:
+	locked_speaker_names = ["Voice0", "Voice1"]
+	_write_json(episode_dir / "02a-speaker-census/speaker_roster.json", {
+		"status": "frozen",
+		"speaker_count": 2,
+		"voice_count": 2,
+		"analysis_window_sec": 360.0,
+		"speakers": {
+			"Speaker 0": {"description": "host"},
+			"Speaker 1": {"description": "guest"},
+		},
+	})
+	_write_json(episode_dir / "video/render_manifest.json", {
+		"subtitle_mode": "burned_ass",
+		"visual_mode": "source_video_revoice_episode_segment_burned_subtitles",
+		"series_episode": True,
+	})
+	_write_json(episode_dir / "audio/audio_manifest.json", {
+		"voice_context_policy": "locked_two_speaker_roster",
+		"speaker_voices": {"Speaker 0": "Voice0", "Speaker 1": "Voice1"},
+		"chunks": [{
+			"chunk_id": "chunk_001",
+			"vibevoice_mode": "dialogue",
+			"speaker_names": locked_speaker_names,
+		}],
+	})
+	_write_json(episode_dir / "05-vibevoice-chunks/chunk_plan.json", {
+		"voice_context_policy": "locked_two_speaker_roster",
+		"chunks": [{
+			"chunk_id": "chunk_001",
+			"vibevoice_mode": "dialogue",
+			"speaker_names": locked_speaker_names,
+		}],
+	})
+
+
+def _write_minimal_series_final_qa_run(
+	run_dir: Path,
+	upload_report: dict[str, Any],
+	*,
+	final_qa_status: str = "PASS",
+) -> None:
+	series_dir = run_dir / "04b-series-episodes"
+	shared_frame = run_dir / "shared.png"
+	_write_png(shared_frame)
+	episode_dir = series_dir / "episode_001"
+	episode_dir.mkdir(parents=True, exist_ok=True)
+	title = "嘉宾观察·第1集：主题1"
+	schedule = datetime.fromisoformat("2026-06-24T11:00:00+08:00")
+	(episode_dir / "video_title.txt").write_text(title + "\n", encoding="utf-8")
+	_write_json(episode_dir / "episode_manifest.json", {
+		"schema_version": "worldview-china-podcast-series-episode.v1",
+		"episode_index": 1,
+		"episode_count": 1,
+		"series_title_prefix": "嘉宾观察",
+		"episode_subtitle": "主题1",
+		"episode_order_marker": "第1集",
+		"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
+		"episode_order_marker_template": "第{episode_index}集",
+		"video_title": title,
+	})
+	_write_json(episode_dir / "cover/cover_title.json", {
+		"title_text": "嘉宾观察：主题1",
+		"video_title_text": title,
+		"cover_title_omits_episode_index": True,
+	})
+	_write_json(episode_dir / "02d-title-cover/title_cover_manifest.json", {
+		"frame_selection": {"path": str(shared_frame)},
+	})
+	_write_json(episode_dir / "09-final-qa/final-qa-result.json", {"overall_status": final_qa_status})
+	_write_minimal_series_episode_runtime_contracts(episode_dir)
+	_write_json(episode_dir / "bilibili_upload_metadata.json", {
+		"workflow": "worldview-china-podcast-agent",
+		"title": title,
+		"episode_index": 1,
+		"scheduled_publish_at": schedule.isoformat(),
+	})
+	_write_json(episode_dir / "bilibili_upload_draft_report.json", upload_report)
+	_write_json(run_dir / "04b-series-episodes/series_manifest.json", {
+		"schema_version": "worldview-china-podcast-series.v1",
+		"serial_execution_required": True,
+		"parallel_execution_allowed": False,
+		"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
+		"episode_order_marker_template": "第{episode_index}集",
+		"shared_cover_frame": str(shared_frame),
+		"episodes": [{
+			"episode_index": 1,
+			"episode_run_dir": str(episode_dir),
+			"scheduled_publish_at": schedule.isoformat(),
+		}],
+	})
+
+
 def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path: Path) -> None:
 	run_dir = tmp_path / "run"
 	series_dir = run_dir / "04b-series-episodes"
@@ -765,6 +970,7 @@ def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path
 			"frame_selection": {"path": str(shared_frame)},
 		})
 		_write_json(episode_dir / "09-final-qa/final-qa-result.json", {"overall_status": "PASS"})
+		_write_minimal_series_episode_runtime_contracts(episode_dir)
 		schedule = first_schedule + timedelta(hours=index - 1)
 		_write_json(episode_dir / "bilibili_upload_metadata.json", {
 			"workflow": "worldview-china-podcast-agent",
@@ -792,6 +998,28 @@ def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path
 	})
 	result = series_qa.run_series_qa(run_dir, require_upload_submitted=True, write_history=False)
 	assert result["overall_status"] == "PASS"
+
+
+def test_series_final_qa_accepts_legacy_bilibili_success_evidence(tmp_path: Path) -> None:
+	run_dir = tmp_path / "run"
+	_write_minimal_series_final_qa_run(run_dir, {
+		"status": "SUBMITTED",
+		"post_submit_state": {
+			"text": "稿件投递成功\n视频嘉宾观察·第1集：主题1上传成功",
+		},
+	})
+	result = series_qa.run_series_qa(run_dir, require_upload_submitted=True, write_history=False)
+	assert result["overall_status"] == "PASS"
+
+
+def test_series_final_qa_rejects_submitted_upload_without_final_submit_proof(tmp_path: Path) -> None:
+	run_dir = tmp_path / "run"
+	_write_minimal_series_final_qa_run(run_dir, {
+		"status": "SUBMITTED",
+	})
+	result = series_qa.run_series_qa(run_dir, require_upload_submitted=True, write_history=False)
+	assert result["overall_status"] == "FAIL"
+	assert any("final submit proof" in failure for failure in result["failures"])
 
 
 def test_series_final_qa_rejects_mixed_order_marker_template(tmp_path: Path) -> None:
@@ -909,7 +1137,7 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 		registered = run_dir / f"registered/{voice_name}.wav"
 		registered.parent.mkdir(parents=True, exist_ok=True)
 		shutil.copy2(ref, registered)
-	_write_json(run_dir / "02b-source-voice-prompts/voice_prompt_manifest.json", {"status": "pass"})
+
 	speaker_voices = {
 		"Speaker 0": {
 			"vibevoice_name": "Voice0",
@@ -924,6 +1152,32 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 			"sha256": _sha256(run_dir / "02c-qwen-vibevoice-prompts/registered/Voice1.wav"),
 		},
 	}
+	_write_json(run_dir / "02a-speaker-census/speaker_roster.json", {
+		"schema_version": "worldview-china-speaker-census.v1",
+		"status": "frozen",
+		"speaker_count": 2,
+		"voice_count": 2,
+		"analysis_window_sec": 360.0,
+		"speakers": {
+			"Speaker 0": {"description": "host voice"},
+			"Speaker 1": {"description": "guest voice"},
+		},
+	})
+	speaker_census_path = run_dir / "02a-speaker-census/speaker_roster.json"
+	_write_json(run_dir / "02b-source-voice-prompts/voice_prompt_manifest.json", {
+		"status": "pass",
+		"speaker_census_roster_path": str(speaker_census_path),
+		"speaker_census_roster_sha256": _sha256(speaker_census_path),
+		"speaker_roster": {
+			"status": "frozen",
+			"speaker_count": 2,
+			"voice_count": 2,
+		},
+		"speaker_voices": {
+			"Speaker 0": {"selected_clips": []},
+			"Speaker 1": {"selected_clips": []},
+		},
+	})
 	_write_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json", {
 		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
 		"status": "pass",
@@ -940,17 +1194,37 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 	(run_dir / "podcast_script.md").write_text("Speaker 0: 中国的经济韧性很重要\n", encoding="utf-8")
 	(run_dir / "04-podcast-script").mkdir(parents=True, exist_ok=True)
 	(run_dir / "04-podcast-script/script_report.md").write_text("content_coverage: full_translation\n", encoding="utf-8")
-	_write_json(run_dir / "05-vibevoice-chunks/chunk_plan.json", {"chunks": [{"chunk_id": "chunk_001"}]})
+	locked_speaker_names = ["Voice0", "Voice1"]
+	_write_json(run_dir / "05-vibevoice-chunks/chunk_plan.json", {
+		"voice_context_policy": "locked_two_speaker_roster",
+		"chunks": [{
+			"chunk_id": "chunk_001",
+			"vibevoice_mode": "dialogue",
+			"speaker_names": locked_speaker_names,
+		}],
+	})
 	_write_json(run_dir / "audio/audio_manifest.json", {
 		"audio_backend": "vibevoice_chunked_dialogue",
+		"voice_context_policy": "locked_two_speaker_roster",
 		"speaker_voices": {"Speaker 0": "Voice0", "Speaker 1": "Voice1"},
 		"voice_prompt_manifest": "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json",
-		"chunks": [{"chunk_id": "chunk_001"}],
+		"chunks": [{
+			"chunk_id": "chunk_001",
+			"vibevoice_mode": "dialogue",
+			"speaker_names": locked_speaker_names,
+		}],
 		"turns": [{"speaker": "Speaker 0", "text": "中国的经济韧性很重要"}],
 	})
 	_write_json(run_dir / "audio/dialogue_timeline.json", {
 		"turns": [{"speaker": "Speaker 0", "text": "中国的经济韧性很重要"}],
 		"cues": [{"text": "中国的经济韧性很重要"}],
+	})
+	_write_json(run_dir / "06b-audio-transcript-integrity/audio-transcript-integrity-result.json", {
+		"status": "PASS",
+		"summary": {
+			"matched_script_ratio": 1.0,
+			"repair_target_chunks": [],
+		},
 	})
 	(run_dir / "video/final_subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n中国的经济韧性很重要\n", encoding="utf-8")
 	(run_dir / "video/final_subtitles.ass").write_text("[Events]\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中国的经济韧性很重要\n", encoding="utf-8")
@@ -958,6 +1232,23 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 		"style": {"speaker_labels": False},
 		"cues": [{"display_text": "中国的经济韧性很重要"}],
 	})
+	compliance_result = text_compliance.run_review(run_dir, stage="test")
+	assert compliance_result["status"] == "PASS"
+	_write_json(run_dir / "video/render_manifest.json", {
+		"visual_mode": "source_video_revoice_episode_segment_burned_subtitles",
+		"series_episode": True,
+		"target_duration_sec": 1.0,
+		"subtitle_mode": "burned_ass",
+		"subtitle_delivery_policy": "burned_subtitles_default",
+		"burned_subtitle_render": {"method": "test_overlay"},
+		"screenshots": {
+			"opening": str(run_dir / "08-source-video-revoice/screenshots/opening.png"),
+			"middle": str(run_dir / "08-source-video-revoice/screenshots/middle.png"),
+			"end": str(run_dir / "08-source-video-revoice/screenshots/end.png"),
+		},
+	})
+	result = final_qa_script.run_qa(run_dir, write_history=False)
+	assert result["overall_status"] == "PASS"
 	_write_json(run_dir / "video/render_manifest.json", {
 		"visual_mode": "source_video_revoice_episode_segment",
 		"series_episode": True,
@@ -970,4 +1261,5 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 		},
 	})
 	result = final_qa_script.run_qa(run_dir, write_history=False)
-	assert result["overall_status"] == "PASS"
+	assert result["overall_status"] == "FAIL"
+	assert any("must burn subtitles" in failure for failure in result["failures"])

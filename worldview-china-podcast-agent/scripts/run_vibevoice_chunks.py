@@ -19,9 +19,9 @@ RESIDENT_BATCH_SCRIPT = Path("/Users/wangfangjia/.codex/skills/vibevoice-dialogu
 VIBEVOICE_PYTHON = Path("/Users/wangfangjia/code/VibeVoice/.venv/bin/python")
 RUNTIME_PYTHON = Path("/Users/wangfangjia/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3")
 
-TARGET_CHARS = 360
-MIN_SPLIT_CHARS = 180
-HARD_MAX_CHARS = 430
+TARGET_CHARS = 600
+MIN_SPLIT_CHARS = 350
+HARD_MAX_CHARS = 800
 DEFAULT_SPLIT_LONG_TURN_MAX_CHARS = 220
 MIN_SPEAKER_TURNS_PER_CHUNK = 0
 INTER_CHUNK_PAUSE_SEC = 0.5
@@ -54,6 +54,10 @@ VOICE_PROMPT_POLICIES = {
 GENERATION_RUNNERS = {
 	"resident_batch",
 	"legacy_per_chunk",
+}
+VOICE_CONTEXT_POLICIES = {
+	"locked_two_speaker_roster",
+	"auto_by_chunk",
 }
 
 
@@ -237,10 +241,17 @@ def _load_speaker_voices(run_dir: Path, voice_prompt_policy: str) -> tuple[dict[
 	)
 
 
-def _vibevoice_mode(turns: list[dict[str, Any]], speaker_voices: dict[str, str]) -> tuple[str, list[str]]:
+def _vibevoice_mode(
+	turns: list[dict[str, Any]],
+	speaker_voices: dict[str, str],
+	voice_context_policy: str,
+) -> tuple[str, list[str]]:
+	assert voice_context_policy in VOICE_CONTEXT_POLICIES
 	counts = _speaker_counts(turns)
 	present = [speaker for speaker in ("Speaker 0", "Speaker 1") if counts[speaker] > 0]
 	assert present, "Cannot run VibeVoice on an empty chunk"
+	if voice_context_policy == "locked_two_speaker_roster":
+		return "dialogue", [speaker_voices["Speaker 0"], speaker_voices["Speaker 1"]]
 	if len(present) == 1:
 		return "single", [speaker_voices[present[0]]]
 	return "dialogue", [speaker_voices["Speaker 0"], speaker_voices["Speaker 1"]]
@@ -465,11 +476,13 @@ def run_chunks(
 	torch_dtype: str,
 	attn_implementation: str,
 	generation_seed: int | None,
+	voice_context_policy: str,
 ) -> dict[str, Any]:
 	assert PREPARE_SCRIPT.exists()
 	assert RUN_SCRIPT.exists()
 	assert POSTPROCESS_SCRIPT.exists()
 	assert generation_runner in GENERATION_RUNNERS
+	assert voice_context_policy in VOICE_CONTEXT_POLICIES
 	if generation_runner == "legacy_per_chunk" and device != "cpu":
 		raise RuntimeError(
 			"legacy_per_chunk uses the older article VibeVoice script with locked CPU settings. "
@@ -504,7 +517,7 @@ def run_chunks(
 	for index, chunk_turns in enumerate(chunks, start=1):
 		chunk_id = f"chunk_{index:03d}"
 		display_chars = sum(int(turn["char_count"]) for turn in chunk_turns)
-		vibevoice_mode, speaker_names = _vibevoice_mode(chunk_turns, speaker_voices)
+		vibevoice_mode, speaker_names = _vibevoice_mode(chunk_turns, speaker_voices, voice_context_policy)
 		chunk_plan.append({
 			"chunk_id": chunk_id,
 			"turn_start": chunk_turns[0]["turn_index"],
@@ -515,6 +528,11 @@ def run_chunks(
 			"speaker_counts": _speaker_counts(chunk_turns),
 			"vibevoice_mode": vibevoice_mode,
 			"speaker_names": speaker_names,
+			"voice_context_policy": voice_context_policy,
+			"locked_speaker_roster": {
+				"Speaker 0": speaker_voices["Speaker 0"],
+				"Speaker 1": speaker_voices["Speaker 1"],
+			},
 		})
 	_write_json(node_dir / "chunk_plan.json", {
 		"schema_version": "worldview-china-vibevoice-chunk-plan.v1",
@@ -541,6 +559,7 @@ def run_chunks(
 		"speaker_voices": speaker_voices,
 		"voice_prompt_manifest": voice_prompt_manifest,
 		"voice_prompt_policy": voice_prompt_policy,
+		"voice_context_policy": voice_context_policy,
 		"vibevoice_runner": generation_runner,
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
@@ -556,7 +575,7 @@ def run_chunks(
 	resident_jobs: list[dict[str, Any]] = []
 	for index, chunk_turns in enumerate(chunks, start=1):
 		chunk_id = f"chunk_{index:03d}"
-		vibevoice_mode, speaker_names = _vibevoice_mode(chunk_turns, speaker_voices)
+		vibevoice_mode, speaker_names = _vibevoice_mode(chunk_turns, speaker_voices, voice_context_policy)
 		chunk_dir = chunks_dir / chunk_id
 		audio_dir = chunk_dir / "audio"
 		final_wav = audio_dir / "final_podcast.wav"
@@ -574,6 +593,7 @@ def run_chunks(
 			"raw_wav": raw_wav,
 			"vibevoice_mode": vibevoice_mode,
 			"speaker_names": speaker_names,
+			"voice_context_policy": voice_context_policy,
 			**state,
 		}
 		chunk_contexts.append(context)
@@ -600,7 +620,8 @@ def run_chunks(
 				"speaker_mode": vibevoice_mode,
 				"speaker_names": speaker_names,
 				"force": True,
-				"speaker_index_base": "auto",
+				"speaker_index_base": "0" if voice_context_policy == "locked_two_speaker_roster" else "auto",
+				"voice_context_policy": voice_context_policy,
 				"seed": generation_seed,
 			})
 			continue
@@ -704,6 +725,7 @@ def run_chunks(
 			"display_characters": sum(int(turn["char_count"]) for turn in chunk_turns),
 			"vibevoice_mode": vibevoice_mode,
 			"speaker_names": speaker_names,
+			"voice_context_policy": voice_context_policy,
 			"vibevoice_runner": generation_runner,
 			"audio": str(final_wav),
 			"duration_sec": round(_duration(final_wav), 3),
@@ -756,6 +778,7 @@ def run_chunks(
 		"speaker_voices": speaker_voices,
 		"voice_prompt_manifest": voice_prompt_manifest,
 		"voice_prompt_policy": voice_prompt_policy,
+		"voice_context_policy": voice_context_policy,
 		"vibevoice_runner": generation_runner,
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
@@ -783,6 +806,7 @@ def run_chunks(
 				"display_characters": result["display_characters"],
 				"vibevoice_mode": result["vibevoice_mode"],
 				"speaker_names": result["speaker_names"],
+				"voice_context_policy": result["voice_context_policy"],
 			}
 			for result in chunk_results
 		],
@@ -799,6 +823,7 @@ def run_chunks(
 				"- audio_backend: vibevoice_chunked_dialogue",
 				f"- vibevoice_runner: {generation_runner}",
 				f"- vibevoice_device: {device}",
+				f"- voice_context_policy: {voice_context_policy}",
 				f"- chunk_count: {len(chunk_results)}",
 				f"- duration_sec: {manifest['duration_sec']}",
 				f"- final_audio: {final_audio}",
@@ -829,6 +854,7 @@ def run_chunks(
 		"vibevoice_torch_dtype": torch_dtype,
 		"vibevoice_attn_implementation": attn_implementation,
 		"vibevoice_generation_seed": generation_seed,
+		"voice_context_policy": voice_context_policy,
 	}
 	_write_json(run_manifest_path, run_manifest)
 	return run_manifest["nodes"]["05-vibevoice-chunks"]
@@ -842,7 +868,7 @@ def main() -> int:
 	parser.add_argument("--dry-run", action="store_true")
 	parser.add_argument("--no-progress-bar", action="store_true")
 	parser.add_argument("--split-chunk-index", action="append", type=int, default=[])
-	parser.add_argument("--split-max-chars", type=int, default=650)
+	parser.add_argument("--split-max-chars", type=int, default=HARD_MAX_CHARS)
 	parser.add_argument("--split-all-chunks", action="store_true")
 	parser.add_argument("--split-long-turn-max-chars", type=int, default=DEFAULT_SPLIT_LONG_TURN_MAX_CHARS)
 	parser.add_argument("--fixed-chunk-plan-json", type=Path)
@@ -852,6 +878,15 @@ def main() -> int:
 	parser.add_argument("--torch-dtype", choices=("auto", "float32", "float16", "bfloat16"), default=DEFAULT_VIBEVOICE_TORCH_DTYPE, help="Default auto resolves to float16 on mps and float32 on cpu in the resident runner.")
 	parser.add_argument("--attn-implementation", choices=("auto", "eager", "sdpa", "flash_attention_2"), default=DEFAULT_VIBEVOICE_ATTN_IMPLEMENTATION, help="Default auto resolves to sdpa on mps and eager on cpu in the resident runner.")
 	parser.add_argument("--generation-seed", type=int, default=42, help="Seed passed to resident VibeVoice jobs. Change only for targeted regeneration of bad chunks.")
+	parser.add_argument(
+		"--voice-context-policy",
+		choices=sorted(VOICE_CONTEXT_POLICIES),
+		default="locked_two_speaker_roster",
+		help=(
+			"Default locks every formal chunk to the same two-speaker VibeVoice roster. "
+			"Use auto_by_chunk only for debugging old runs."
+		),
+	)
 	parser.add_argument(
 		"--voice-prompt-policy",
 		choices=sorted(VOICE_PROMPT_POLICIES),
@@ -880,6 +915,7 @@ def main() -> int:
 		args.torch_dtype,
 		args.attn_implementation,
 		args.generation_seed,
+		args.voice_context_policy,
 	)
 	print(json.dumps(result, ensure_ascii=False, indent=2))
 	return 0
