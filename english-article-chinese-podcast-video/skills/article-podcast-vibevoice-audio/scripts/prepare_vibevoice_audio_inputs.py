@@ -13,6 +13,8 @@ from typing import Any
 SPEAKER_ALIASES = {
 	"Speaker 0": "Speaker 0",
 	"Speaker 1": "Speaker 1",
+	"Speaker 2": "Speaker 2",
+	"Speaker 3": "Speaker 3",
 	"林遥": "Speaker 0",
 	"陈澈": "Speaker 1",
 }
@@ -26,6 +28,16 @@ SPEAKER_MAP = {
 	"Speaker 1": {
 		"display_role": "男分析者",
 		"style": "冷静、解释机制、给判断",
+		"default_vibevoice_name": "BowenClean",
+	},
+	"Speaker 2": {
+		"display_role": "第三位说话人",
+		"style": "保持源播客第三位说话人的原始语气",
+		"default_vibevoice_name": "Xinran",
+	},
+	"Speaker 3": {
+		"display_role": "第四位说话人",
+		"style": "保持源播客第四位说话人的原始语气",
 		"default_vibevoice_name": "BowenClean",
 	},
 }
@@ -266,7 +278,7 @@ def _parse_turns(text: str) -> list[dict[str, Any]]:
 		line = raw_line.strip()
 		if not line:
 			continue
-		match = re.match(r"^(Speaker [01]|林遥|陈澈)[：:]\s*(.*)$", line)
+		match = re.match(r"^(Speaker [0-3]|林遥|陈澈)[：:]\s*(.*)$", line)
 		if match:
 			if current_speaker and current_lines:
 				turns.append({"speaker": current_speaker, "text": " ".join(current_lines).strip()})
@@ -286,7 +298,7 @@ def _parse_turns(text: str) -> list[dict[str, Any]]:
 		cleaned.append({
 			"turn_index": index,
 			"speaker": turn["speaker"],
-			"display_role": SPEAKER_MAP[turn["speaker"]]["display_role"],
+			"display_role": SPEAKER_MAP.get(turn["speaker"], {"display_role": "说话人"})["display_role"],
 			"text": text_value,
 			"char_count": len(re.sub(r"\s+", "", text_value)),
 		})
@@ -302,7 +314,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-	parser = argparse.ArgumentParser(description="Prepare Speaker 0/Speaker 1 VibeVoice inputs for article podcast projects.")
+	parser = argparse.ArgumentParser(description="Prepare Speaker-tagged VibeVoice inputs for article or Worldview podcast projects.")
 	parser.add_argument("--project-dir", required=True, type=Path)
 	parser.add_argument("--script-path", type=Path)
 	parser.add_argument("--output-txt", type=Path)
@@ -330,9 +342,10 @@ def main() -> int:
 	assert script_path.exists(), f"Podcast script not found: {script_path}"
 	text = script_path.read_text(encoding="utf-8")
 	turns = _parse_turns(text)
-	assert turns, "No Speaker 0/Speaker 1 turns found"
+	assert turns, "No Speaker turns found"
 	assert args.min_speaker_turns >= 0, "--min-speaker-turns must be >= 0"
-	speaker_counts = {speaker: sum(1 for turn in turns if turn["speaker"] == speaker) for speaker in SPEAKER_MAP}
+	speaker_ids = sorted({str(turn["speaker"]) for turn in turns} | {"Speaker 0", "Speaker 1"}, key=lambda value: int(value.split()[1]))
+	speaker_counts = {speaker: sum(1 for turn in turns if turn["speaker"] == speaker) for speaker in speaker_ids}
 	for speaker, count in speaker_counts.items():
 		assert count >= args.min_speaker_turns, f"{speaker} has too few turns: {count}"
 

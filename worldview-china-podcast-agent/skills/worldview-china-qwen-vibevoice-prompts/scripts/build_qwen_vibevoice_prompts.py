@@ -18,10 +18,14 @@ DEFAULT_QWEN_MODEL = DEFAULT_QWEN_REPO / "models" / "Qwen3-TTS-12Hz-1.7B-Base-8b
 DEFAULT_VIBEVOICE_VOICES_DIR = Path("/Users/wangfangjia/code/VibeVoice/demo/voices")
 DEFAULT_MIN_PROMPT_SEC = 5.0
 DEFAULT_MAX_PROMPT_SEC = 30.0
+MAX_SPEAKERS = 4
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 
 DEFAULT_TARGET_TEXTS = {
 	"Speaker 0": "大家好，欢迎收听今天的节目。我们会从中国经济、全球贸易和企业实务几个角度，慢慢把问题讲清楚。今天的讨论不是简单下结论，而是尽量把复杂背景拆开来看。",
 	"Speaker 1": "谢谢邀请，我很高兴来聊这个话题。中国市场非常复杂，既有巨大的机会，也有很多容易被忽视的约束。我的经验是，必须进入具体城市、具体行业和具体人群，才能真正理解它。",
+	"Speaker 2": "我想补充一个观察。很多外部讨论会把中国市场看得过于单一，但实际情况往往要分行业、分地区、分时间阶段来看。只有把这些层次拆开，判断才会更稳。",
+	"Speaker 3": "从我的角度看，这个问题不能只看一个指标。政策环境、企业决策、消费者信心和国际关系都会互相影响。我们可以慢慢把这些线索串起来。",
 }
 
 
@@ -224,15 +228,26 @@ def _safe_name(value: str) -> str:
 
 
 def _speaker_index(speaker: str) -> int:
-	return 0 if speaker == "Speaker 0" else 1
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker id: {speaker}"
+	return int(match.group(1))
 
 
-def _load_target_texts(path: Path | None) -> dict[str, str]:
+def _is_supported_speaker(speaker: str) -> bool:
+	return SPEAKER_RE.fullmatch(speaker) is not None
+
+
+def _sorted_speakers(values: Any) -> list[str]:
+	speakers = [str(value) for value in values if _is_supported_speaker(str(value))]
+	return sorted(set(speakers), key=_speaker_index)
+
+
+def _load_target_texts(path: Path | None, speaker_ids: list[str]) -> dict[str, str]:
 	if path is None:
-		return dict(DEFAULT_TARGET_TEXTS)
+		return {speaker: DEFAULT_TARGET_TEXTS[speaker] for speaker in speaker_ids}
 	data = _read_json(path.expanduser().resolve())
-	result = dict(DEFAULT_TARGET_TEXTS)
-	for speaker in ("Speaker 0", "Speaker 1"):
+	result = {speaker: DEFAULT_TARGET_TEXTS[speaker] for speaker in speaker_ids}
+	for speaker in speaker_ids:
 		if isinstance(data, dict) and data.get(speaker):
 			result[speaker] = str(data[speaker])
 	return result
@@ -423,15 +438,21 @@ def build_prompts(
 	if str(source_data.get("speaker_census_roster_sha256") or "") != _sha256(census_roster):
 		raise RuntimeError(f"Speaker census roster sha256 mismatch: {census_roster}")
 	source_roster = source_data.get("speaker_roster") or {}
-	if source_roster.get("status") != "frozen" or int(source_roster.get("speaker_count") or 0) != 2 or int(source_roster.get("voice_count") or 0) != 2:
-		raise RuntimeError("Source voice prompt manifest does not carry a frozen two-speaker/two-voice roster.")
+	speaker_count = int(source_roster.get("speaker_count") or 0)
+	voice_count = int(source_roster.get("voice_count") or 0)
+	if source_roster.get("status") != "frozen" or not (1 <= speaker_count <= MAX_SPEAKERS) or voice_count != speaker_count:
+		raise RuntimeError(f"Source voice prompt manifest must carry a frozen 1-{MAX_SPEAKERS} speaker roster.")
 	speaker_voices = source_data.get("speaker_voices")
 	assert isinstance(speaker_voices, dict), "source manifest missing speaker_voices"
+	speaker_ids = _sorted_speakers(speaker_voices.keys())
+	expected_speaker_ids = [f"Speaker {index}" for index in range(speaker_count)]
+	if speaker_ids != expected_speaker_ids:
+		raise RuntimeError(f"Source voice prompt manifest must contain contiguous Speaker 0..{speaker_count - 1}.")
 	transcript_segments = _load_transcript_segments(run_dir)
-	target_texts = _load_target_texts(target_text_json)
+	target_texts = _load_target_texts(target_text_json, speaker_ids)
 	output_dir.mkdir(parents=True, exist_ok=True)
 	seed_speakers: dict[str, Any] = {}
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in speaker_ids:
 		info = speaker_voices.get(speaker)
 		if not isinstance(info, dict):
 			raise RuntimeError(f"Missing {speaker} in {source_manifest}")
@@ -448,9 +469,10 @@ def build_prompts(
 		if not reference_text:
 			raise RuntimeError(f"Cannot determine English reference text for {speaker}; provide transcript JSON or selected clip text.")
 		noise_reasons = _reference_text_noise_reasons(reference_text)
-		if noise_reasons:
+		fatal_noise_reasons = [reason for reason in noise_reasons if reason != "rolling_caption_repetition"]
+		if fatal_noise_reasons:
 			raise RuntimeError(
-				f"Rejected noisy Qwen reference text for {speaker}: {', '.join(noise_reasons)}. "
+				f"Rejected noisy Qwen reference text for {speaker}: {', '.join(fatal_noise_reasons)}. "
 				"Rerun 02b with a corrected speaker timeline/reference clip."
 			)
 		source_name = str(info.get("vibevoice_name") or f"WC{_safe_name(run_dir.name)}Speaker{_speaker_index(speaker)}")
@@ -465,6 +487,7 @@ def build_prompts(
 			"source_start_sec": chosen.get("start_sec"),
 			"source_end_sec": chosen.get("end_sec"),
 			"reference_text": reference_text,
+			"reference_text_warnings": noise_reasons,
 			"target_text": target_texts[speaker],
 			"qwen_output_dir": str(output_dir / f"qwen_speaker{_speaker_index(speaker)}"),
 		}
@@ -545,12 +568,15 @@ def build_prompts(
 	manifest = {
 		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
 		"status": "pass",
-			"method": "source_english_reference_to_qwen3_chinese_prompt_to_vibevoice_voice",
-			"run_dir": str(run_dir),
-			"source_voice_prompt_manifest": str(source_manifest),
-			"speaker_census_roster_path": str(census_roster),
-			"speaker_census_roster_sha256": _sha256(census_roster),
-			"output_dir": str(output_dir),
+		"speaker_count": len(speaker_ids),
+		"voice_count": len(speaker_ids),
+		"max_supported_speakers": MAX_SPEAKERS,
+		"method": "source_english_reference_to_qwen3_chinese_prompt_to_vibevoice_voice",
+		"run_dir": str(run_dir),
+		"source_voice_prompt_manifest": str(source_manifest),
+		"speaker_census_roster_path": str(census_roster),
+		"speaker_census_roster_sha256": _sha256(census_roster),
+		"output_dir": str(output_dir),
 		"qwen_repo": str(qwen_repo),
 		"qwen_model": str(qwen_model),
 		"registered_to_vibevoice": register_voices,

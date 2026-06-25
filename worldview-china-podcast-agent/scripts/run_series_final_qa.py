@@ -3,9 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+
+MAX_SPEAKERS = 4
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -73,6 +78,36 @@ def _parse_dt(value: Any) -> datetime | None:
 	if not value:
 		return None
 	return datetime.fromisoformat(str(value))
+
+
+def _speaker_index(speaker: str) -> int:
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker id: {speaker}"
+	return int(match.group(1))
+
+
+def _sorted_speakers(values: Any) -> list[str]:
+	speakers = [str(value) for value in values if SPEAKER_RE.fullmatch(str(value))]
+	return sorted(set(speakers), key=_speaker_index)
+
+
+def _is_locked_roster_policy(value: Any) -> bool:
+	return str(value or "") in {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
+
+
+def _expected_speakers_from_roster(roster: dict[str, Any], failures: list[str], label: str) -> list[str]:
+	count = int(roster.get("speaker_count") or 0)
+	voice_count = int(roster.get("voice_count") or 0)
+	if not (1 <= count <= MAX_SPEAKERS):
+		failures.append(f"{label} speaker_count is not within 1-{MAX_SPEAKERS}")
+		return []
+	if voice_count != count:
+		failures.append(f"{label} voice_count does not match speaker_count")
+	speakers = _sorted_speakers((roster.get("speakers") or {}).keys())
+	expected = [f"Speaker {index}" for index in range(count)]
+	if speakers != expected:
+		failures.append(f"{label} speakers are not contiguous Speaker 0..{count - 1}")
+	return expected
 
 
 def _upload_report_has_final_submit_proof(upload_report: dict[str, Any]) -> bool:
@@ -181,19 +216,18 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			failures.append(f"episode_{expected_index:03d} render_manifest subtitle_mode is not burned_ass")
 		if "burned_subtitles" not in str(render_manifest.get("visual_mode") or ""):
 			failures.append(f"episode_{expected_index:03d} render_manifest visual_mode does not record burned_subtitles")
-			if render_manifest.get("series_episode") is not True:
-				failures.append(f"episode_{expected_index:03d} render_manifest does not record series_episode=true")
-			if speaker_census.get("status") != "frozen":
-				failures.append(f"episode_{expected_index:03d} speaker census is not frozen")
-			if int(speaker_census.get("speaker_count") or 0) != 2 or int(speaker_census.get("voice_count") or 0) != 2:
-				failures.append(f"episode_{expected_index:03d} speaker census is not locked to two speakers/two voices")
-			if audio_manifest.get("voice_context_policy") != "locked_two_speaker_roster":
-				failures.append(f"episode_{expected_index:03d} audio_manifest voice_context_policy is not locked_two_speaker_roster")
-		if chunk_plan.get("voice_context_policy") != "locked_two_speaker_roster":
-			failures.append(f"episode_{expected_index:03d} chunk_plan voice_context_policy is not locked_two_speaker_roster")
+		if render_manifest.get("series_episode") is not True:
+			failures.append(f"episode_{expected_index:03d} render_manifest does not record series_episode=true")
+		if speaker_census.get("status") != "frozen":
+			failures.append(f"episode_{expected_index:03d} speaker census is not frozen")
+		expected_speakers = _expected_speakers_from_roster(speaker_census, failures, f"episode_{expected_index:03d} speaker census")
+		if not _is_locked_roster_policy(audio_manifest.get("voice_context_policy")):
+			failures.append(f"episode_{expected_index:03d} audio_manifest voice_context_policy is not locked_multi_speaker_roster")
+		if not _is_locked_roster_policy(chunk_plan.get("voice_context_policy")):
+			failures.append(f"episode_{expected_index:03d} chunk_plan voice_context_policy is not locked_multi_speaker_roster")
 		locked_names = [
-			(audio_manifest.get("speaker_voices") or {}).get("Speaker 0"),
-			(audio_manifest.get("speaker_voices") or {}).get("Speaker 1"),
+			(audio_manifest.get("speaker_voices") or {}).get(speaker)
+			for speaker in expected_speakers
 		]
 		for chunk in audio_manifest.get("chunks") or []:
 			if chunk.get("vibevoice_mode") != "dialogue":

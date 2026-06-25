@@ -1,4 +1,3 @@
 interface:
-  display_name: "外刊中国自动选题"
-  short_description: "筛选中国外刊候选，抓取可读正文，并自动选择最高分文章"
-  default_prompt: "使用 $china-longform-article-selection 为我按指定 target_date 筛选中国相关英文外媒文章 Top 5；先确认每篇都有可读正文材料并落成本地 capture package；Bloomberg、NYT、WSJ 原站不可读时找合法公开同文转载源，找不到就淘汰；最后自动选择评分最高候选，写出 ranked-top5.json、selection-decision.json 和 selection-result.md，不要等待人工选择。"
+  display_name: "China Longform Article Selection"
+  short_description: "Help with China Longform Article Selection tasks"

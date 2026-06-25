@@ -1,6 +1,6 @@
 ---
 name: china-longform-article-selection
-description: "用于从 Bloomberg、Economist、Financial Times、New York Times、New Yorker、WIRED、Wall Street Journal、Nikkei Asia、The Wire China、Rest of World、The Diplomat、China Leadership Monitor、The Atlantic 等英文外媒中检索外部传入 target_date 发布的中国相关文章；只保留 china_viral / China Viva 模式；先按标题、摘要、metadata、公开片段召回和评分，再执行正文可获取性门禁：优先原站公开全文，其次调用 url-page-capture 通过真实 Chrome/归档快照抓取；Bloomberg、New York Times、Wall Street Journal 不优先走 archive.is，若原站不可公开读取则必须寻找合法公开同文转载源，找不到就淘汰；最终只输出可阅读、可进入后续制作的 Top 5 候选，并自动选出评分最高候选作为默认制作文章。"
+description: "用于从 Bloomberg、Economist、Financial Times、New York Times、New Yorker、WIRED、Wall Street Journal、Nikkei Asia、The Wire China、Rest of World、The Guardian、The Diplomat、China Leadership Monitor、The Atlantic 等英文外媒中检索外部传入 target_date 发布的中国相关文章；只保留 china_viral / China Viva 模式；所有白名单来源的高质量文章进入统一候选池竞争，不设置每源入围配额，最终 Top 5 可以多篇甚至全部来自同一个媒体；先按标题、摘要、metadata、公开片段召回和评分，再执行正文可获取性门禁：优先原站公开全文，其次调用 url-page-capture 通过真实 Chrome/归档快照抓取；Bloomberg、New York Times、Wall Street Journal 不优先走 archive.is，若原站不可公开读取则必须寻找合法公开同文转载源，找不到就淘汰；最终只输出可阅读、可进入后续制作的 Top 5 候选，并自动选出评分最高候选作为默认制作文章。"
 ---
 
 # China Longform Article Selection
@@ -10,12 +10,12 @@ description: "用于从 Bloomberg、Economist、Financial Times、New York Times
 当前版本是**可用正文门禁 + 自动最佳候选版**：
 
 ```text
-1. AI 自动召回白名单来源中 target_date 发布的中国相关文章。
+1. AI 自动召回白名单来源中 target_date 发布的中国相关文章，形成统一候选池。
 2. AI 先基于标题、摘要、metadata、搜索结果片段、公开可见首屏或部分正文做初筛评分。
 3. 对可能进入 Top 5 的候选执行正文可获取性门禁，确认能得到可读文章材料。
 4. 获取顺序固定为：原站公开全文 -> `url-page-capture` 归档/真实 Chrome 抓取 -> 合法公开同文转载源。
 5. Bloomberg、New York Times、Wall Street Journal 归档路径默认视为不友好；原站不可读时必须寻找合法公开同文转载源，找不到就淘汰。
-6. 最终输出排名前 5 的可用候选、原文链接、材料来源和推荐理由，并自动把评分最高候选设为 `recommended_best_candidate_id` / `best_candidate`；不等待人类选择。
+6. 最终从所有可用候选中统一排序输出 Top 5；允许 Top 5 多篇甚至全部来自同一个媒体，不为来源多样性保留名额；自动把评分最高候选设为 `recommended_best_candidate_id` / `best_candidate`，不等待人类选择。
 ```
 
 不要在最终回复里粘贴第三方文章全文或长篇翻译。
@@ -116,6 +116,38 @@ legal_republication_success:
 4. CAPTCHA/security check 不是让用户介入的提示，而是 capture_failed 的证据；切换镜像或候选后仍失败就淘汰。
 5. 对第三方版权文章，不在最终回复里粘贴全文；只记录本地 capture_output_path、capture_manifest_path、material_manifest_path 和可验证摘要字段。
 6. 不要把 `url-page-capture` 的实际 `capture_method` 覆盖成别的值；用 `capture_provider` 表达工具来源。
+```
+
+真实 Chrome 工具定位：
+
+```text
+当 `url-page-capture` 要求使用 Chrome Extension / `chrome:control-chrome` 时，必须通过 Node REPL 的 JS 工具接入用户主 Chrome：
+
+工具名：
+  mcp__node_repl.js
+
+Chrome control skill：
+  /Users/wangfangjia/.codex/plugins/cache/openai-bundled/chrome/26.616.71553/skills/control-chrome/SKILL.md
+
+browser-client 绝对路径：
+  file:///Users/wangfangjia/.codex/plugins/cache/openai-bundled/chrome/26.616.71553/scripts/browser-client.mjs
+
+最小连接代码：
+  const { setupBrowserRuntime } = await import("file:///Users/wangfangjia/.codex/plugins/cache/openai-bundled/chrome/26.616.71553/scripts/browser-client.mjs");
+  await setupBrowserRuntime({ globals: globalThis });
+  globalThis.browser = await agent.browsers.get("extension");
+  await browser.nameSession("🔎 Article capture");
+  nodeRepl.write(await browser.documentation());
+```
+
+执行约束：
+
+```text
+1. 不得只因为普通工具搜索没有返回 `chrome:control-chrome` 就判定真实 Chrome 不可用。
+2. 如果需要真实 Chrome 抓取，必须先尝试上述 Node REPL 接入路径。
+3. 若上述接入失败，必须在 selection/ 下写出 `chrome-unavailable-report.json`，记录工具名、browser-client 路径、失败错误和候选 URL；然后才能把候选标记为 `BLOCKED_REAL_CHROME_UNAVAILABLE` 或 `retrieval_unavailable`。
+4. 对 The Economist、Financial Times、The New Yorker、WIRED 等普通 publisher article，HTTP 抓取遇到 Cloudflare、Just a moment、登录墙、订阅墙、薄正文或安全验证后，必须尝试真实 Chrome direct，再尝试真实 Chrome archive.is/archive.today 搜索流程，除非用户明确要求跳过。
+5. 对 Bloomberg / New York Times / Wall Street Journal，仍遵守“不友好站点策略”：原站不可公开读取时优先搜索合法公开同文转载源，不把 archive.is 作为主要路径反复尝试。
 ```
 
 正文状态统一表达为：
@@ -232,8 +264,11 @@ The Wall Street Journal / wsj.com
 16. The Diplomat
 17. East Asia Forum
 18. Council on Foreign Relations / CSIS analysis only
+19. The Guardian / Guardian Long Read / China-focused features and analysis only
 
 Reuters 普通快讯、market wrap、live blog、timeline 默认不要；只有 special report、graphics、investigation、deep analysis 才能进入候选。
+
+The Guardian 普通快讯、live blog、minute-by-minute、短新闻和图片稿默认不要；只有 Guardian Long Read、feature、investigation、analysis 或有清晰中国社会/产业/普通人落点的长文才进入候选。
 
 ## 日期窗口
 
@@ -255,17 +290,21 @@ date_reason: 为什么认为它属于 target_date 或为什么不确定
 
 候选池和 Top 5 都优先选择日期确认度高的文章。
 
-## 每源召回
+## 统一候选池召回
 
-每个来源最多返回 1 篇候选。若某来源没有合格文章，返回 `NO_SOURCE_CANDIDATE`，不要为了凑数放入短讯。
+不要按来源设置入围配额。每个白名单来源可以返回 0 篇、1 篇或多篇质量合格候选，但单个来源最多提交 5 篇候选到统一候选池；超过 5 篇就没有下游价值，不要继续抓取、评分或保留。所有候选进入同一个全局候选池后统一评分、统一执行正文可获取性门禁、统一竞争 Top 5。
+
+来源多样性不是排序目标。若 The Economist、Bloomberg、Financial Times 或任何其他单一媒体在同一天有多篇明显更强的中国文章，最终 Top 5 可以多篇甚至全部来自同一个媒体。不要为了“每源均衡”保留弱文章，也不要因为某来源已经有文章入围而压低同源强文章。
+
+若某来源没有任何合格文章，返回 `NO_SOURCE_CANDIDATE`。不要为了凑来源数量放入短讯、低相关文章或正文不可获取文章。
 
 理想执行方式：
 
 1. 并发检索所有来源，不要串行一个媒体做完再做下一个。
 2. 如果可用，启动 source scout 子 agent，每个来源一个。
-3. 每个 scout 只负责自己的来源，不做跨来源比较。
-4. 每个 scout 最多返回 1 篇最强候选。
-5. 所有来源候选返回后，再做全局排序，形成 Top 5。
+3. 每个 scout 只负责自己的来源，不做跨来源比较，但可返回该来源所有质量合格候选。
+4. 每个 scout 不得设置固定上限为 1；每个来源最多返回 5 篇最强质量合格候选，并记录被排除的低质/短讯/日期不符文章。
+5. 合并所有来源候选后，按统一评分规则排序，形成全局 Top 5。
 
 如果没有子 agent 工具，使用可并发的搜索/读取工具批量执行。
 
@@ -427,7 +466,7 @@ score = max(0, viral_score - penalty_points)
 5. 社会讨论角度更清晰者优先
 6. 信息密度更高者优先
 7. 发布日期确认度更高者优先
-8. 来源重复时只留更强的一篇
+8. 不因来源重复而去重、降权或替换；只有同一 URL、同一 canonical URL、同一篇文章的镜像/转载/归档重复时，才合并为一个候选并保留材料最可靠的版本
 
 ## 推荐查询方向
 
@@ -449,6 +488,7 @@ The Atlantic: China society, economy, technology, nationalism, global order only
 MIT Technology Review: China AI, chips, robots, EV, surveillance, platforms with job/opportunity/social anxiety angle
 Foreign Affairs / Foreign Policy: China economy, society, nationalism, technology, security only when it can be framed as Chinese social concern
 Reuters Special/Graphics/Investigates: China special report/graphics/investigation with clear social, industrial or public emotion angle
+The Guardian: China society, workers, youth, gender, education, climate, EVs, technology, surveillance, migration, consumer pressure; use Guardian Long Read/features/analysis/investigations, avoid ordinary news briefs and live blogs
 ```
 
 ## Registry
@@ -515,7 +555,7 @@ selected-registry.json
 选题模式：china_viral
 当前流程：已执行正文可获取性门禁；已自动选出评分最高候选
 来源：N 个白名单来源
-召回结果：M 个来源候选
+召回结果：M 篇来源候选
 可用正文候选：J 篇
 Top 5 候选：K 篇
 自动推荐：A?，理由：评分最高且已下载可读文章材料
@@ -524,7 +564,7 @@ Top 5 候选：K 篇
 1. ...
 
 ## 来源候选池
-- 按来源列出每个来源的 0/1 篇候选，含 NO_SOURCE_CANDIDATE
+- 按来源列出每个来源的全部候选；同一来源可有多篇候选；无合格文章的来源标注 NO_SOURCE_CANDIDATE
 
 ## 排除说明
 - 明确列出因短讯、日期不符、主题相关性弱、质量低、正文不可获取而排除的典型文章
@@ -597,10 +637,11 @@ score
 target_date, timezone, selection_mode,
 workflow_status="AVAILABLE_CANDIDATES_RANKED",
 fulltext_gate="enabled",
+per_source_candidate_cap=5,
 sources[]
 ```
 
-每个 `sources[]` 元素包含 `source`、`status=FOUND|NO_SOURCE_CANDIDATE|SOURCE_FAILED` 和 0/1 篇 `articles[]`。候选文章字段使用“输出要求”中的同一字段集，并补齐：
+每个 `sources[]` 元素包含 `source`、`status=FOUND|NO_SOURCE_CANDIDATE|SOURCE_FAILED` 和 0..5 篇 `articles[]`。同一来源允许多篇候选进入 `articles[]`，但不得超过 5 篇；最终是否进入 Top 5 只由全局评分、正文可获取性门禁和重复文章合并规则决定。候选文章字段使用“输出要求”中的同一字段集，并补齐：
 
 ```text
 retrieval_gate="enabled"

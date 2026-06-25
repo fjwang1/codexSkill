@@ -1,7 +1,4 @@
 interface:
-  display_name: "Wechat Cover Image"
-  short_description: "No-text WeChat cover art from article drafts."
-  default_prompt: "Use $wechat-cover-image to generate a no-text WeChat cover image from this article."
-
-policy:
-  allow_implicit_invocation: true
+  display_name: "WeChat Cover Image"
+  short_description: "生成统一无文字、高级外刊杂志风、主体明确的公众号封面图"
+  default_prompt: "Use $wechat-cover-image to create a text-free, 2.35:1, high-end magazine-style WeChat cover from this article draft."

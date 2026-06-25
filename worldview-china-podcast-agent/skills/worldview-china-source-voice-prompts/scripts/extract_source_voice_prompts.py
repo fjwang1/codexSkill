@@ -20,6 +20,8 @@ DEFAULT_MIN_CLIP_SEC = 8.0
 DEFAULT_BOUNDARY_TRIM_SEC = 1.0
 DEFAULT_SKIP_BEFORE_SEC = 60.0
 DEFAULT_INTER_CLIP_PAUSE_SEC = 0.25
+MAX_SPEAKERS = 4
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,21 @@ def _format_time(seconds: float) -> str:
 	return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
+def _speaker_index(speaker: str) -> int:
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker id: {speaker}"
+	return int(match.group(1))
+
+
+def _is_supported_speaker(speaker: str) -> bool:
+	return SPEAKER_RE.fullmatch(speaker) is not None
+
+
+def _sorted_speakers(values: Any) -> list[str]:
+	speakers = [str(value) for value in values if _is_supported_speaker(str(value))]
+	return sorted(set(speakers), key=_speaker_index)
+
+
 def _parse_source_time_range(text: str) -> tuple[float, float] | None:
 	match = re.search(
 		r"(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)\s*[-–]\s*(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)",
@@ -121,9 +138,9 @@ def _parse_source_time_range(text: str) -> tuple[float, float] | None:
 
 def _coerce_segment(item: dict[str, Any], source: str) -> TimelineSegment | None:
 	speaker = str(item.get("speaker") or item.get("speaker_id") or "").strip()
-	if speaker in {"0", "1"}:
+	if re.fullmatch(r"[0-3]", speaker):
 		speaker = f"Speaker {speaker}"
-	if speaker not in {"Speaker 0", "Speaker 1"}:
+	if not _is_supported_speaker(speaker):
 		return None
 
 	start_value = item.get("source_start", item.get("start", item.get("start_sec")))
@@ -355,6 +372,7 @@ def _discover_timeline(run_dir: Path, explicit: Path | None) -> tuple[str, list[
 
 def _build_candidates(
 	segments: list[TimelineSegment],
+	speaker_ids: list[str],
 	*,
 	target_sec: float,
 	max_clip_sec: float,
@@ -362,38 +380,53 @@ def _build_candidates(
 	boundary_trim_sec: float,
 	skip_before_sec: float,
 ) -> dict[str, list[CandidateClip]]:
-	result: dict[str, list[CandidateClip]] = {"Speaker 0": [], "Speaker 1": []}
-	for segment in sorted(segments, key=lambda item: (item.start, item.end)):
-		if segment.speaker not in result:
-			continue
-		if _reference_text_is_noisy(segment.text):
-			continue
-		safe_start = max(segment.start, skip_before_sec) + boundary_trim_sec
-		safe_end = segment.end - boundary_trim_sec
-		if safe_end - safe_start < min_clip_sec:
-			continue
-		pos = safe_start
-		while safe_end - pos >= min_clip_sec:
-			end = min(pos + max_clip_sec, safe_end)
-			duration = end - pos
-			if duration >= min_clip_sec:
-				result[segment.speaker].append(CandidateClip(
-					speaker=segment.speaker,
-					start=pos,
-					end=end,
-					duration=duration,
-					text=segment.text[:300],
-					source=segment.source,
-				))
-			if sum(clip.duration for clip in result[segment.speaker]) >= target_sec * 2:
-				break
-			pos = end + 2.0
+	result: dict[str, list[CandidateClip]] = {speaker: [] for speaker in speaker_ids}
+	seen: dict[str, set[tuple[float, float]]] = {speaker: set() for speaker in speaker_ids}
+
+	def add_pass(*, allow_rolling_caption_repetition: bool) -> None:
+		for segment in sorted(segments, key=lambda item: (item.start, item.end)):
+			if segment.speaker not in result:
+				continue
+			if _reference_text_has_ad_noise(segment.text):
+				continue
+			if _has_rolling_caption_repetition(segment.text) and not allow_rolling_caption_repetition:
+				continue
+			safe_start = max(segment.start, skip_before_sec) + boundary_trim_sec
+			safe_end = segment.end - boundary_trim_sec
+			if safe_end - safe_start < min_clip_sec:
+				continue
+			pos = safe_start
+			while safe_end - pos >= min_clip_sec:
+				end = min(pos + max_clip_sec, safe_end)
+				duration = end - pos
+				key = (round(pos, 3), round(end, 3))
+				if duration >= min_clip_sec and key not in seen[segment.speaker]:
+					seen[segment.speaker].add(key)
+					result[segment.speaker].append(CandidateClip(
+						speaker=segment.speaker,
+						start=pos,
+						end=end,
+						duration=duration,
+						text=segment.text[:300],
+						source=segment.source,
+					))
+				if sum(clip.duration for clip in result[segment.speaker]) >= target_sec * 2:
+					break
+				pos = end + 2.0
+
+	add_pass(allow_rolling_caption_repetition=False)
+	if any(sum(clip.duration for clip in result[speaker]) < target_sec for speaker in result):
+		add_pass(allow_rolling_caption_repetition=True)
 	return result
 
 
 def _reference_text_is_noisy(text: str) -> bool:
+	return _has_rolling_caption_repetition(text) or _reference_text_has_ad_noise(text)
+
+
+def _reference_text_has_ad_noise(text: str) -> bool:
 	lower = text.lower()
-	return _has_rolling_caption_repetition(text) or any(pattern in lower for pattern in (
+	return any(pattern in lower for pattern in (
 		"[music]",
 		"sponsor",
 		"patreon",
@@ -416,12 +449,13 @@ def _reference_text_is_noisy(text: str) -> bool:
 
 def _build_speaker_roster(
 	segments: list[TimelineSegment],
+	speaker_ids: list[str],
 	voice_names: dict[str, str],
 	*,
 	analysis_window_sec: float,
 ) -> dict[str, Any]:
 	speakers: dict[str, Any] = {}
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in speaker_ids:
 		speaker_segments = [segment for segment in segments if segment.speaker == speaker]
 		window_speech_sec = 0.0
 		for segment in speaker_segments:
@@ -448,10 +482,12 @@ def _build_speaker_roster(
 	return {
 		"schema_version": "worldview-china-source-speaker-roster.v1",
 		"status": status,
-		"speaker_count": 2,
+		"speaker_count": len(speaker_ids),
+		"voice_count": len(speaker_ids),
+		"max_supported_speakers": MAX_SPEAKERS,
 		"analysis_window_sec": analysis_window_sec,
 		"observed_speakers_in_first_6min": observed_in_window,
-		"policy": "freeze_two_speaker_roster_before_episode_split_and_tts",
+		"policy": "freeze_up_to_four_speaker_roster_before_episode_split_and_tts",
 		"speakers": speakers,
 	}
 
@@ -467,11 +503,17 @@ def _load_frozen_speaker_census(run_dir: Path, voice_names: dict[str, str]) -> d
 	census = _read_json(census_path)
 	if census.get("status") != "frozen":
 		raise RuntimeError(f"Speaker census is not frozen: {census_path}")
-	if int(census.get("speaker_count") or 0) != 2 or int(census.get("voice_count") or 0) != 2:
-		raise RuntimeError(f"Speaker census must freeze exactly two speakers and two voices: {census_path}")
+	speaker_count = int(census.get("speaker_count") or 0)
+	voice_count = int(census.get("voice_count") or 0)
+	if not (1 <= speaker_count <= MAX_SPEAKERS) or voice_count != speaker_count:
+		raise RuntimeError(f"Speaker census must freeze 1-{MAX_SPEAKERS} speakers and the same number of voices: {census_path}")
 	source_speakers = census.get("speakers") or {}
+	speaker_ids = _sorted_speakers(source_speakers.keys())
+	expected_speaker_ids = [f"Speaker {index}" for index in range(speaker_count)]
+	if speaker_ids != expected_speaker_ids:
+		raise RuntimeError(f"Speaker census must contain contiguous Speaker 0..{speaker_count - 1}: {census_path}")
 	speakers: dict[str, Any] = {}
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in speaker_ids:
 		info = dict(source_speakers.get(speaker) or {})
 		if not info:
 			raise RuntimeError(f"Speaker census missing {speaker}: {census_path}")
@@ -481,11 +523,12 @@ def _load_frozen_speaker_census(run_dir: Path, voice_names: dict[str, str]) -> d
 	return {
 		"schema_version": "worldview-china-source-speaker-roster.v1",
 		"status": "frozen",
-		"speaker_count": 2,
-		"voice_count": 2,
+		"speaker_count": speaker_count,
+		"voice_count": voice_count,
+		"max_supported_speakers": MAX_SPEAKERS,
 		"analysis_window_sec": float(census.get("analysis_window_sec") or 360.0),
 		"observed_speakers_in_first_6min": census.get("observed_speakers_in_first_6min") or [],
-		"policy": "freeze_two_speaker_roster_before_voice_extraction_episode_split_and_tts",
+		"policy": "freeze_up_to_four_speaker_roster_before_voice_extraction_episode_split_and_tts",
 		"source_census_roster_path": str(census_path),
 		"source_census_roster_sha256": _sha256(census_path),
 		"census_schema_version": census.get("schema_version"),
@@ -608,6 +651,29 @@ def _safe_run_slug(run_dir: Path) -> str:
 	return safe or "Run"
 
 
+def _load_census_speaker_ids(run_dir: Path) -> list[str]:
+	census_path = run_dir / "02a-speaker-census" / "speaker_roster.json"
+	if not census_path.exists():
+		raise RuntimeError(
+			"Missing frozen speaker census. Run "
+			"/Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/run_speaker_census.py "
+			f"--run-dir {run_dir} before 02b source voice extraction."
+		)
+	census = _read_json(census_path)
+	if census.get("status") != "frozen":
+		raise RuntimeError(f"Speaker census is not frozen: {census_path}")
+	speaker_count = int(census.get("speaker_count") or 0)
+	voice_count = int(census.get("voice_count") or 0)
+	if not (1 <= speaker_count <= MAX_SPEAKERS) or voice_count != speaker_count:
+		raise RuntimeError(f"Speaker census must freeze 1-{MAX_SPEAKERS} speakers and the same number of voices: {census_path}")
+	source_speakers = census.get("speakers") or {}
+	speaker_ids = _sorted_speakers(source_speakers.keys())
+	expected = [f"Speaker {index}" for index in range(speaker_count)]
+	if speaker_ids != expected:
+		raise RuntimeError(f"Speaker census must contain contiguous Speaker 0..{speaker_count - 1}: {census_path}")
+	return speaker_ids
+
+
 def extract_voice_prompts(
 	run_dir: Path,
 	*,
@@ -634,6 +700,12 @@ def extract_voice_prompts(
 	if not segments:
 		raise RuntimeError("No speaker timeline found. Provide --timeline-json or a transcript with speaker markers.")
 	output_dir.mkdir(parents=True, exist_ok=True)
+	speaker_ids = _load_census_speaker_ids(run_dir)
+	run_slug = _safe_run_slug(run_dir)
+	voice_names = {
+		speaker: f"WC{run_slug}Speaker{_speaker_index(speaker)}"
+		for speaker in speaker_ids
+	}
 	_write_json(output_dir / "source_speaker_timeline.normalized.json", [
 		{
 			"speaker": segment.speaker,
@@ -648,19 +720,16 @@ def extract_voice_prompts(
 	])
 	candidates = _build_candidates(
 		segments,
+		speaker_ids,
 		target_sec=target_sec,
 		max_clip_sec=max_clip_sec,
 		min_clip_sec=min_clip_sec,
 		boundary_trim_sec=boundary_trim_sec,
 		skip_before_sec=skip_before_sec,
 	)
-	run_slug = _safe_run_slug(run_dir)
-	voice_names = {
-		"Speaker 0": f"WC{run_slug}Speaker0",
-		"Speaker 1": f"WC{run_slug}Speaker1",
-	}
 	timeline_roster_evidence = _build_speaker_roster(
 		segments,
+		speaker_ids,
 		voice_names,
 		analysis_window_sec=360.0,
 	)
@@ -673,7 +742,7 @@ def extract_voice_prompts(
 			f"Inspect {run_dir / '02a-speaker-census/speaker_roster.json'} and rerun 02a speaker census."
 		)
 	selected_summary: dict[str, Any] = {}
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in speaker_ids:
 		speaker_dir = output_dir / speaker.lower().replace(" ", "")
 		clips_dir = speaker_dir / "clips"
 		reference_path = speaker_dir / f"en-{voice_names[speaker]}_source.wav"
@@ -737,7 +806,7 @@ def extract_voice_prompts(
 			shutil.copy2(reference, destination)
 			registered[speaker] = str(destination)
 	else:
-		registered = {"Speaker 0": None, "Speaker 1": None}
+		registered = {speaker: None for speaker in speaker_ids}
 
 	for speaker, destination in registered.items():
 		selected_summary[speaker]["registered_path"] = destination
@@ -747,14 +816,14 @@ def extract_voice_prompts(
 		"status": "pass",
 		"source_audio": str(source_audio),
 		"source_audio_duration_sec": round(source_duration, 3),
-			"timeline_source": timeline_source,
-			"output_dir": str(output_dir),
-			"method": "speaker_timeline_guided_ffmpeg_reference_extraction",
-			"speaker_census_roster_path": speaker_roster["source_census_roster_path"],
-			"speaker_census_roster_sha256": speaker_roster["source_census_roster_sha256"],
-			"speaker_roster_path": str(output_dir / "speaker_roster.json"),
-			"speaker_roster": speaker_roster,
-			"parameters": {
+		"timeline_source": timeline_source,
+		"output_dir": str(output_dir),
+		"method": "speaker_timeline_guided_ffmpeg_reference_extraction",
+		"speaker_census_roster_path": speaker_roster["source_census_roster_path"],
+		"speaker_census_roster_sha256": speaker_roster["source_census_roster_sha256"],
+		"speaker_roster_path": str(output_dir / "speaker_roster.json"),
+		"speaker_roster": speaker_roster,
+		"parameters": {
 			"target_sec_per_speaker": target_sec,
 			"min_total_sec_per_speaker": min_total_sec,
 			"max_clip_sec": max_clip_sec,

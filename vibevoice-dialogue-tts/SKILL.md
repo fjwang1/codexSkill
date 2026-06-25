@@ -1,13 +1,13 @@
 ---
 name: vibevoice-dialogue-tts
-description: Use the local community VibeVoice CLI to generate long-form single-speaker or two-speaker TTS audio with VibeVoice-1.5B only. Trigger when the user asks to run VibeVoice, VibeVoice TTS, VibeVoice-1.5B, local dialogue/single-host TTS, or explicitly says not to use Qwen/fallback TTS.
+description: Use the local community VibeVoice CLI to generate long-form single-speaker or up-to-four-speaker TTS audio with VibeVoice-1.5B only. Trigger when the user asks to run VibeVoice, VibeVoice TTS, VibeVoice-1.5B, local dialogue/single-host TTS, or explicitly says not to use Qwen/fallback TTS.
 metadata:
   short-description: Local VibeVoice long-form TTS
 ---
 
 # VibeVoice Long-Form TTS
 
-Use this skill to generate single-speaker or dialogue audio with the local community VibeVoice install. This skill is deliberately separate from Qwen-based TTS workflows.
+Use this skill to generate single-speaker or dialogue audio with the local community VibeVoice install. Dialogue mode supports a locked roster of up to four speakers, matching VibeVoice-1.5B's documented limit. This skill is deliberately separate from Qwen-based TTS workflows.
 
 ## Local Defaults
 
@@ -25,16 +25,27 @@ Use this skill to generate single-speaker or dialogue audio with the local commu
 
 `BowenClean` is copied from the auditioned prompt `06_VV_zh-Bowen_man.wav` and is not the same file as the older repo-local `zh-Bowen_man.wav`.
 
+The wrapper defaults only cover the common two-speaker path. For three- or four-speaker dialogue, explicitly pass one `--speaker-names` value for every locked global speaker slot. Use `Speaker 0..Speaker 3` internally when possible; the wrapper also handles VibeVoice's older `Speaker 1..Speaker 4` examples by resolving the speaker index base.
+
 Do not use Qwen, Qwen3-TTS, or any fallback TTS unless the user explicitly asks to switch away from VibeVoice.
 
 ## Input Format
 
-Default dialogue mode expects speaker-tagged text:
+Default dialogue mode expects speaker-tagged text with one to four speaker IDs:
 
 ```text
 Speaker 0: First host line.
 Speaker 1: Second host line.
 Speaker 0: Follow-up line.
+```
+
+Four-speaker dialogue is valid when the caller passes four locked voices:
+
+```text
+Speaker 0: First participant line.
+Speaker 1: Second participant line.
+Speaker 2: Third participant line.
+Speaker 3: Fourth participant line.
 ```
 
 Single-speaker mode accepts either one explicit speaker:
@@ -65,7 +76,7 @@ Prefer the bundled wrapper:
   --output-dir /absolute/path/vibevoice_outputs
 ```
 
-Default mode is `--speaker-mode dialogue`, preserving the original two-speaker behavior:
+Default mode is `--speaker-mode dialogue`, preserving the original two-speaker behavior when two speaker names are passed:
 
 ```bash
 /Users/wangfangjia/.codex/skills/vibevoice-dialogue-tts/scripts/run_vibevoice_dialogue.py \
@@ -74,6 +85,19 @@ Default mode is `--speaker-mode dialogue`, preserving the original two-speaker b
   --speaker-mode dialogue \
   --speaker-names Xinran BowenClean
 ```
+
+For three or four speakers, pass the full locked roster in numeric speaker order:
+
+```bash
+/Users/wangfangjia/.codex/skills/vibevoice-dialogue-tts/scripts/run_vibevoice_dialogue.py \
+  --txt-path /absolute/path/dialogue_4p.txt \
+  --output-dir /absolute/path/vibevoice_outputs \
+  --speaker-mode dialogue \
+  --speaker-names VoiceForSpeaker0 VoiceForSpeaker1 VoiceForSpeaker2 VoiceForSpeaker3 \
+  --speaker-index-base 0
+```
+
+If a chunk contains only one participant from a larger dialogue, still pass the full roster and `--speaker-index-base 0`; the wrapper will keep that speaker mapped to the same global voice slot.
 
 For single-host long-form audio, use exactly one speaker:
 
@@ -144,13 +168,15 @@ The resident runner defaults to `--device mps` and auto-selects `float16` + `sdp
       "txt_path": "/absolute/path/chunk_001/audio/vibevoice_dialogue.txt",
       "output_dir": "/absolute/path/chunk_001/audio/vibevoice_raw",
       "speaker_mode": "dialogue",
-      "speaker_names": ["VoiceForSpeaker0", "VoiceForSpeaker1"],
-      "speaker_index_base": "auto",
+      "speaker_names": ["VoiceForSpeaker0", "VoiceForSpeaker1", "VoiceForSpeaker2"],
+      "speaker_index_base": "0",
       "force": false
     }
   ]
 }
 ```
+
+`speaker_names` may contain one name in `single` mode or two to four names in `dialogue` mode. For formal chunked workflows with a global `Speaker 0..N-1` roster, set `speaker_index_base` to `"0"` even when the current chunk contains only one speaker.
 
 Use `run_vibevoice_dialogue.py` only for one-off debugging or parity checks. For a formal chunked podcast/video workflow, do not spawn one VibeVoice process per chunk unless the resident runner fails and the failure is recorded. The resident report records `model_load_sec`, per-job `generation_sec`, output duration, RTF, tokens, device, dtype, and attention implementation; use that report for CPU/MPS timing comparisons.
 

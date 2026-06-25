@@ -19,10 +19,10 @@ RESIDENT_BATCH_SCRIPT = Path("/Users/wangfangjia/.codex/skills/vibevoice-dialogu
 VIBEVOICE_PYTHON = Path("/Users/wangfangjia/code/VibeVoice/.venv/bin/python")
 RUNTIME_PYTHON = Path("/Users/wangfangjia/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3")
 
-TARGET_CHARS = 600
-MIN_SPLIT_CHARS = 350
-HARD_MAX_CHARS = 800
-DEFAULT_SPLIT_LONG_TURN_MAX_CHARS = 220
+TARGET_CHARS = 320
+MIN_SPLIT_CHARS = 180
+HARD_MAX_CHARS = 420
+DEFAULT_SPLIT_LONG_TURN_MAX_CHARS = 160
 MIN_SPEAKER_TURNS_PER_CHUNK = 0
 INTER_CHUNK_PAUSE_SEC = 0.5
 DROP_TINY_TTS_TURNS = {
@@ -40,9 +40,22 @@ DROP_TINY_TTS_TURNS = {
 	"哈哈",
 	"笑声",
 }
+CHINESE_DIGITS = "零一二三四五六七八九"
+TTS_SAFETY_LATIN_PHRASES = {
+	"subhanallah": "苏布罕阿拉",
+	"subhan allah": "苏布罕阿拉",
+	"alhamdulillah": "阿勒哈姆杜利拉",
+	"alhamdu lillah": "阿勒哈姆杜利拉",
+	"inshallah": "因沙安拉",
+	"insha allah": "因沙安拉",
+	"mashallah": "马沙安拉",
+	"masha allah": "马沙安拉",
+}
 DEFAULT_VIBEVOICE_DEVICE = "mps"
 DEFAULT_VIBEVOICE_TORCH_DTYPE = "auto"
 DEFAULT_VIBEVOICE_ATTN_IMPLEMENTATION = "auto"
+MAX_SPEAKERS = 4
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 DEFAULT_SPEAKER_VOICES = {
 	"Speaker 0": "Xinran",
 	"Speaker 1": "BowenClean",
@@ -56,6 +69,7 @@ GENERATION_RUNNERS = {
 	"legacy_per_chunk",
 }
 VOICE_CONTEXT_POLICIES = {
+	"locked_multi_speaker_roster",
 	"locked_two_speaker_roster",
 	"auto_by_chunk",
 }
@@ -98,23 +112,180 @@ def _duration(path: Path) -> float:
 	return float(result.stdout.strip())
 
 
+def _speaker_index(speaker: str) -> int:
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker id: {speaker}"
+	return int(match.group(1))
+
+
+def _is_supported_speaker(speaker: str) -> bool:
+	return SPEAKER_RE.fullmatch(speaker) is not None
+
+
+def _sorted_speakers(values: Any) -> list[str]:
+	speakers = [str(value) for value in values if _is_supported_speaker(str(value))]
+	return sorted(set(speakers), key=_speaker_index)
+
+
+def _is_locked_roster_policy(value: str) -> bool:
+	return value in {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
+
+
+def _digit_string_to_chinese(value: str) -> str:
+	return "".join(CHINESE_DIGITS[int(char)] if char.isdigit() else char for char in value)
+
+
+def _section_to_chinese(value: int) -> str:
+	assert 0 <= value < 10000
+	if value == 0:
+		return ""
+	units = ["", "十", "百", "千"]
+	parts: list[str] = []
+	zero_pending = False
+	for position in range(3, -1, -1):
+		unit_value = 10 ** position
+		digit = value // unit_value
+		value %= unit_value
+		if digit == 0:
+			if parts and value:
+				zero_pending = True
+			continue
+		if zero_pending:
+			parts.append("零")
+			zero_pending = False
+		if not (digit == 1 and position == 1 and not parts):
+			parts.append(CHINESE_DIGITS[digit])
+		parts.append(units[position])
+	return "".join(parts)
+
+
+def _integer_to_chinese(value: int) -> str:
+	if value == 0:
+		return "零"
+	assert value >= 0
+	section_units = ["", "万", "亿", "万亿"]
+	sections: list[int] = []
+	while value:
+		sections.append(value % 10000)
+		value //= 10000
+	parts: list[str] = []
+	zero_pending = False
+	for index in range(len(sections) - 1, -1, -1):
+		section = sections[index]
+		if section == 0:
+			if parts:
+				zero_pending = True
+			continue
+		if zero_pending or (parts and section < 1000):
+			parts.append("零")
+			zero_pending = False
+		parts.append(_section_to_chinese(section) + section_units[index])
+	return "".join(parts).replace("零零", "零").rstrip("零")
+
+
+def _number_token_to_chinese(value: str) -> str:
+	clean = value.replace(",", "").strip()
+	if "." not in clean:
+		return _integer_to_chinese(int(clean))
+	integer, decimal = clean.split(".", 1)
+	prefix = _integer_to_chinese(int(integer)) if integer else "零"
+	return prefix + "点" + _digit_string_to_chinese(decimal)
+
+
+def _classifier_number_to_chinese(value: str) -> str:
+	clean = value.replace(",", "").strip()
+	if clean == "2":
+		return "两"
+	return _number_token_to_chinese(clean)
+
+
+def _normalize_tts_safety_text(text: str) -> tuple[str, list[dict[str, Any]]]:
+	"""Normalize high-risk mixed-script podcast text before VibeVoice and ASR QA."""
+	rules: list[dict[str, Any]] = []
+
+	def sub(pattern: str, repl: Any, value: str, rule: str, flags: int = 0) -> str:
+		new_value, count = re.subn(pattern, repl, value, flags=flags)
+		if count:
+			rules.append({"rule": rule, "count": count})
+		return new_value
+
+	normalized = text
+	for phrase, replacement in TTS_SAFETY_LATIN_PHRASES.items():
+		normalized = sub(re.escape(phrase), replacement, normalized, f"latin_phrase_to_chinese:{phrase}", re.IGNORECASE)
+	normalized = sub(
+		r"(?<![\d.])(\d+(?:\.\d+)?)\s*%\s*(?:到|-|—|~|～)?\s*(\d+(?:\.\d+)?)\s*%",
+		lambda match: "百分之" + _number_token_to_chinese(match.group(1)) + "到百分之" + _number_token_to_chinese(match.group(2)),
+		normalized,
+		"percent_range_to_spoken_chinese",
+	)
+	normalized = sub(
+		r"(?<![\d.])(\d+(?:\.\d+)?)\s*%",
+		lambda match: "百分之" + _number_token_to_chinese(match.group(1)),
+		normalized,
+		"percent_to_spoken_chinese",
+	)
+	normalized = sub(
+		r"(?<!\d)(\d{1,3}(?:,\d{3})+)(?!\d)",
+		lambda match: _number_token_to_chinese(match.group(1)),
+		normalized,
+		"comma_number_to_spoken_chinese",
+	)
+	normalized = sub(
+		r"(?<!\d)((?:19|20)\d{2})\s*年",
+		lambda match: _digit_string_to_chinese(match.group(1)) + "年",
+		normalized,
+		"year_with_suffix_to_digit_reading",
+	)
+	normalized = sub(
+		r"(?<!\d)(\d+)\s*(小时|分钟|秒|人|个|名|位|年|岁|天|次|条|段|句|集|万|亿)",
+		lambda match: _classifier_number_to_chinese(match.group(1)) + match.group(2),
+		normalized,
+		"classifier_number_to_spoken_chinese",
+	)
+	normalized = sub(
+		r"(?<!\d)((?:19|20)\d{2})(?!\d)",
+		lambda match: _digit_string_to_chinese(match.group(1)),
+		normalized,
+		"standalone_year_to_digit_reading",
+	)
+	normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
+	normalized = re.sub(r"\s+", " ", normalized).strip()
+	return normalized, rules
+
+
 def _parse_turns(script_path: Path) -> list[dict[str, Any]]:
 	turns: list[dict[str, Any]] = []
 	for raw_line in script_path.read_text(encoding="utf-8").splitlines():
 		line = raw_line.strip()
-		match = re.match(r"^(Speaker [01])[:：]\s*(.+)$", line)
+		match = re.match(r"^(Speaker [0-3])[:：]\s*(.+)$", line)
 		if not match:
 			continue
-		text = re.sub(r"\s+", "", match.group(2)).strip()
-		turns.append({
+		original_text = re.sub(r"\s+", "", match.group(2)).strip()
+		text, normalization_rules = _normalize_tts_safety_text(original_text)
+		turn: dict[str, Any] = {
 			"turn_index": len(turns) + 1,
 			"speaker": match.group(1),
-			"display_role": "女主持" if match.group(1) == "Speaker 0" else "男嘉宾",
+			"display_role": f"说话人{_speaker_index(match.group(1))}",
 			"text": text,
 			"char_count": len(text),
-		})
+		}
+		if text != original_text:
+			turn["original_text"] = original_text
+			turn["tts_safety_normalization_rules"] = normalization_rules
+		turns.append(turn)
 	assert turns, f"No Speaker turns found in {script_path}"
 	return turns
+
+
+def _tts_safety_rule_counts(turns: list[dict[str, Any]]) -> dict[str, int]:
+	counts: dict[str, int] = {}
+	for turn in turns:
+		for item in list(turn.get("tts_safety_normalization_rules") or []):
+			rule = str(item.get("rule") or "")
+			if not rule:
+				continue
+			counts[rule] = counts.get(rule, 0) + int(item.get("count") or 0)
+	return counts
 
 
 def _split_long_text(text: str, max_chars: int) -> list[str]:
@@ -194,10 +365,8 @@ def _drop_tiny_tts_turns(turns: list[dict[str, Any]]) -> tuple[list[dict[str, An
 
 
 def _speaker_counts(turns: list[dict[str, Any]]) -> dict[str, int]:
-	return {
-		"Speaker 0": sum(1 for turn in turns if turn["speaker"] == "Speaker 0"),
-		"Speaker 1": sum(1 for turn in turns if turn["speaker"] == "Speaker 1"),
-	}
+	speaker_ids = _sorted_speakers([turn["speaker"] for turn in turns])
+	return {speaker: sum(1 for turn in turns if turn["speaker"] == speaker) for speaker in speaker_ids}
 
 
 def _speaker_voices_from_manifest(manifest_path: Path) -> dict[str, str] | None:
@@ -209,12 +378,14 @@ def _speaker_voices_from_manifest(manifest_path: Path) -> dict[str, str] | None:
 	speaker_voices = manifest.get("speaker_voices")
 	if not isinstance(speaker_voices, dict):
 		return None
-	result = dict(DEFAULT_SPEAKER_VOICES)
-	for speaker in ("Speaker 0", "Speaker 1"):
+	result: dict[str, str] = {}
+	for speaker in _sorted_speakers(speaker_voices.keys()):
 		info = speaker_voices.get(speaker)
 		if not isinstance(info, dict) or not info.get("vibevoice_name"):
 			return None
 		result[speaker] = str(info["vibevoice_name"])
+	if not (1 <= len(result) <= MAX_SPEAKERS):
+		return None
 	return result
 
 
@@ -241,6 +412,34 @@ def _load_speaker_voices(run_dir: Path, voice_prompt_policy: str) -> tuple[dict[
 	)
 
 
+def _annotate_chunk_audio_manifest(
+	audio_dir: Path,
+	speaker_voices: dict[str, str],
+	speaker_names: list[str],
+	voice_context_policy: str,
+	generation_runner: str,
+	voice_prompt_manifest: str | None,
+) -> None:
+	manifest_path = audio_dir / "audio_manifest.json"
+	if not manifest_path.exists():
+		return
+	manifest = _read_json(manifest_path)
+	manifest["speaker_voices"] = speaker_voices
+	manifest["speaker_names"] = speaker_names
+	manifest["voice_context_policy"] = voice_context_policy
+	manifest["vibevoice_runner"] = generation_runner
+	manifest["voice_prompt_manifest"] = voice_prompt_manifest
+	manifest["voice_lineage_policy"] = "locked_roster" if _is_locked_roster_policy(voice_context_policy) else "non_locked_debug"
+	speaker_map = manifest.get("speaker_map")
+	if isinstance(speaker_map, dict):
+		for speaker, info in speaker_map.items():
+			if isinstance(info, dict):
+				info.pop("default_vibevoice_name", None)
+				if speaker in speaker_voices:
+					info["vibevoice_name"] = speaker_voices[speaker]
+	_write_json(manifest_path, manifest)
+
+
 def _vibevoice_mode(
 	turns: list[dict[str, Any]],
 	speaker_voices: dict[str, str],
@@ -248,13 +447,14 @@ def _vibevoice_mode(
 ) -> tuple[str, list[str]]:
 	assert voice_context_policy in VOICE_CONTEXT_POLICIES
 	counts = _speaker_counts(turns)
-	present = [speaker for speaker in ("Speaker 0", "Speaker 1") if counts[speaker] > 0]
+	present = [speaker for speaker, count in counts.items() if count > 0]
 	assert present, "Cannot run VibeVoice on an empty chunk"
-	if voice_context_policy == "locked_two_speaker_roster":
-		return "dialogue", [speaker_voices["Speaker 0"], speaker_voices["Speaker 1"]]
+	if _is_locked_roster_policy(voice_context_policy):
+		locked_speakers = _sorted_speakers(speaker_voices.keys())
+		return "dialogue", [speaker_voices[speaker] for speaker in locked_speakers]
 	if len(present) == 1:
 		return "single", [speaker_voices[present[0]]]
-	return "dialogue", [speaker_voices["Speaker 0"], speaker_voices["Speaker 1"]]
+	return "dialogue", [speaker_voices[speaker] for speaker in present]
 
 
 def _chunk_turns(turns: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -330,11 +530,10 @@ def _chunk_chars(turns: list[dict[str, Any]]) -> int:
 
 
 def _speaker_ready(turns: list[dict[str, Any]]) -> bool:
+	if not turns:
+		return False
 	counts = _speaker_counts(turns)
-	return (
-		counts["Speaker 0"] >= MIN_SPEAKER_TURNS_PER_CHUNK
-		and counts["Speaker 1"] >= MIN_SPEAKER_TURNS_PER_CHUNK
-	)
+	return all(count >= MIN_SPEAKER_TURNS_PER_CHUNK for count in counts.values())
 
 
 def _rebalance_tail_chunks(chunks: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
@@ -494,8 +693,14 @@ def run_chunks(
 	python_for_post = RUNTIME_PYTHON if RUNTIME_PYTHON.exists() else Path("python3")
 	script_path = run_dir / "04-podcast-script" / "podcast_script.md"
 	speaker_voices, voice_prompt_manifest = _load_speaker_voices(run_dir, voice_prompt_policy)
-	turns = _parse_turns(script_path)
-	turns = _split_long_turns(turns, split_long_turn_max_chars)
+	source_turns = _parse_turns(script_path)
+	tts_safety_normalized_turns = [
+		turn
+		for turn in source_turns
+		if turn.get("original_text") and turn.get("original_text") != turn.get("text")
+	]
+	tts_safety_rule_counts = _tts_safety_rule_counts(source_turns)
+	turns = _split_long_turns(source_turns, split_long_turn_max_chars)
 	turns, dropped_tiny_turns = _drop_tiny_tts_turns(turns)
 	assert turns, "No TTS turns remain after dropping tiny filler turns"
 	if split_long_turn_max_chars > 0:
@@ -530,8 +735,8 @@ def run_chunks(
 			"speaker_names": speaker_names,
 			"voice_context_policy": voice_context_policy,
 			"locked_speaker_roster": {
-				"Speaker 0": speaker_voices["Speaker 0"],
-				"Speaker 1": speaker_voices["Speaker 1"],
+				speaker: speaker_voices[speaker]
+				for speaker in _sorted_speakers(speaker_voices.keys())
 			},
 		})
 	_write_json(node_dir / "chunk_plan.json", {
@@ -545,6 +750,19 @@ def run_chunks(
 		"split_max_chars": split_max_chars if split_chunk_indices or split_all_chunks else None,
 		"split_long_turn_max_chars": split_long_turn_max_chars if split_long_turn_max_chars > 0 else None,
 		"default_split_long_turn_max_chars": DEFAULT_SPLIT_LONG_TURN_MAX_CHARS,
+		"tts_safety_normalization_enabled": True,
+		"tts_safety_normalized_source_turn_count": len(tts_safety_normalized_turns),
+		"tts_safety_normalization_rule_counts": tts_safety_rule_counts,
+		"tts_safety_normalized_source_turn_examples": [
+			{
+				"turn_index": turn.get("turn_index"),
+				"speaker": turn.get("speaker"),
+				"original_text": turn.get("original_text"),
+				"text": turn.get("text"),
+				"rules": turn.get("tts_safety_normalization_rules"),
+			}
+			for turn in tts_safety_normalized_turns[:20]
+		],
 		"dropped_tiny_tts_turn_count": len(dropped_tiny_turns),
 		"dropped_tiny_tts_turns": [
 			{
@@ -620,7 +838,7 @@ def run_chunks(
 				"speaker_mode": vibevoice_mode,
 				"speaker_names": speaker_names,
 				"force": True,
-				"speaker_index_base": "0" if voice_context_policy == "locked_two_speaker_roster" else "auto",
+				"speaker_index_base": "0" if _is_locked_roster_policy(voice_context_policy) else "auto",
 				"voice_context_policy": voice_context_policy,
 				"seed": generation_seed,
 			})
@@ -689,6 +907,14 @@ def run_chunks(
 
 	for context in chunk_contexts:
 		if not context["needs_postprocess"]:
+			_annotate_chunk_audio_manifest(
+				context["audio_dir"],
+				speaker_voices,
+				list(context["speaker_names"]),
+				voice_context_policy,
+				generation_runner,
+				voice_prompt_manifest,
+			)
 			continue
 		chunk_dir = context["chunk_dir"]
 		post_code = _run_quick(
@@ -704,6 +930,14 @@ def run_chunks(
 			chunk_dir / "postprocess.stderr.txt",
 		)
 		assert post_code == 0, f"postprocess failed for {context['chunk_id']}; see {chunk_dir / 'postprocess.stderr.txt'}"
+		_annotate_chunk_audio_manifest(
+			context["audio_dir"],
+			speaker_voices,
+			list(context["speaker_names"]),
+			voice_context_policy,
+			generation_runner,
+			voice_prompt_manifest,
+		)
 
 	chunk_results: list[dict[str, Any]] = []
 	for context in chunk_contexts:
@@ -785,6 +1019,9 @@ def run_chunks(
 		"vibevoice_attn_implementation": attn_implementation,
 		"vibevoice_generation_seed": generation_seed,
 		"resident_batch_report": "05-vibevoice-chunks/resident_batch_report.json" if generation_runner == "resident_batch" else None,
+		"tts_safety_normalization_enabled": True,
+		"tts_safety_normalized_source_turn_count": len(tts_safety_normalized_turns),
+		"tts_safety_normalization_rule_counts": tts_safety_rule_counts,
 		"script": "podcast_script.md",
 		"script_sha256": _sha256(run_dir / "podcast_script.md"),
 		"final_audio": "audio/final_podcast.wav",
@@ -881,9 +1118,9 @@ def main() -> int:
 	parser.add_argument(
 		"--voice-context-policy",
 		choices=sorted(VOICE_CONTEXT_POLICIES),
-		default="locked_two_speaker_roster",
+		default="locked_multi_speaker_roster",
 		help=(
-			"Default locks every formal chunk to the same two-speaker VibeVoice roster. "
+			"Default locks every formal chunk to the same 1-4 speaker VibeVoice roster. "
 			"Use auto_by_chunk only for debugging old runs."
 		),
 	)

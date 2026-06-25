@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat Article Compliance Review"
+  short_description: "Review and soften WeChat article drafts"
+  default_prompt: "Use $wechat-article-compliance-review to review this WeChat article draft before publishing to the public-account draft box."

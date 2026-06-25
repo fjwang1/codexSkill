@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat Draft Publisher"
+  short_description: "Create 微信公众号 article drafts"
+  default_prompt: "Use $wechat-article-publish-draft to turn this local article directory into a WeChat public-account draft."

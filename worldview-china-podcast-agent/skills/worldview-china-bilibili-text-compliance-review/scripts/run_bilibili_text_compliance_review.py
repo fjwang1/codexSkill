@@ -88,6 +88,41 @@ RULES = [
 		suggestion="回到 03b 做发布安全弱化，保留可发布的事实主线，不放大意识形态对抗。",
 	),
 	Rule(
+		rule_id="online_religious_proselytizing_or_conversion",
+		severity="fail",
+		pattern=re.compile(r"达瓦|街头达瓦|宣教|传教|外展活动|邀请桌|带你们参观清真寺|清真寺[^。！？\n]{0,24}(?:参观|讨论|外展)|皈依(?:了)?伊斯兰教|想要皈依|选择伊斯兰教作为(?:他们|自己|我的)?(?:的)?宗教"),
+		message="Generated or publishable text contains online religious proselytizing, outreach, or conversion guidance risk.",
+		suggestion="回到 03b 做最小必要删改；正式 B 站稿不得呈现达瓦/宣教/传教、清真寺外展邀请、皈依路径或引导信教内容。",
+	),
+	Rule(
+		rule_id="online_religious_truth_or_mental_relief_claim",
+		severity="fail",
+		pattern=re.compile(r"伊斯兰教[^。！？\n]{0,24}(?:是真理|更和平|符合我的信仰)|宗教[^。！？\n]{0,36}(?:精神上的解脱|补救措施|解决方案)|(?:心理障碍|精神危机|生存危机|抑郁症|自杀率)[^。！？\n]{0,60}宗教"),
+		message="Generated or publishable text frames religion as truth, superiority, or a remedy for mental/spiritual crisis.",
+		suggestion="回到 03b 弱化为中性社会观察或直接 cut；不得把特定宗教包装成更和平、更真理或心理危机解决方案。",
+	),
+	Rule(
+		rule_id="online_religious_doctrine_or_teaching_promotion",
+		severity="fail",
+		pattern=re.compile(r"伊斯兰(?:知识|讲座|课程)|真正的伊斯兰知识|教授[^。！？\n]{0,36}伊斯兰|传播[^。！？\n]{0,36}(?:伊斯兰|宗教|教义)|(?:教义|教规|宗教礼仪)[^。！？\n]{0,48}(?:传播|教授|宣扬|讲解)|伊斯兰文明进入现代中国强国"),
+		message="Generated or publishable text promotes religious doctrine, lectures, courses, or teaching materials.",
+		suggestion="回到 03b 做删改或概括为非教学性的文化/社群观察；不得在 TTS、字幕、标题、封面或简介中展示宗教教义传播和学习路径。",
+	),
+	Rule(
+		rule_id="online_religious_commercial_promotion",
+		severity="fail",
+		pattern=re.compile(r"符合伊斯兰教法[^。！？\n]{0,80}(?:投资|房地产|公司)|以宗教名义[^。！？\n]{0,48}(?:商业|营销|销售|经销|宣传)|宗教用品|清真寺[^。！？\n]{0,48}(?:筹款|捐款|投资|商业)"),
+		message="Generated or publishable text contains religion-themed commercial promotion risk.",
+		suggestion="回到 03b 删除赞助、广告或宗教名义商业推广；不得把宗教合规、宗教用品、清真寺/宗教机构商业活动作为投稿内容。",
+	),
+	Rule(
+		rule_id="high_risk_private_recording_or_no_upload_phrase",
+		severity="fail",
+		pattern=re.compile(r"(?:请(?:不要|勿)|不要|不得|不能)[^。！？\n]{0,16}(?:上传|发到|放到|发布)[^。！？\n]{0,16}(?:互联网|网上|网络|社交媒体|平台)|(?:不要|不得|不能)[^。！？\n]{0,16}(?:拍摄视频|实际拍摄视频)|只能[^。！？\n]{0,20}(?:MP3|音频)[^。！？\n]{0,20}(?:录制|流通)"),
+		message="Generated or publishable text repeats a source speaker's private-recording / do-not-upload safety phrase.",
+		suggestion="回到 03b/04 做最小必要删改或桥接，例如改写为较私密的学习场景、公开表达受限等中性表述。",
+	),
+	Rule(
 		rule_id="sensitive_chinese_leader_name_needs_rewrite",
 		severity="fail",
 		pattern=re.compile(r"江泽民|胡锦涛|毛泽东|邓小平"),
@@ -100,6 +135,20 @@ RULES = [
 		pattern=re.compile(r"押注中国吗|该押注中国|押注中国"),
 		message="Title, cover, or metadata contains polarizing stance/vote wording.",
 		suggestion="改为基于内容的冲突、后果或观点标题，避免让宗教/族群/政治主体对中国做站队式表态。",
+	),
+	Rule(
+		rule_id="bilibili_description_production_note",
+		severity="fail",
+		pattern=re.compile(r"中文配音版本|保留原视频画面|替换为中文对话音频|方便中文观众理解原对话内容|外网公开播客/访谈视频制作"),
+		message="Bilibili description contains production-method filler instead of an episode content summary.",
+		suggestion="把简介改成面向观众的内容说明：本集谈了什么、冲突或问题是什么、核心看点是什么；不要描述制作流程。",
+	),
+	Rule(
+		rule_id="chinese_display_comma_thousands_number",
+		severity="fail",
+		pattern=re.compile(r"(?:[\u4e00-\u9fff][^。！？\n]{0,24}\d{1,3}(?:,\d{3})+|\d{1,3}(?:,\d{3})+[^。！？\n]{0,24}[\u4e00-\u9fff])"),
+		message="Chinese publishable text contains comma-separated large numbers, which are risky for TTS and subtitle display.",
+		suggestion="把中文稿、字幕和投稿文案里的千分位数字改成中文自然写法：300,000 -> 30万；3,000 -> 3000；普通 300 不要改成 0.03万。",
 	),
 ]
 
@@ -122,6 +171,13 @@ TEXT_CANDIDATES = [
 	"bilibili_upload_metadata.json",
 	"publish_info.txt",
 	"audio/audio_manifest.json",
+	"07-subtitles/subtitle_manifest.json",
+	"07-subtitles/final_subtitles.srt",
+	"07-subtitles/final_subtitles.ass",
+	"07-subtitles/final_subtitles_1x.srt",
+	"07-subtitles/final_subtitles_1x.ass",
+	"08-source-video-revoice/subtitles/final_subtitles.srt",
+	"08-source-video-revoice/subtitles/final_subtitles.ass",
 	"video/subtitle_manifest.json",
 	"video/final_subtitles.srt",
 	"video/final_subtitles.ass",
@@ -258,14 +314,19 @@ def _write_report(path: Path, result: dict[str, Any]) -> None:
 	lines.extend([
 		"## Required Manual Review",
 		"",
-		"An independent review agent must also inspect whether context-sensitive Bilibili/mainland publication safety edits were preserved and whether newly generated titles, cover text, subtitles, or metadata introduced risky wording not covered by deterministic patterns.",
+		"An independent review agent must also inspect whether context-sensitive Bilibili/mainland publication safety edits were preserved; whether religious content is only neutral culture/social observation rather than proselytizing, conversion guidance, doctrine teaching, ritual instruction, or religion-as-remedy framing; and whether newly generated titles, cover text, subtitles, or metadata introduced risky wording not covered by deterministic patterns.",
 		"",
 	])
 	path.parent.mkdir(parents=True, exist_ok=True)
 	path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def run_review(run_dir: Path, stage: str = "after_script", reviewer: str = "deterministic_script") -> dict[str, Any]:
+def run_review(
+	run_dir: Path,
+	stage: str = "after_script",
+	reviewer: str = "deterministic_script",
+	output_dirname: str = OUTPUT_DIRNAME,
+) -> dict[str, Any]:
 	inputs = _iter_existing_inputs(run_dir)
 	findings: list[dict[str, Any]] = []
 	for path in inputs:
@@ -294,7 +355,7 @@ def run_review(run_dir: Path, stage: str = "after_script", reviewer: str = "dete
 		},
 		"findings": findings,
 	}
-	output_dir = run_dir / OUTPUT_DIRNAME
+	output_dir = run_dir / output_dirname
 	_write_json(output_dir / RESULT_NAME, result)
 	_write_report(output_dir / REPORT_NAME, result)
 	return result
@@ -305,8 +366,14 @@ def main() -> int:
 	parser.add_argument("--run-dir", required=True, type=Path)
 	parser.add_argument("--stage", default="after_script")
 	parser.add_argument("--reviewer", default="deterministic_script")
+	parser.add_argument("--output-dirname", default=OUTPUT_DIRNAME)
 	args = parser.parse_args()
-	result = run_review(args.run_dir.expanduser().resolve(), stage=args.stage, reviewer=args.reviewer)
+	result = run_review(
+		args.run_dir.expanduser().resolve(),
+		stage=args.stage,
+		reviewer=args.reviewer,
+		output_dirname=args.output_dirname,
+	)
 	print(json.dumps(result, ensure_ascii=False, indent=2))
 	return 0 if result["status"] == "PASS" else 2
 

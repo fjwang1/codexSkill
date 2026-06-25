@@ -14,6 +14,7 @@ from pathlib import Path
 DEFAULT_REPO = Path("/Users/wangfangjia/code/VibeVoice")
 DEFAULT_MODEL = Path("/Volumes/GT34/AI/code-models/VibeVoice-1.5B-modelscope-clean")
 DEFAULT_SPEAKERS = ("Xinran", "BowenClean")
+MAX_SPEAKERS = 4
 SPEAKER_PATTERN = re.compile(r"^Speaker\s+(\d+):\s*(.*)$", re.IGNORECASE)
 EXPECTED_SHA256 = {
 	"model-00001-of-00003.safetensors": "c5f0a61ddeaeb028e3af540ba4dee7933ad30f9f30b6e1320dd9c875a2daa033",
@@ -45,9 +46,9 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--output-dir", required=True, type=Path, help="Directory for generated wav output.")
 	parser.add_argument("--repo", default=DEFAULT_REPO, type=Path, help="Local VibeVoice repo path.")
 	parser.add_argument("--model-path", default=DEFAULT_MODEL, type=Path, help="Local VibeVoice model directory.")
-	parser.add_argument("--speaker-mode", default="dialogue", choices=("dialogue", "single", "auto"), help="VibeVoice input mode. Default dialogue preserves the original two-speaker wrapper behavior.")
-	parser.add_argument("--speaker-names", nargs="+", default=None, help="VibeVoice speaker names. Dialogue mode requires two names; single mode uses one name.")
-	parser.add_argument("--single-speaker-id", default="1", choices=("0", "1"), help="Speaker id used when single mode receives plain text without Speaker tags. VibeVoice's processor treats plain text as Speaker 1.")
+	parser.add_argument("--speaker-mode", default="dialogue", choices=("dialogue", "single", "auto"), help="VibeVoice input mode. Dialogue mode supports a locked roster of up to four speakers.")
+	parser.add_argument("--speaker-names", nargs="+", default=None, help="VibeVoice speaker names. Dialogue mode accepts two to four names; single mode uses one name.")
+	parser.add_argument("--single-speaker-id", default="1", choices=("0", "1", "2", "3"), help="Speaker id used when single mode receives plain text without Speaker tags. VibeVoice's processor treats plain text as Speaker 1.")
 	parser.add_argument("--device", default="mps", choices=("cpu", "mps", "cuda"), help="Inference device. MPS is the default/recommended path on this Mac; use cpu as an explicit fallback.")
 	parser.add_argument("--torch-dtype", default="auto", choices=("auto", "float32", "float16", "bfloat16"), help="Torch dtype. auto => cpu/float32, mps/float16, cuda/bfloat16.")
 	parser.add_argument("--attn-implementation", default="auto", choices=("auto", "eager", "sdpa", "flash_attention_2"), help="Attention implementation. auto => cpu/eager, mps/sdpa, cuda/flash_attention_2.")
@@ -80,15 +81,45 @@ def _resolve_mode(requested_mode: str, detected_speakers: list[str]) -> str:
 	return "single" if len(unique) <= 1 else "dialogue"
 
 
-def _resolve_speaker_names(mode: str, provided: list[str] | None) -> list[str]:
+def _unique_speaker_numbers(detected_speakers: list[str]) -> list[str]:
+	return sorted(set(detected_speakers), key=lambda value: int(value))
+
+
+def _resolve_speaker_names(mode: str, provided: list[str] | None, detected_speakers: list[str]) -> list[str]:
+	unique = _unique_speaker_numbers(detected_speakers)
 	if provided is None:
-		return [DEFAULT_SPEAKERS[0]] if mode == "single" else list(DEFAULT_SPEAKERS)
+		if mode == "single":
+			return [DEFAULT_SPEAKERS[0]]
+		assert len(unique) <= len(DEFAULT_SPEAKERS), (
+			f"dialogue mode detected {len(unique)} speakers {unique}; provide --speaker-names for every locked speaker"
+		)
+		return list(DEFAULT_SPEAKERS)
 	names = list(provided)
+	assert 1 <= len(names) <= MAX_SPEAKERS, f"VibeVoice supports one to {MAX_SPEAKERS} speaker names, got {len(names)}"
 	if mode == "single":
 		assert len(names) == 1, f"single mode requires exactly one --speaker-names value, got {len(names)}"
 	else:
-		assert len(names) == 2, f"dialogue mode requires exactly two --speaker-names values, got {len(names)}"
+		assert 2 <= len(names) <= MAX_SPEAKERS, (
+			f"dialogue mode requires two to {MAX_SPEAKERS} --speaker-names values, got {len(names)}"
+		)
 	return names
+
+
+def _resolve_speaker_index_base(value: str, detected_speakers: list[str], speaker_names: list[str]) -> int | None:
+	if not detected_speakers:
+		return None
+	ids = sorted({int(item) for item in detected_speakers})
+	if value != "auto":
+		base = int(value)
+		assert all(base <= item < base + len(speaker_names) for item in ids), (
+			f"Speaker ids {ids} do not fit {len(speaker_names)} names with speaker_index_base={base}"
+		)
+		return base
+	if all(0 <= item < len(speaker_names) for item in ids):
+		return 0
+	if all(1 <= item <= len(speaker_names) for item in ids):
+		return 1
+	return min(ids)
 
 
 def _resolve_torch_dtype_arg(value: str, device: str) -> str:
@@ -132,12 +163,14 @@ def _prepare_input_for_mode(args: argparse.Namespace) -> tuple[Path, str, list[s
 	unique = sorted(set(detected), key=lambda value: int(value))
 	if mode == "dialogue":
 		assert detected, "dialogue mode requires explicit Speaker N: lines"
-		assert len(set(detected)) == 2, f"dialogue mode requires exactly two speakers in the txt file, got {unique}"
-		return args.txt_path, mode, _resolve_speaker_names(mode, args.speaker_names)
-	assert len(set(detected)) <= 1, f"single mode requires zero or one speaker in the txt file, got {unique}"
+		assert 1 <= len(unique) <= MAX_SPEAKERS, (
+			f"dialogue mode supports one to {MAX_SPEAKERS} speakers in the txt file, got {unique}"
+		)
+		return args.txt_path, mode, _resolve_speaker_names(mode, args.speaker_names, detected)
+	assert len(unique) <= 1, f"single mode requires zero or one speaker in the txt file, got {unique}"
 	if detected:
-		return args.txt_path, mode, _resolve_speaker_names(mode, args.speaker_names)
-	return _write_single_speaker_tagged_copy(args.txt_path, args.output_dir, text, args.single_speaker_id), mode, _resolve_speaker_names(mode, args.speaker_names)
+		return args.txt_path, mode, _resolve_speaker_names(mode, args.speaker_names, detected)
+	return _write_single_speaker_tagged_copy(args.txt_path, args.output_dir, text, args.single_speaker_id), mode, _resolve_speaker_names(mode, args.speaker_names, [args.single_speaker_id])
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -154,6 +187,11 @@ def _build_command(args: argparse.Namespace, prepared_txt_path: Path, speaker_na
 	python_bin = args.repo / ".venv/bin/python"
 	torch_dtype = _resolve_torch_dtype_arg(args.torch_dtype, args.device)
 	attn_implementation = _resolve_attn_implementation_arg(args.attn_implementation, args.device)
+	speaker_index_base = _resolve_speaker_index_base(
+		args.speaker_index_base,
+		_speaker_numbers(prepared_txt_path.read_text(encoding="utf-8")),
+		speaker_names,
+	)
 	command = [
 		str(python_bin),
 		"demo/inference_from_file.py",
@@ -183,8 +221,8 @@ def _build_command(args: argparse.Namespace, prepared_txt_path: Path, speaker_na
 		"--max_length_times",
 		args.max_length_times,
 	]
-	if args.speaker_index_base != "auto":
-		command.extend(["--speaker_index_base", args.speaker_index_base])
+	if speaker_index_base in {0, 1}:
+		command.extend(["--speaker_index_base", str(speaker_index_base)])
 	if args.ddpm_steps is not None:
 		command.extend(["--ddpm_steps", args.ddpm_steps])
 	if args.no_progress_bar:

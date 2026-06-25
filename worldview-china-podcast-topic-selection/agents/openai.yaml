@@ -1,4 +1,4 @@
 interface:
-  display_name: "Worldview China Podcast Selection"
-  short_description: "Select China-related YouTube podcast episodes."
-  default_prompt: "Find and rank a recent China-related YouTube podcast episode."
+  display_name: "Worldview China Longform Selection"
+  short_description: "Select China-related YouTube podcasts, interviews, panels, or roundtables with at most 4 primary speakers."
+  default_prompt: "Find and rank a recent China-related YouTube longform conversation source, accepting podcasts, interviews, expert panels, news discussions, or roundtables only when the primary speaker count is at most 4."

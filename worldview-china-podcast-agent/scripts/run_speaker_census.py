@@ -13,6 +13,8 @@ from typing import Any
 
 
 DEFAULT_ANALYSIS_WINDOW_SEC = 360.0
+MAX_SPEAKERS = 4
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,41 @@ def _format_time(seconds: float) -> str:
 	return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
+def _speaker_id(index: int) -> str:
+	assert 0 <= index < MAX_SPEAKERS
+	return f"Speaker {index}"
+
+
+def _speaker_index(speaker: str) -> int:
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker id: {speaker}"
+	return int(match.group(1))
+
+
+def _speaker_ids(count: int) -> list[str]:
+	assert 1 <= count <= MAX_SPEAKERS, f"speaker count must be 1-{MAX_SPEAKERS}, got {count}"
+	return [_speaker_id(index) for index in range(count)]
+
+
+def _is_supported_speaker(speaker: str) -> bool:
+	return SPEAKER_RE.fullmatch(speaker) is not None
+
+
+def _parse_speaker_kv(values: list[str]) -> dict[str, str]:
+	result: dict[str, str] = {}
+	for value in values:
+		if "=" not in value:
+			raise RuntimeError(f"Expected SpeakerN=value, got: {value}")
+		speaker, text = value.split("=", 1)
+		speaker = speaker.strip()
+		if re.fullmatch(r"[0-3]", speaker):
+			speaker = f"Speaker {speaker}"
+		if not _is_supported_speaker(speaker):
+			raise RuntimeError(f"Unsupported speaker in key-value argument: {speaker}")
+		result[speaker] = text.strip()
+	return result
+
+
 def _parse_source_time_range(text: str) -> tuple[float, float] | None:
 	match = re.search(
 		r"(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)\s*[-–]\s*(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)",
@@ -97,9 +134,9 @@ def _parse_source_time_range(text: str) -> tuple[float, float] | None:
 
 def _coerce_segment(item: dict[str, Any], source: str) -> TimelineSegment | None:
 	speaker = str(item.get("speaker") or item.get("speaker_id") or "").strip()
-	if speaker in {"0", "1"}:
+	if re.fullmatch(r"[0-3]", speaker):
 		speaker = f"Speaker {speaker}"
-	if speaker not in {"Speaker 0", "Speaker 1"}:
+	if not _is_supported_speaker(speaker):
 		return None
 	start_value = item.get("source_start", item.get("start", item.get("start_sec")))
 	end_value = item.get("source_end", item.get("end", item.get("end_sec")))
@@ -344,9 +381,9 @@ def _extract_review_media(
 	}
 
 
-def _speaker_summary(segments: list[TimelineSegment], analysis_window_sec: float) -> dict[str, dict[str, Any]]:
+def _speaker_summary(segments: list[TimelineSegment], analysis_window_sec: float, speaker_ids: list[str]) -> dict[str, dict[str, Any]]:
 	summaries: dict[str, dict[str, Any]] = {}
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in speaker_ids:
 		speaker_segments = [segment for segment in segments if segment.speaker == speaker]
 		window_speech_sec = 0.0
 		for segment in speaker_segments:
@@ -376,14 +413,18 @@ def run_speaker_census(
 	force: bool,
 	skip_review_media: bool,
 	confirm_two_speakers: bool,
-	reviewer: str,
-	speaker0_description: str,
-	speaker1_description: str,
-	speaker0_role: str,
-	speaker1_role: str,
-	speaker0_identity: str,
-	speaker1_identity: str,
-	note: list[str],
+	confirm_speaker_count: int | None = None,
+	reviewer: str = "main_agent",
+	speaker0_description: str = "",
+	speaker1_description: str = "",
+	speaker0_role: str = "host_or_speaker_0",
+	speaker1_role: str = "guest_or_speaker_1",
+	speaker0_identity: str = "",
+	speaker1_identity: str = "",
+	speaker_descriptions: dict[str, str] | None = None,
+	speaker_roles: dict[str, str] | None = None,
+	speaker_identities: dict[str, str] | None = None,
+	note: list[str] | None = None,
 ) -> dict[str, Any]:
 	run_dir = run_dir.expanduser().resolve()
 	output_dir = (output_dir or run_dir / "02a-speaker-census").expanduser().resolve()
@@ -415,7 +456,37 @@ def run_speaker_census(
 		for segment in segments
 		if segment.end > 0 and segment.start < analysis_window_sec
 	]
-	summaries = _speaker_summary(segments, analysis_window_sec)
+	observed_speakers_all = sorted(
+		{segment.speaker for segment in window_segments if _is_supported_speaker(segment.speaker)},
+		key=_speaker_index,
+	)
+	if confirm_two_speakers:
+		if confirm_speaker_count is not None and confirm_speaker_count != 2:
+			raise RuntimeError("--confirm-two-speakers conflicts with --confirm-speaker-count other than 2")
+		confirm_speaker_count = 2
+	if confirm_speaker_count is not None:
+		if not 1 <= confirm_speaker_count <= MAX_SPEAKERS:
+			raise RuntimeError(f"--confirm-speaker-count must be 1-{MAX_SPEAKERS}")
+		speaker_ids = _speaker_ids(confirm_speaker_count)
+	else:
+		review_count = max(2, len(observed_speakers_all))
+		speaker_ids = _speaker_ids(min(MAX_SPEAKERS, review_count))
+	speaker_descriptions = dict(speaker_descriptions or {})
+	speaker_roles = dict(speaker_roles or {})
+	speaker_identities = dict(speaker_identities or {})
+	if speaker0_description.strip():
+		speaker_descriptions.setdefault("Speaker 0", speaker0_description.strip())
+	if speaker1_description.strip():
+		speaker_descriptions.setdefault("Speaker 1", speaker1_description.strip())
+	if speaker0_role.strip():
+		speaker_roles.setdefault("Speaker 0", speaker0_role.strip())
+	if speaker1_role.strip():
+		speaker_roles.setdefault("Speaker 1", speaker1_role.strip())
+	if speaker0_identity.strip():
+		speaker_identities.setdefault("Speaker 0", speaker0_identity.strip())
+	if speaker1_identity.strip():
+		speaker_identities.setdefault("Speaker 1", speaker1_identity.strip())
+	summaries = _speaker_summary(segments, analysis_window_sec, speaker_ids)
 	observed_in_window = [
 		speaker
 		for speaker, summary in summaries.items()
@@ -424,41 +495,44 @@ def run_speaker_census(
 	warnings: list[str] = []
 	if timeline_confidence != "explicit":
 		warnings.append("speaker timeline is not explicit; reviewer confirmation is required")
-	if set(observed_in_window) != {"Speaker 0", "Speaker 1"}:
-		warnings.append("timeline evidence does not show both Speaker 0 and Speaker 1 in the first analysis window")
-	if confirm_two_speakers and (not speaker0_description.strip() or not speaker1_description.strip()):
-		raise RuntimeError("--confirm-two-speakers requires --speaker0-description and --speaker1-description")
-	status = "frozen" if confirm_two_speakers else "needs_review"
-	speaker_details = {
-		"Speaker 0": {
-			**summaries["Speaker 0"],
-			"role": speaker0_role,
-			"identity": speaker0_identity,
-			"description": speaker0_description,
-			"voice_slot": "voice0",
-		},
-		"Speaker 1": {
-			**summaries["Speaker 1"],
-			"role": speaker1_role,
-			"identity": speaker1_identity,
-			"description": speaker1_description,
-			"voice_slot": "voice1",
-		},
-	}
+	if set(observed_in_window) != set(speaker_ids):
+		warnings.append(
+			"timeline evidence does not show every confirmed speaker in the first analysis window: "
+			f"expected={speaker_ids}, observed={observed_in_window}"
+		)
+	if confirm_speaker_count is not None:
+		missing_descriptions = [speaker for speaker in speaker_ids if not speaker_descriptions.get(speaker, "").strip()]
+		if missing_descriptions:
+			raise RuntimeError(
+				"--confirm-speaker-count requires descriptions for every speaker; missing "
+				+ ", ".join(missing_descriptions)
+			)
+	status = "frozen" if confirm_speaker_count is not None else "needs_review"
+	speaker_details = {}
+	for speaker in speaker_ids:
+		index = _speaker_index(speaker)
+		speaker_details[speaker] = {
+			**summaries[speaker],
+			"role": speaker_roles.get(speaker, f"source_speaker_{index}"),
+			"identity": speaker_identities.get(speaker, ""),
+			"description": speaker_descriptions.get(speaker, ""),
+			"voice_slot": f"voice{index}",
+		}
 	roster = {
 		"schema_version": "worldview-china-speaker-census.v1",
 		"status": status,
 		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
 		"run_dir": str(run_dir),
-		"speaker_count": 2 if status == "frozen" else None,
-		"voice_count": 2 if status == "frozen" else None,
+		"speaker_count": len(speaker_ids) if status == "frozen" else None,
+		"voice_count": len(speaker_ids) if status == "frozen" else None,
+		"max_supported_speakers": MAX_SPEAKERS,
 		"analysis_window_sec": analysis_window_sec,
 		"analysis_window_start_sec": 0.0,
 		"analysis_window_end_sec": analysis_window_sec,
 		"reviewer": reviewer,
 		"confirmation_required": True,
-		"confirmation": "confirmed_two_main_speakers" if confirm_two_speakers else "not_confirmed",
-		"policy": "freeze_two_speaker_voice_roster_before_voice_extraction_episode_split_and_tts",
+		"confirmation": f"confirmed_{len(speaker_ids)}_main_speakers" if confirm_speaker_count is not None else "not_confirmed",
+		"policy": "freeze_up_to_four_speaker_voice_roster_before_voice_extraction_episode_split_and_tts",
 		"source_audio": str(source_audio),
 		"source_audio_duration_sec": round(_duration(source_audio), 3),
 		"source_video": str(source_video) if source_video.exists() else None,
@@ -475,7 +549,7 @@ def run_speaker_census(
 			"rolling_caption_repetition",
 		],
 		"warnings": warnings,
-		"notes": note,
+		"notes": note or [],
 		"speakers": speaker_details,
 	}
 	evidence = {
@@ -515,7 +589,7 @@ def run_speaker_census(
 		"## Frozen Roster",
 		"",
 	]
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in speaker_ids:
 		info = speaker_details[speaker]
 		report_lines.extend([
 			f"- {speaker}: {info['role']}",
@@ -540,7 +614,8 @@ def main() -> int:
 	parser.add_argument("--analysis-window-sec", type=float, default=DEFAULT_ANALYSIS_WINDOW_SEC)
 	parser.add_argument("--force", action="store_true")
 	parser.add_argument("--skip-review-media", action="store_true")
-	parser.add_argument("--confirm-two-speakers", action="store_true")
+	parser.add_argument("--confirm-two-speakers", action="store_true", help="Backward-compatible alias for --confirm-speaker-count 2.")
+	parser.add_argument("--confirm-speaker-count", type=int, choices=range(1, MAX_SPEAKERS + 1), help="Freeze a confirmed source speaker/voice roster of 1-4 speakers.")
 	parser.add_argument("--reviewer", default="main_agent")
 	parser.add_argument("--speaker0-description", default="")
 	parser.add_argument("--speaker1-description", default="")
@@ -548,6 +623,9 @@ def main() -> int:
 	parser.add_argument("--speaker1-role", default="guest_or_speaker_1")
 	parser.add_argument("--speaker0-identity", default="")
 	parser.add_argument("--speaker1-identity", default="")
+	parser.add_argument("--speaker-description", action="append", default=[], help="Additional speaker description as 'Speaker 2=...' or '2=...'.")
+	parser.add_argument("--speaker-role", action="append", default=[], help="Additional speaker role as 'Speaker 2=...' or '2=...'.")
+	parser.add_argument("--speaker-identity", action="append", default=[], help="Additional speaker identity as 'Speaker 2=...' or '2=...'.")
 	parser.add_argument("--note", action="append", default=[])
 	args = parser.parse_args()
 	result = run_speaker_census(
@@ -560,6 +638,7 @@ def main() -> int:
 		force=args.force,
 		skip_review_media=args.skip_review_media,
 		confirm_two_speakers=args.confirm_two_speakers,
+		confirm_speaker_count=args.confirm_speaker_count,
 		reviewer=args.reviewer,
 		speaker0_description=args.speaker0_description,
 		speaker1_description=args.speaker1_description,
@@ -567,6 +646,9 @@ def main() -> int:
 		speaker1_role=args.speaker1_role,
 		speaker0_identity=args.speaker0_identity,
 		speaker1_identity=args.speaker1_identity,
+		speaker_descriptions=_parse_speaker_kv(args.speaker_description),
+		speaker_roles=_parse_speaker_kv(args.speaker_role),
+		speaker_identities=_parse_speaker_kv(args.speaker_identity),
 		note=args.note,
 	)
 	print(json.dumps(result, ensure_ascii=False, indent=2))

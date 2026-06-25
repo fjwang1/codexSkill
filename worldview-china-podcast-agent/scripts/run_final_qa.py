@@ -16,6 +16,11 @@ FORBIDDEN_CHINESE_CONTEMPORARY_LEADER_NAMES = [
 	"Xi Jinping",
 	"Xijinping",
 ]
+MAX_SPEAKERS = 4
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
+TARGET_SOURCE_VIDEO_HEIGHT = 1440
+TARGET_FINAL_VIDEO_WIDTH = 2560
+TARGET_FINAL_VIDEO_HEIGHT = 1440
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -73,6 +78,36 @@ def _forbidden_chinese_leader_names(text: str) -> list[str]:
 	if re.search(r"(?<![A-Za-z])Xi(?![A-Za-z])", text):
 		found.append("Xi")
 	return sorted(set(found))
+
+
+def _speaker_index(speaker: str) -> int:
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker id: {speaker}"
+	return int(match.group(1))
+
+
+def _sorted_speakers(values: Any) -> list[str]:
+	speakers = [str(value) for value in values if SPEAKER_RE.fullmatch(str(value))]
+	return sorted(set(speakers), key=_speaker_index)
+
+
+def _expected_speakers_from_roster(roster: dict[str, Any], failures: list[str], label: str) -> list[str]:
+	count = int(roster.get("speaker_count") or 0)
+	voice_count = int(roster.get("voice_count") or 0)
+	if not (1 <= count <= MAX_SPEAKERS):
+		failures.append(f"{label} speaker_count is not within 1-{MAX_SPEAKERS}")
+		return []
+	if voice_count != count:
+		failures.append(f"{label} voice_count does not match speaker_count")
+	speakers = _sorted_speakers((roster.get("speakers") or {}).keys())
+	expected = [f"Speaker {index}" for index in range(count)]
+	if speakers != expected:
+		failures.append(f"{label} speakers are not contiguous Speaker 0..{count - 1}")
+	return expected
+
+
+def _is_locked_roster_policy(value: Any) -> bool:
+	return str(value or "") in {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
 
 
 def _has_rolling_caption_repetition(text: str) -> bool:
@@ -164,6 +199,9 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		"translation_json": translation_json_path,
 		"translation_md": translation_md_path,
 		"chapter_segments": chapter_segments_path,
+		"translation_semantic_qa": run_dir / "03c-translation-semantic-qa/translation-semantic-qa-result.json",
+		"translation_reading_review": run_dir / "03c-translation-semantic-qa/translation-reading-review-result.json",
+		"early_text_compliance": run_dir / "03d-risk-compliance-review/text-compliance-review-result.json",
 		"text_compliance": run_dir / "04c-bilibili-text-compliance/text-compliance-review-result.json",
 		"podcast_script": run_dir / "podcast_script.md",
 		"script_report": run_dir / "04-podcast-script/script_report.md",
@@ -171,6 +209,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		"final_audio": run_dir / "audio/final_podcast.wav",
 		"audio_manifest": run_dir / "audio/audio_manifest.json",
 		"audio_transcript_integrity": run_dir / "06b-audio-transcript-integrity/audio-transcript-integrity-result.json",
+		"voice_consistency": run_dir / "06d-voice-consistency-qa/voice-consistency-qa-result.json",
 		"dialogue_timeline": run_dir / "audio/dialogue_timeline.json",
 		"subtitles_srt": run_dir / "video/final_subtitles.srt",
 		"subtitles_ass": run_dir / "video/final_subtitles.ass",
@@ -194,13 +233,16 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	available_max_height = int(source_manifest.get("available_max_height") or selected_height or 0)
 	if selected_height <= 0:
 		failures.append("source video selected height is missing")
-	elif available_max_height >= 1440 and selected_height <= 1080:
+	elif available_max_height >= TARGET_SOURCE_VIDEO_HEIGHT and selected_height < TARGET_SOURCE_VIDEO_HEIGHT:
 		failures.append(
-			"source video selected height is 1080p or lower while 1440p+ was available "
+			f"source video selected height is below {TARGET_SOURCE_VIDEO_HEIGHT}p while {TARGET_SOURCE_VIDEO_HEIGHT}p+ was available "
 			"without recorded user downgrade authorization"
 		)
-	elif available_max_height > 0 and selected_height < available_max_height:
-		failures.append(f"source video selected height is below available max: selected={selected_height}, available={available_max_height}")
+	elif selected_height > TARGET_SOURCE_VIDEO_HEIGHT:
+		warnings.append(
+			f"source video selected height is above the podcast 2K target; final render must downscale: "
+			f"selected={selected_height}, target={TARGET_SOURCE_VIDEO_HEIGHT}"
+		)
 	audio_format = source_manifest.get("selected_audio_format") or {}
 	if "original" not in str(audio_format.get("format_note", "")).lower() and "default" not in str(audio_format.get("format_note", "")).lower():
 		failures.append("selected source audio is not original/default")
@@ -289,13 +331,10 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	speaker_census = _read_json(paths["speaker_census"])
 	if speaker_census.get("status") != "frozen":
 		failures.append("02a speaker census status is not frozen")
-	if int(speaker_census.get("speaker_count") or 0) != 2:
-		failures.append("02a speaker census speaker_count is not 2")
-	if int(speaker_census.get("voice_count") or 0) != 2:
-		failures.append("02a speaker census voice_count is not 2")
+	expected_speakers = _expected_speakers_from_roster(speaker_census, failures, "02a speaker census")
 	if float(speaker_census.get("analysis_window_sec") or 0) < 300:
 		failures.append("02a speaker census analysis window is shorter than 5 minutes")
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in expected_speakers:
 		if speaker not in (speaker_census.get("speakers") or {}):
 			failures.append(f"02a speaker census missing {speaker}")
 
@@ -315,12 +354,14 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	source_speaker_roster = source_voice_prompt_manifest_data.get("speaker_roster") or {}
 	if source_speaker_roster.get("status") != "frozen":
 		failures.append("source voice prompt manifest does not include a frozen speaker_roster")
-	if int(source_speaker_roster.get("speaker_count") or 0) != 2:
-		failures.append("source speaker_roster speaker_count is not 2")
-	if int(source_speaker_roster.get("voice_count") or 0) != 2:
-		failures.append("source speaker_roster voice_count is not 2")
-	for speaker in ("Speaker 0", "Speaker 1"):
-		info = source_voice_prompt_manifest_data.get("speaker_voices", {}).get(speaker) or {}
+	source_expected_speakers = _expected_speakers_from_roster(source_speaker_roster, failures, "source speaker_roster")
+	if expected_speakers and source_expected_speakers and source_expected_speakers != expected_speakers:
+		failures.append("source speaker_roster speaker list does not match 02a speaker census")
+	for speaker in expected_speakers:
+		info = source_voice_prompt_manifest_data.get("speaker_voices", {}).get(speaker)
+		if not isinstance(info, dict):
+			failures.append(f"source voice prompt manifest missing {speaker}")
+			continue
 		for clip in info.get("selected_clips") or []:
 			text_preview = str(clip.get("text_preview") or "")
 			noise_reasons = _reference_text_noise_reasons(text_preview)
@@ -334,7 +375,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	voice_prompt_schema = str(voice_prompt_manifest_data.get("schema_version") or "")
 	is_qwen_chinese_prompt = voice_prompt_schema == "worldview-china-qwen-vibevoice-prompts.v1"
 	speaker_voice_names: dict[str, str] = {}
-	for speaker in ("Speaker 0", "Speaker 1"):
+	for speaker in expected_speakers:
 		info = voice_prompt_manifest_data.get("speaker_voices", {}).get(speaker)
 		if not isinstance(info, dict):
 			failures.append(f"voice_prompt_manifest missing {speaker}")
@@ -410,6 +451,66 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	else:
 		if translation_coverage != "full_translation":
 			failures.append("translation content_coverage is not full_translation")
+	translation_semantic_qa = _read_json(paths["translation_semantic_qa"])
+	if translation_semantic_qa.get("status") != "PASS":
+		failures.append("translation semantic QA status is not PASS")
+	if int(translation_semantic_qa.get("summary", {}).get("fail_findings") or 0) != 0:
+		failures.append("translation semantic QA still has fail findings")
+	if translation_semantic_qa.get("summary", {}).get("qualitative_reading_review_status") != "PASS":
+		failures.append("translation semantic QA qualitative reading review status is not PASS")
+	translation_semantic_reviewed_files = _resolved_path_set(translation_semantic_qa.get("reviewed_files"))
+	for label, path in {
+		"faithful_translation_json": paths["faithful_translation_json"],
+		"active_translation_json": paths["translation_json"],
+	}.items():
+		if str(path.resolve()) not in translation_semantic_reviewed_files:
+			failures.append(f"translation semantic QA did not cover current {label}: {path}")
+	translation_reading_review = _read_json(paths["translation_reading_review"])
+	if translation_reading_review.get("status") != "PASS":
+		failures.append("translation qualitative reading review status is not PASS")
+	if translation_reading_review.get("read_entire_text") is not True:
+		failures.append("translation qualitative reading review did not confirm read_entire_text=true")
+	for criterion in (
+		"natural_chinese_oral_expression",
+		"clear_and_easy_to_understand",
+		"contextual_coherence",
+		"tts_ready_spoken_style",
+	):
+		if (translation_reading_review.get("criteria") or {}).get(criterion) != "PASS":
+			failures.append(f"translation qualitative reading review criterion is not PASS: {criterion}")
+	for finding in translation_reading_review.get("findings") or []:
+		if isinstance(finding, dict) and finding.get("severity") == "fail":
+			failures.append("translation qualitative reading review still has fail findings")
+			break
+	reading_reviewed_files = _resolved_path_set(translation_reading_review.get("reviewed_files"))
+	reading_hashes_raw = translation_reading_review.get("reviewed_file_hashes") if isinstance(translation_reading_review.get("reviewed_file_hashes"), dict) else {}
+	reading_hashes: dict[str, str] = {}
+	for key, value in reading_hashes_raw.items():
+		try:
+			reading_hashes[str(Path(str(key)).expanduser().resolve())] = str(value)
+		except OSError:
+			reading_hashes[str(Path(str(key)).expanduser())] = str(value)
+	for label, path in {
+		"faithful_translation_json": paths["faithful_translation_json"],
+		"active_translation_json": paths["translation_json"],
+	}.items():
+		resolved = str(path.resolve())
+		if resolved not in reading_reviewed_files:
+			failures.append(f"translation qualitative reading review did not cover current {label}: {path}")
+		elif reading_hashes.get(resolved) != _sha256(path):
+			failures.append(f"translation qualitative reading review is stale for current {label}: {path}")
+	early_text_compliance = _read_json(paths["early_text_compliance"])
+	if early_text_compliance.get("status") != "PASS":
+		failures.append("early risk compliance review status is not PASS")
+	if int(early_text_compliance.get("summary", {}).get("fail_findings") or 0) != 0:
+		failures.append("early risk compliance review still has fail findings")
+	early_reviewed_files = _resolved_path_set(early_text_compliance.get("reviewed_files"))
+	for label, path in {
+		"faithful_translation_json": paths["faithful_translation_json"],
+		"active_translation_json": paths["translation_json"],
+	}.items():
+		if str(path.resolve()) not in early_reviewed_files:
+			failures.append(f"early risk compliance review did not cover current {label}: {path}")
 	chapters = _read_json(paths["chapter_segments"]).get("chapters") or []
 	if not chapters:
 		failures.append("chapter_segments has no chapters")
@@ -430,7 +531,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 			failures.append("script_report does not record 03b mainland safety source")
 	elif "content_coverage: full_translation" not in report:
 		failures.append("script_report does not record content_coverage=full_translation")
-	if re.search(r"(?m)^Speaker [^01]:", _read_text(paths["podcast_script"])):
+	if re.search(r"(?m)^Speaker (?:[4-9]|\d{2,})[:：]", _read_text(paths["podcast_script"])):
 		failures.append("podcast_script contains unsupported Speaker labels")
 	text_compliance = _read_json(paths["text_compliance"])
 	if text_compliance.get("status") != "PASS":
@@ -466,6 +567,15 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		failures.append("audio transcript integrity matched_script_ratio is below 0.95")
 	if audio_integrity.get("summary", {}).get("repair_target_chunks"):
 		failures.append("audio transcript integrity QA still has repair target chunks")
+	voice_consistency = _read_json(paths["voice_consistency"])
+	if voice_consistency.get("overall_status") != "PASS":
+		failures.append("voice consistency QA overall_status is not PASS")
+	if voice_consistency.get("lineage", {}).get("status") != "PASS":
+		failures.append("voice lineage QA status is not PASS")
+	if voice_consistency.get("acoustic", {}).get("status") != "PASS":
+		failures.append("voice acoustic consistency QA status is not PASS")
+	if voice_consistency.get("expected_voices") and voice_consistency.get("expected_voices") != speaker_voice_names:
+		failures.append("voice consistency QA expected_voices does not match voice_prompt_manifest")
 	audio_manifest_text = "\n".join(
 		f"{turn.get('text') or ''}\n{turn.get('tts_text') or ''}"
 		for turn in audio_manifest.get("turns") or []
@@ -477,18 +587,18 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		failures.append("audio_manifest audio_backend is not vibevoice_chunked_dialogue")
 	if audio_manifest.get("speaker_voices") != speaker_voice_names:
 		failures.append("audio_manifest speaker_voices does not match voice_prompt_manifest")
-	if audio_manifest.get("voice_context_policy") != "locked_two_speaker_roster":
-		failures.append("audio_manifest voice_context_policy is not locked_two_speaker_roster")
+	if not _is_locked_roster_policy(audio_manifest.get("voice_context_policy")):
+		failures.append("audio_manifest voice_context_policy is not locked_multi_speaker_roster")
 	if not audio_manifest.get("voice_prompt_manifest"):
 		failures.append("audio_manifest missing voice_prompt_manifest")
 	if not audio_manifest.get("chunks"):
 		failures.append("audio_manifest has no chunks")
 	if not audio_manifest.get("turns"):
 		failures.append("audio_manifest has no turns")
-	expected_locked_speaker_names = [speaker_voice_names.get("Speaker 0"), speaker_voice_names.get("Speaker 1")]
+	expected_locked_speaker_names = [speaker_voice_names.get(speaker) for speaker in expected_speakers]
 	chunk_plan = _read_json(paths["chunk_plan"])
-	if chunk_plan.get("voice_context_policy") != "locked_two_speaker_roster":
-		failures.append("chunk_plan voice_context_policy is not locked_two_speaker_roster")
+	if not _is_locked_roster_policy(chunk_plan.get("voice_context_policy")):
+		failures.append("chunk_plan voice_context_policy is not locked_multi_speaker_roster")
 	for chunk in chunk_plan.get("chunks") or []:
 		if chunk.get("vibevoice_mode") != "dialogue":
 			failures.append(f"{chunk.get('chunk_id')} chunk_plan is not dialogue mode under locked roster")
@@ -520,6 +630,17 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 						failures.append(f"resident batch job {job.get('job_id')} speaker_names do not match locked roster")
 	audio_duration = _duration(paths["final_audio"])
 	video_duration = _duration(paths["final_video"])
+	final_video_probe = _probe(paths["final_video"])
+	final_video_streams = [stream for stream in final_video_probe.get("streams", []) if stream.get("codec_type") == "video"]
+	final_video_width = int(final_video_streams[0].get("width") or 0) if final_video_streams else 0
+	final_video_height = int(final_video_streams[0].get("height") or 0) if final_video_streams else 0
+	if not final_video_streams:
+		failures.append("final_video.mp4 has no readable video stream")
+	elif final_video_height > TARGET_FINAL_VIDEO_HEIGHT:
+		failures.append(
+			f"final_video.mp4 exceeds podcast 2K target height: "
+			f"{final_video_width}x{final_video_height}, target={TARGET_FINAL_VIDEO_WIDTH}x{TARGET_FINAL_VIDEO_HEIGHT}"
+		)
 	render_manifest = _read_json(paths["render_manifest"])
 	visual_mode = str(render_manifest.get("visual_mode") or "")
 	if visual_mode.startswith("source_video_revoice"):
@@ -535,6 +656,23 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 			failures.append("burned subtitle render must record burned_subtitles in visual_mode")
 		if subtitle_mode == "burned_ass" and not render_manifest.get("burned_subtitle_render"):
 			failures.append("burned subtitle render is missing burned_subtitle_render evidence")
+		if subtitle_mode == "burned_ass" and render_manifest.get("burned_subtitle_render"):
+			subtitle_layout_rule = (render_manifest.get("burned_subtitle_render") or {}).get("subtitle_layout_rule") or {}
+			subtitle_shift_px = int(subtitle_layout_rule.get("subtitle_vertical_down_shift_px") or 0)
+			subtitle_font_size_px = int(subtitle_layout_rule.get("font_size_px") or 0)
+			if subtitle_layout_rule.get("subtitle_vertical_down_shift_unit") != "one_font_height":
+				failures.append("burned subtitle render must record subtitle_vertical_down_shift_unit=one_font_height")
+			if subtitle_shift_px != subtitle_font_size_px or subtitle_shift_px <= 0:
+				failures.append("burned subtitle render vertical down shift must equal the current subtitle font size")
+		if subtitle_mode == "burned_ass" and (
+			final_video_width != TARGET_FINAL_VIDEO_WIDTH or final_video_height != TARGET_FINAL_VIDEO_HEIGHT
+		):
+			failures.append(
+				f"burned-subtitle formal video must be 2K/1440p "
+				f"{TARGET_FINAL_VIDEO_WIDTH}x{TARGET_FINAL_VIDEO_HEIGHT}, got {final_video_width}x{final_video_height}"
+			)
+		if subtitle_mode == "burned_ass" and int(render_manifest.get("target_video_height") or 0) != TARGET_FINAL_VIDEO_HEIGHT:
+			failures.append("render_manifest target_video_height does not record 1440p 2K output")
 		if visual_mode == "source_video_revoice_strict" and subtitle_mode != "sidecar_not_burned":
 			failures.append("strict source-video revoice must keep subtitles sidecar-only, not burned into frames")
 		if series_episode and render_manifest.get("series_episode") is not True:
@@ -547,6 +685,33 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 				failures.append(f"series episode source_episode_video is missing: {source_episode_video}")
 			if render_manifest.get("source_episode_video_used") is not True:
 				failures.append("series episode render did not use the pre-cut source_episode_video")
+		if "turn_retimed_basic" in visual_mode or render_manifest.get("visual_sync_mode") == "turn_retimed_basic_v1":
+			turn_retime = render_manifest.get("turn_retime") or {}
+			if turn_retime.get("visual_sync_mode") != "turn_retimed_basic_v1":
+				failures.append("turn-retimed render missing turn_retime.visual_sync_mode=turn_retimed_basic_v1")
+			for label in ("visual_activity", "retime_edit_plan", "retimed_video"):
+				value = turn_retime.get(label)
+				if not value:
+					failures.append(f"turn-retimed render missing {label}")
+					continue
+				if not _resolve_run_path(run_dir, value).exists():
+					failures.append(f"turn-retimed render {label} path is missing: {value}")
+			retime_plan_value = turn_retime.get("retime_edit_plan")
+			if retime_plan_value:
+				retime_plan_path = _resolve_run_path(run_dir, retime_plan_value)
+				if retime_plan_path.exists():
+					retime_plan = _read_json(retime_plan_path)
+					summary = retime_plan.get("summary") or {}
+					if retime_plan.get("status") != "pass":
+						failures.append("turn-retimed edit plan status is not pass")
+					if int(summary.get("protected_range_violation_count") or 0) != 0:
+						failures.append("turn-retimed edit plan cuts through protected scene ranges")
+					if float(summary.get("min_kept_segment_duration_sec") or 0) < 1.2:
+						failures.append("turn-retimed edit plan has kept video segments shorter than 1.2s")
+					if abs(float(summary.get("duration_delta_vs_target_sec") or 0)) > 0.75:
+						failures.append("turn-retimed edit plan duration is not within 0.75s of target audio timeline")
+					if float(summary.get("cuts_per_minute") or 0) > 10.0:
+						failures.append("turn-retimed edit plan cut density exceeds 10 cuts/minute")
 	else:
 		if abs(video_duration - audio_duration) > 2.0:
 			failures.append(f"final video/audio duration mismatch: video={video_duration:.2f} audio={audio_duration:.2f}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -12,31 +13,42 @@ from pathlib import Path
 from typing import Any
 
 
-WIDTH = 3840
-HEIGHT = 2160
+DESIGN_WIDTH = 3840
+DESIGN_HEIGHT = 2160
+WIDTH = 2560
+HEIGHT = 1440
 FPS = 30
-SUBTITLE_OVERLAY_W = 3480
-SUBTITLE_OVERLAY_H = 300
-SUBTITLE_OVERLAY_X = 180
-SUBTITLE_OVERLAY_Y = 1648
-SUBTITLE_TOP_Y = 1808
-SUBTITLE_TOP_MAX_Y = 1878
-SUBTITLE_BOTTOM_Y = 1948
-SUBTITLE_FONT_SIZE_PX = 96
-LETTER_SPACING_PX = 6
+
+
+def _scale_px(value: int) -> int:
+	return max(1, round(value * HEIGHT / DESIGN_HEIGHT))
+
+
+SUBTITLE_OVERLAY_W = _scale_px(3480)
+SUBTITLE_OVERLAY_H = _scale_px(300)
+SUBTITLE_OVERLAY_X = _scale_px(180)
+SUBTITLE_FONT_SIZE_PX = _scale_px(96)
+SUBTITLE_VERTICAL_DOWN_SHIFT_PX = SUBTITLE_FONT_SIZE_PX
+SUBTITLE_OVERLAY_Y = _scale_px(1648) + SUBTITLE_VERTICAL_DOWN_SHIFT_PX
+SUBTITLE_TOP_Y = _scale_px(1808) + SUBTITLE_VERTICAL_DOWN_SHIFT_PX
+SUBTITLE_TOP_MAX_Y = _scale_px(1878) + SUBTITLE_VERTICAL_DOWN_SHIFT_PX
+SUBTITLE_BOTTOM_Y = _scale_px(1948) + SUBTITLE_VERTICAL_DOWN_SHIFT_PX
+SUBTITLE_TEXT_SIDE_INSET_PX = _scale_px(80)
+LETTER_SPACING_PX = _scale_px(6)
 SUBTITLE_FAUX_ITALIC_SHEAR = 0.10
-SUBTITLE_SHADOW_BLUR_PX = 2
-SUBTITLE_SHADOW_OFFSET = (6, 8)
+SUBTITLE_SHADOW_BLUR_PX = _scale_px(2)
+SUBTITLE_SHADOW_OFFSET = (_scale_px(6), _scale_px(8))
 SUBTITLE_SHADOW_ALPHA = 96
-SUBTITLE_OUTLINE_WIDTH_PX = 3
+SUBTITLE_OUTLINE_WIDTH_PX = _scale_px(3)
 SUBTITLE_OUTLINE_FILL = (30, 30, 30, 145)
 SUBTITLE_OUTLINE_COLOR = "rgba(30,30,30,0.57)"
-SUBTITLE_GLYPH_EDGE_PAD_PX = 72
-SUBTITLE_SHEAR_EDGE_PAD_PX = 24
+SUBTITLE_GLYPH_EDGE_PAD_PX = _scale_px(72)
+SUBTITLE_SHEAR_EDGE_PAD_PX = _scale_px(24)
 SUBTITLE_FONT_PATH = Path("/Volumes/GT34/Downloads/podcast_visual_style_prototypes/fonts/NotoSansCJKsc-Bold.otf")
 SUBTITLE_FONT_FAMILY = "NotoSansCJKsc-Bold"
 SUBTITLE_FONT_FULL_NAME = "Noto Sans CJK SC Bold"
 SUBTITLE_FONT_LICENSE_NOTE = "SIL Open Font License 1.1"
+VISUAL_SYNC_MODES = {"disabled_v1", "turn_retimed_basic_v1"}
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -102,6 +114,16 @@ def _copy_if_exists(src: Path, dst: Path) -> str | None:
 	return str(dst)
 
 
+def _load_turn_retime_module() -> Any:
+	path = Path(__file__).with_name("run_turn_retime_video.py")
+	spec = importlib.util.spec_from_file_location("worldview_turn_retime_video", path)
+	assert spec is not None
+	module = importlib.util.module_from_spec(spec)
+	assert spec.loader is not None
+	spec.loader.exec_module(module)
+	return module
+
+
 def _encoder_exists(name: str) -> bool:
 	result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 	return name in result.stdout
@@ -120,7 +142,7 @@ def _subtitle_filter(subtitles_ass: Path) -> str:
 	return (
 		f"subtitles=filename={_filter_quote(subtitles_ass)}:"
 		f"fontsdir={_filter_quote(fonts_dir)}:"
-		"original_size=3840x2160"
+		f"original_size={WIDTH}x{HEIGHT}"
 	)
 
 
@@ -284,9 +306,9 @@ def _render_subtitle_images(overlay_dir: Path, cues: list[dict[str, Any]]) -> tu
 			text,
 			font,
 			(
-				80,
+				SUBTITLE_TEXT_SIDE_INSET_PX,
 				SUBTITLE_TOP_Y - SUBTITLE_OVERLAY_Y,
-				SUBTITLE_OVERLAY_W - 80,
+				SUBTITLE_OVERLAY_W - SUBTITLE_TEXT_SIDE_INSET_PX,
 				min(SUBTITLE_OVERLAY_H, SUBTITLE_BOTTOM_Y - SUBTITLE_OVERLAY_Y),
 			),
 			LETTER_SPACING_PX,
@@ -516,6 +538,8 @@ def _compose_video_burned_subtitles(
 		"overlay_video": str(overlay_video),
 		"cue_count": len(layouts),
 		"subtitle_layout_rule": {
+			"design_reference_size": f"{DESIGN_WIDTH}x{DESIGN_HEIGHT}",
+			"output_size": f"{WIDTH}x{HEIGHT}",
 			"subtitle_overlay_x": SUBTITLE_OVERLAY_X,
 			"subtitle_overlay_y": SUBTITLE_OVERLAY_Y,
 			"subtitle_overlay_width": SUBTITLE_OVERLAY_W,
@@ -523,6 +547,8 @@ def _compose_video_burned_subtitles(
 			"subtitle_block_top_min_y": SUBTITLE_TOP_Y,
 			"subtitle_block_top_max_y": SUBTITLE_TOP_MAX_Y,
 			"subtitle_block_bottom_max_y": SUBTITLE_BOTTOM_Y,
+			"subtitle_vertical_down_shift_px": SUBTITLE_VERTICAL_DOWN_SHIFT_PX,
+			"subtitle_vertical_down_shift_unit": "one_font_height",
 			"font_family": SUBTITLE_FONT_FAMILY,
 			"font_full_name": SUBTITLE_FONT_FULL_NAME,
 			"font_file": str(SUBTITLE_FONT_PATH),
@@ -544,6 +570,8 @@ def _compose_video_burned_subtitles(
 		"video_encoder": resolved_encoder,
 		"video_bitrate": video_bitrate if resolved_encoder == "h264_videotoolbox" else None,
 		"subtitle_style_reference": "article-podcast-subtitle-alignment",
+		"target_video_width": WIDTH,
+		"target_video_height": HEIGHT,
 	}
 
 
@@ -588,9 +616,14 @@ def run_revoice(
 	subtitles_ass: Path | None,
 	video_encoder: str,
 	video_bitrate: str,
+	visual_sync_mode: str,
+	source_turn_map: Path | None,
+	turn_audio_timeline: Path | None,
+	source_time_offset_sec: float | None,
 	update_root: bool,
 ) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
+	assert visual_sync_mode in VISUAL_SYNC_MODES
 	episode_manifest_path = run_dir / "episode_manifest.json"
 	episode_manifest = _read_json_optional(episode_manifest_path)
 	series_episode = episode_manifest.get("schema_version") == "worldview-china-podcast-series-episode.v1"
@@ -637,6 +670,62 @@ def run_revoice(
 		video_input = source
 		video_copy_policy = "source_video_stream_copy_trimmed_to_audio_duration" if trim_to_audio_duration else "source_video_stream_copy"
 
+	turn_retime_result: dict[str, Any] | None = None
+	if visual_sync_mode == "turn_retimed_basic_v1":
+		retime = _load_turn_retime_module()
+		default_source_turn_map = run_dir / "02b-source-voice-prompts/source_speaker_timeline.normalized.json"
+		if not default_source_turn_map.exists():
+			default_source_turn_map = run_dir / "03-source-translation/source_transcript.zh.json"
+		default_turn_audio_timeline = run_dir / "06c-audio-timeline-alignment/turn_audio_timeline.json"
+		if not default_turn_audio_timeline.exists():
+			default_turn_audio_timeline = run_dir / "audio/dialogue_timeline.json"
+		retime_source_turn_map = (source_turn_map or default_source_turn_map).resolve()
+		retime_turn_audio_timeline = (turn_audio_timeline or default_turn_audio_timeline).resolve()
+		retime_time_offset = (
+			source_time_offset_sec
+			if source_time_offset_sec is not None
+			else float(semantic_source_start_sec or 0.0)
+			if source_is_preclipped_episode
+			else 0.0
+		)
+		assert retime_source_turn_map.exists(), f"Missing source turn map for turn retime: {retime_source_turn_map}"
+		assert retime_turn_audio_timeline.exists(), f"Missing turn audio timeline for turn retime: {retime_turn_audio_timeline}"
+		visual_activity_path = output_dir / "visual_activity.json"
+		retime_plan_path = output_dir / "retime_edit_plan.json"
+		retimed_video = work_dir / "source_retimed_basic.mp4"
+		retime.analyze_visual_activity(
+			video_input,
+			visual_activity_path,
+			work_dir,
+			force=force,
+		)
+		plan = retime.build_retime_plan(
+			video_input,
+			retime_source_turn_map,
+			retime_turn_audio_timeline,
+			visual_activity_path,
+			retime_plan_path,
+			source_time_offset_sec=retime_time_offset,
+		)
+		if plan.get("status") != "pass":
+			raise AssertionError(f"turn_retimed_basic_v1 plan did not pass: {plan.get('status')} {plan.get('warnings')}")
+		render_result = retime.render_retimed_video(retime_plan_path, retimed_video)
+		video_input = retimed_video
+		target_duration = audio_duration
+		match_audio_duration = True
+		video_copy_policy = "source_video_turn_retimed_basic_reencoded_to_audio_duration"
+		turn_retime_result = {
+			"visual_sync_mode": visual_sync_mode,
+			"source_turn_map": str(retime_source_turn_map),
+			"turn_audio_timeline": str(retime_turn_audio_timeline),
+			"source_time_offset_sec": retime_time_offset,
+			"visual_activity": str(visual_activity_path),
+			"retime_edit_plan": str(retime_plan_path),
+			"retime_plan_summary": plan.get("summary") or {},
+			"retimed_video": str(retimed_video),
+			"retimed_video_render": render_result,
+		}
+
 	final_video = output_dir / "final_video.mp4"
 	burned_subtitle_render: dict[str, Any] | None = None
 	if force or not final_video.exists():
@@ -653,7 +742,11 @@ def run_revoice(
 				video_encoder,
 				video_bitrate,
 			)
-			video_copy_policy = "source_video_reencoded_with_burned_ass_subtitles"
+			video_copy_policy = (
+				"source_video_turn_retimed_basic_reencoded_with_burned_ass_subtitles"
+				if visual_sync_mode == "turn_retimed_basic_v1"
+				else "source_video_reencoded_with_burned_ass_subtitles"
+			)
 		else:
 			_compose_video_copy(video_input, audio_path, final_video, target_duration, allow_trim_audio or review_sample)
 
@@ -671,6 +764,15 @@ def run_revoice(
 	if update_root:
 		shutil.copy2(final_video, video_root / "final_video.mp4")
 	visual_mode = (
+		"source_video_revoice_episode_segment_turn_retimed_basic_burned_subtitles"
+		if visual_sync_mode == "turn_retimed_basic_v1" and burn_subtitles and series_episode
+		else "source_video_revoice_turn_retimed_basic_burned_subtitles"
+		if visual_sync_mode == "turn_retimed_basic_v1" and burn_subtitles
+		else "source_video_revoice_episode_segment_turn_retimed_basic"
+		if visual_sync_mode == "turn_retimed_basic_v1" and series_episode
+		else "source_video_revoice_turn_retimed_basic"
+		if visual_sync_mode == "turn_retimed_basic_v1"
+		else
 		"source_video_revoice_episode_segment_burned_subtitles"
 		if burn_subtitles and episode_segment_to_audio_duration
 		else "source_video_revoice_episode_segment"
@@ -698,7 +800,13 @@ def run_revoice(
 		"source_episode_video": str(episode_source_video) if episode_source_video is not None else None,
 		"source_episode_video_used": source_is_preclipped_episode,
 		"source_episode_video_manifest": str(_resolve_optional_path(run_dir, episode_manifest.get("source_episode_video_manifest"))) if episode_manifest.get("source_episode_video_manifest") else None,
+		"visual_sync_mode": visual_sync_mode,
+		"turn_retime": turn_retime_result,
 		"playback_speed": 1.0,
+		"output_video_policy": "2k_1440p_bilibili_podcast_default",
+		"target_video_width": WIDTH,
+		"target_video_height": HEIGHT,
+		"target_video_resolution": f"{WIDTH}x{HEIGHT}",
 		"subtitle_mode": "burned_ass" if burn_subtitles else "sidecar_not_burned",
 		"subtitle_delivery_policy": "burned_subtitles_default" if burn_subtitles else "sidecar_user_requested_no_burn_subtitles",
 		"burned_subtitle_render": burned_subtitle_render,
@@ -748,9 +856,12 @@ def run_revoice(
 		f"- chinese_audio: `{audio_path}`",
 		f"- audio_duration_sec: {audio_duration:.3f}",
 		f"- target_duration_sec: {target_duration:.3f}",
+		f"- target_video_resolution: {WIDTH}x{HEIGHT}",
 		f"- final_video: `{final_video}`",
 		f"- final_duration_sec: {final_duration:.3f}",
 		f"- video_copy_policy: {video_copy_policy}",
+		f"- visual_sync_mode: {visual_sync_mode}",
+		f"- retime_edit_plan: {turn_retime_result['retime_edit_plan'] if turn_retime_result else 'none'}",
 		f"- subtitle_mode: {manifest['subtitle_mode']}",
 		f"- burned_subtitle_render: {burned_subtitle_render['method'] if burned_subtitle_render else 'none'}",
 		"- note: strict final delivery keeps source video frames unchanged and replaces only the audio track; burned-subtitle delivery is a separate visual derivative because subtitle overlay requires video re-encoding.",
@@ -775,7 +886,11 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--subtitle-manifest", type=Path, help="Subtitle manifest to burn. Defaults to <run_dir>/video/subtitle_manifest.json.")
 	parser.add_argument("--subtitles-ass", type=Path, help="Sidecar ASS subtitle path to copy. Defaults to <run_dir>/video/final_subtitles.ass.")
 	parser.add_argument("--video-encoder", choices=["h264_videotoolbox", "libx264"], default="h264_videotoolbox")
-	parser.add_argument("--video-bitrate", default="18000k", help="Bitrate used by h264_videotoolbox burned-subtitle renders.")
+	parser.add_argument("--video-bitrate", default="12000k", help="Bitrate used by h264_videotoolbox burned-subtitle 1440p renders.")
+	parser.add_argument("--visual-sync-mode", choices=sorted(VISUAL_SYNC_MODES), default="disabled_v1")
+	parser.add_argument("--source-turn-map", type=Path, help="Source speaker turn map used by turn_retimed_basic_v1.")
+	parser.add_argument("--turn-audio-timeline", type=Path, help="Final Chinese audio turn timeline used by turn_retimed_basic_v1.")
+	parser.add_argument("--source-time-offset-sec", type=float, help="Subtract this offset from source turn timestamps before retiming, useful for pre-cut episode videos.")
 	parser.add_argument("--no-update-root", action="store_true")
 	parser.add_argument("--force", action="store_true")
 	parser.set_defaults(burn_subtitles=True)
@@ -797,6 +912,10 @@ def main() -> None:
 		subtitles_ass=args.subtitles_ass,
 		video_encoder=args.video_encoder,
 		video_bitrate=args.video_bitrate,
+		visual_sync_mode=args.visual_sync_mode,
+		source_turn_map=args.source_turn_map,
+		turn_audio_timeline=args.turn_audio_timeline,
+		source_time_offset_sec=args.source_time_offset_sec,
 		update_root=not args.no_update_root,
 	)
 	print(json.dumps({

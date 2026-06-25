@@ -1,6 +1,6 @@
 interface:
   display_name: "VibeVoice Long-Form TTS"
-  short_description: "Generate local single-speaker or two-speaker audio with VibeVoice"
+  short_description: "Generate local single-speaker or up-to-four-speaker audio with VibeVoice"
   default_prompt: "Use $vibevoice-dialogue-tts to generate long-form audio from this local script using only VibeVoice."
 
 policy:

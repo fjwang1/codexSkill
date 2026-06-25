@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from chinese_number_display import normalize_comma_thousands_for_chinese_display
+
 
 DEFAULT_CHARS_PER_MINUTE = 330.0
 DEFAULT_TARGET_MINUTES_MIN = 30.0
@@ -79,7 +81,8 @@ def _read_text(path: Path) -> str:
 
 
 def _normalize_tts_text(text: str) -> str:
-	return re.sub(r"\s+", "", str(text or "")).strip()
+	value = re.sub(r"\s+", "", str(text or "")).strip()
+	return normalize_comma_thousands_for_chinese_display(value)
 
 
 def _char_count(text: str) -> int:
@@ -218,7 +221,7 @@ def _load_script_turns(run_dir: Path) -> list[dict[str, Any]]:
 	assert script_path.exists(), f"Missing podcast script: {script_path}"
 	turns: list[dict[str, Any]] = []
 	for line in script_path.read_text(encoding="utf-8").splitlines():
-		match = re.match(r"^(Speaker [01])[:：]\s*(.+)$", line.strip())
+		match = re.match(r"^(Speaker [0-3])[:：]\s*(.+)$", line.strip())
 		if not match:
 			continue
 		text = _normalize_tts_text(match.group(2))
@@ -583,6 +586,8 @@ def _renumber_segments(segments: list[dict[str, Any]]) -> tuple[list[dict[str, A
 		item = dict(segment)
 		item["source_segment_index_original"] = original_index
 		item["segment_index"] = local_index
+		item["zh_text"] = _normalize_tts_text(str(item.get("zh_text") or ""))
+		item["zh_char_count"] = _char_count(str(item.get("zh_text") or ""))
 		renumbered.append(item)
 	return renumbered, mapping
 
@@ -771,7 +776,9 @@ def _write_execution_plan(run_dir: Path, series_manifest: dict[str, Any]) -> Non
 		"# Series Episode Execution Plan",
 		"",
 		"- serial_execution_required: true",
-		"- note: Run every episode to completion before starting the next one; VibeVoice generation must not run concurrently. Default device is MPS; CPU is a fallback.",
+		"- parallel_execution_allowed: false for CPU/MPS-heavy production nodes such as VibeVoice and video rendering.",
+		"- bilibili_upload_overlap_allowed: true; after an episode passes 09/10 and reaches a verified Bilibili ready-to-submit upload tab, the next episode may continue production while the browser/upload waits.",
+		"- final_publish_after_all_uploads: true; click final Bilibili submit/publish only after every episode upload tab is verified ready.",
 		"",
 	]
 	for episode in series_manifest["episodes"]:
@@ -805,7 +812,7 @@ def _write_execution_plan(run_dir: Path, series_manifest: dict[str, Any]) -> Non
 			f"  --run-dir {episode_dir} --match-audio-duration --force",
 			"```",
 			"",
-			"Then run 06 alignment, 07 subtitles, 09 QA, 10 metadata, and 11 Bilibili upload publish for this episode before continuing.",
+			"Then run 06 alignment, 07 subtitles, 09 QA, 10 metadata, and 11a Bilibili upload/field verification. Once this episode is READY_TO_SUBMIT, the next episode may continue production while the upload tab stays open. Run 11b final submit only after every episode is READY_TO_SUBMIT.",
 			"",
 		])
 	(run_dir / SERIES_NODE / "series_execution_plan.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -898,6 +905,8 @@ def split_series(
 			"original_segment_end": _segment_index(plan.segments[-1]),
 			"turn_count": len(renumbered_turns),
 			"serial_execution_required": True,
+			"bilibili_upload_overlap_allowed": True,
+			"final_publish_after_all_uploads": True,
 			"downstream_nodes": DOWNSTREAM_NODES,
 			**schedule,
 		}
@@ -947,6 +956,9 @@ def split_series(
 		"episode_order_marker_template": episode_order_marker_template,
 		"serial_execution_required": True,
 		"parallel_execution_allowed": False,
+		"bilibili_upload_overlap_allowed": True,
+		"final_publish_after_all_uploads": True,
+		"overlap_policy": "only_bilibili_upload_wait_or_verified_ready_to_submit_tabs_may_overlap_with_next_episode_production",
 		"duration_estimation": estimation,
 		"target_minutes_min": target_minutes_min,
 		"target_minutes_max": target_minutes_max,
@@ -956,7 +968,7 @@ def split_series(
 		"shared_cover_frame": str(shared_cover_frame),
 		"warnings": chapter_warnings + grouping_warnings,
 		"episodes": episodes,
-		"completion_gate": "all episodes must complete downstream nodes in order before the parent run is complete",
+		"completion_gate": "all episodes must pass 09/10, reach Bilibili READY_TO_SUBMIT or SUBMITTED through the upload skill, then all episodes must be finally submitted before the parent run is complete",
 	}
 	_write_json(node_dir / "series_manifest.json", series_manifest)
 	_write_execution_plan(run_dir, series_manifest)

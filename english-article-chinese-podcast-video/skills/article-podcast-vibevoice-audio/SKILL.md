@@ -133,6 +133,8 @@ python3 /Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/s
 
 本双人 skill 必须继续使用通用 wrapper 的 `--speaker-mode dialogue`。不要把双人播客文稿临时改成 single 模式；单人口播走 `english-article-chinese-single-host-video/skills/article-single-host-vibevoice-audio`。
 
+兼容说明：本 skill 的产品语义仍是文章双人播客，正式 article 流程只接受 `Speaker 0` / `Speaker 1`。其中 `scripts/prepare_vibevoice_audio_inputs.py` 同时被 Worldview 播客流程复用做 TTS 文本归一化；当调用方显式传 `--min-speaker-turns 0` 时，该脚本可以保留 `Speaker 2` / `Speaker 3` 标签，供最多 4 人的冻结 roster 流程使用。
+
 已知正常参考：`china_shock_front_two_chapters_vibevoice_speakers_generated.wav` 是 21 turn、约 1169 个中文字、212.8 秒的 VibeVoice-only 输出。它说明本机 VibeVoice 在足够长的上下文和稳定参数下可用，但不代表 6 句超短 smoke 稿也能稳定产生好听声音。
 
 3. 把生成的 wav 复制或移动为正式音轨：

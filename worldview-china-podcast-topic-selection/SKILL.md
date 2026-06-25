@@ -1,11 +1,13 @@
 ---
 name: worldview-china-podcast-topic-selection
-description: "用于为 Worldview China 或类似中文视频生产流程选择 YouTube 上的中国相关播客视频/访谈长谈。Use when Codex needs to search, filter, rank, or audit recent China-related YouTube podcast episodes, interview shows, roundtables, or long-form conversational videos, especially when adapting the existing worldview-china-topic-selection workflow from general China videos to podcast-form source videos."
+description: "用于为 Worldview China 或类似中文视频生产流程选择 YouTube 上的中国相关播客视频、访谈长谈、专家圆桌、新闻对谈、panel discussion 或 think-tank/forum 长谈。Use when Codex needs to search, filter, rank, or audit recent China-related YouTube podcast episodes, interview shows, expert panels, news discussions, roundtables, or long-form conversational videos, while rejecting sources with more than 4 primary speakers because VibeVoice supports at most 4 voices."
 ---
 
 # Worldview China Podcast Topic Selection
 
-使用这个 skill 自动寻找并排序 YouTube 上的中国相关播客视频。它是 `worldview-china-topic-selection` 的播客形态分支：保留 YouTube search/detail/transcript 工具链，但把硬过滤、粗评和内容评分改成适合 podcast / interview / conversation / roundtable 的版本。
+使用这个 skill 自动寻找并排序 YouTube 上的中国相关多人长谈视频。它是 `worldview-china-topic-selection` 的长谈形态分支：保留 YouTube search/detail/transcript 工具链，但把硬过滤、粗评和内容评分改成适合 podcast / interview / conversation / roundtable / expert panel / news discussion / think-tank forum 的版本。
+
+本 skill 的目标不是只找标题里写了 `podcast` 的节目，而是找适合做中文多声道播客化视频的长谈源：主持人和嘉宾访谈、专家圆桌、新闻对谈、智库 panel、论坛式多人讨论都可以进入候选。但 VibeVoice 当前最多支持 4 个 speaker voice slot，因此一旦 metadata、描述、字幕、画面或 02a speaker census 显示主要说话人超过 4 位，必须直接放弃该候选，不得尝试合并、压缩或临时新增音色。
 
 ## Reused Tool Scripts
 
@@ -79,27 +81,31 @@ uv run --with youtube-transcript-api python "$BASE/scripts/get_transcript.py" \
 ```text
 发布时间：过去 7 天内
 视频时长：20 分钟 <= duration <= 180 分钟
-视频形态：横向长视频；不是 Shorts、trailer、纯 clip、短切片、普通新闻包或普通视频 essay
+视频形态：横向长视频；必须是播客、访谈、专家圆桌、新闻对谈、panel discussion、think-tank/forum discussion 或类似多人长谈；不是 Shorts、trailer、纯 clip、短切片、普通新闻包或普通视频 essay
 主题：China 必须是主轴，不是描述、标签或章节里的偶然关键词
+说话人数：估计主要说话人必须 <= 4；如果标题、描述、嘉宾列表、字幕、章节或画面显示 5 位及以上主要说话人，直接 reject/abandon
 去重：过去 5 天已写入 selected-videos.json 的 video_id 必须硬拒绝，不得成为 best_video
 最终输出：只有通过字幕/ASR 内容验收的候选才能成为 best_video
 ```
 
 如果上游任务给出更严格的发布时间或时长范围，使用更严格的范围。日更流程需要更强新鲜度时，可以把发布时间改回过去 3 天。
 
-## Podcast Form Signals
+## Longform Conversation Form Signals
 
-进入字幕拉取前，候选至少满足一类播客形态信号：
+进入字幕拉取前，候选至少满足一类长谈形态信号：
 
-- 标题、频道或描述包含 `podcast`、`pod`、`episode`、`ep.`、`interview`、`conversation`、`roundtable`、`dialogue`、`show`、`with`、`ft.`。
+- 标题、频道或描述包含 `podcast`、`pod`、`episode`、`ep.`、`interview`、`conversation`、`roundtable`、`dialogue`、`show`、`with`、`ft.`、`panel`、`discussion`、`debate`、`experts discuss`、`analysts discuss`、`news discussion`、`forum`、`think tank`、`briefing`。
 - 频道或节目名明确是播客/访谈节目，例如 `The Prof G Pod`、`20VC`、`The Dip Podcast`、`Asian Insider podcast`、`The World Unpacked`。
-- 描述包含主持人、嘉宾、conversation、listen on Apple/Spotify、episode transcript、章节型长谈结构。
+- 描述包含主持人、嘉宾、moderator、panelists、experts、analysts、conversation、discussion、listen on Apple/Spotify、episode transcript、章节型长谈结构。
+- 新闻机构、智库、大学、论坛或会议频道的视频，只有在它是主持人/主持人组与嘉宾/专家之间的连续讨论时才接受；单人演讲、纯 PPT webinar、新闻包剪辑、记者口播合集不算。
+- 估计主要说话人必须 <= 4。若描述列出 5 位及以上嘉宾/主持/专家，或字幕/章节显式出现 5 位及以上主要 speaker，不进入字幕内容 accept；最多只能作为 rejected evidence 写入报告。
 
 拒绝：
 
 - 只有标题或 tag 命中 China，但主体是娱乐、旅游、普通财经泛谈或第三国国内话题。
 - 纯剪辑、reaction、短视频搬运、预告片、直播回放碎片。
 - 非播客频道的普通视频 essay，除非用户明确允许“播客优先但可收分析长视频”。
+- 5 位及以上主要说话人的圆桌、峰会 panel 或新闻多人连线。当前 VibeVoice 只支持 4 个正式 voice slot，不得为了使用该候选而把多人强行合并成 4 人。
 
 ## Query Batch
 
@@ -123,6 +129,16 @@ China trade podcast
 China roundtable
 China conversation
 Beijing podcast
+China panel discussion
+China experts discuss
+China news discussion
+China analyst roundtable
+US China panel
+China foreign policy discussion
+China economy panel
+China debate experts
+China think tank discussion
+China forum discussion
 ```
 
 ## Workflow
@@ -143,12 +159,12 @@ python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/s
 
 6. 将 `recent-selected-videos.json.recent_video_ids` 作为硬排除列表加入 search/detail/filter/ranking 上下文；这些视频不能成为本轮 `best_video`。
 7. 分批运行 `detail_list.py`，默认 `--min-duration-seconds 1200 --max-duration-seconds 10800`。
-8. 应用发布时间、时长、视频形态、podcast form 和近 5 天已选视频硬过滤。
+8. 应用发布时间、时长、视频形态、longform conversation form、主要说话人数 <= 4 和近 5 天已选视频硬过滤。
 9. 用标题、频道、描述和互动数据做 metadata 粗评，选出 `top_k_transcripts=12`。
 10. 拉字幕：先 `get_transcript.py`；如果缺 `youtube-transcript-api`，按上面的 `uv run --with youtube-transcript-api` 重试；仍失败后用 `yt-dlp --write-subs --write-auto-subs --skip-download` 只抓字幕。
 11. 如果 YouTube 要求 bot/sign-in 校验，本机已有长期授权，直接用 `yt-dlp --cookies-from-browser chrome` 对同一候选重试；cookie 原文不得出现在任何日志或报告中。
-12. 对拿到字幕或抽样 ASR 的候选做内容评分。
-13. 从 `accept` 候选中选择排序第一且不在近 5 天 selected registry 中的视频作为 `best_video`；没有 accept 时输出明确失败原因，不硬选。
+12. 对拿到字幕或抽样 ASR 的候选做内容评分，同时复核主要说话人数线索；如果 transcript、章节或描述显示 5 位及以上主要说话人，直接 reject，不允许成为 backup 或 accept。
+13. 从 `accept` 候选中选择排序第一且不在近 5 天 selected registry 中、且主要说话人估计 <= 4 的视频作为 `best_video`；没有 accept 时输出明确失败原因，不硬选。
 14. 写出 `best_video.json` 后，立刻登记本次选择，防止下一轮重复选中：
 
 ```bash
@@ -163,10 +179,10 @@ python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/s
 
 ## Scoring
 
-Metadata 粗评只决定是否值得拉字幕，满分 10：
+Metadata 粗评只决定是否值得拉字幕，满分 10。为了兼容旧报告，字段名可以继续叫 `podcast_form_score`，但语义已经扩展为 longform conversation form：
 
 ```text
-podcast_form_score: 0-3
+podcast_form_score / longform_conversation_form_score: 0-3
 china_metadata_score: 0-3
 engagement_score: 0-2
 freshness_and_channel_score: 0-2
@@ -175,11 +191,20 @@ freshness_and_channel_score: 0-2
 字幕内容评分满分 10：
 
 ```text
-podcast_form: 0-2
+podcast_form / longform_conversation_form: 0-2
 china_relevance: 0-3
 foreign_perspective: 0-2
 insight_density: 0-2
 angle_novelty: 0-1
+```
+
+说话人数不是加分项，而是硬门槛：
+
+```text
+estimated_primary_speaker_count <= 4: may continue
+estimated_primary_speaker_count > 4: reject / abandon
+unknown but no evidence of >4 speakers: may continue to 02a speaker census with risk flag
+02a speaker census finds >4 primary speakers: abandon candidate immediately
 ```
 
 决策阈值：
@@ -214,7 +239,8 @@ content_score < 7: reject
 用中文输出。成功时包含：
 
 - 标题、频道、URL、发布时间、时长、播放量、评论数。
-- podcast form 证据。
+- longform conversation form 证据，包括它是 podcast、访谈、圆桌、新闻对谈、专家 panel、智库讨论还是其他长谈形态。
+- 主要说话人数估计及依据；如果只是 metadata 阶段无法确定，必须写 `speaker_count_needs_02a_confirmation=true`，并由 02a 最终裁决。
 - 字幕内容评分五项和 `content_score`。
 - 2-4 句中文摘要。
 - 为什么它是中国相关播客，而不是普通 China keyword 命中。

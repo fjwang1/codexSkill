@@ -10,7 +10,27 @@ from typing import Any
 
 BASE_TAGS = ("外网热议", "海外视角", "中国观察", "国际观察")
 FALLBACK_TAGS = ("国际播客", "中文配音", "财经解读", "中美关系", "国际经济", "全球化")
-PUBLIC_DESCRIPTION = "本期是基于外网公开播客/访谈视频制作的中文配音版本：保留原视频画面，替换为中文对话音频，方便中文观众理解原对话内容。"
+DESCRIPTION_PRODUCTION_NOTE_PATTERNS = (
+	r"中文配音版本",
+	r"保留原视频画面",
+	r"替换为中文对话音频",
+	r"外网公开播客/访谈视频制作",
+	r"方便中文观众理解",
+	r"本期是基于",
+)
+DESCRIPTION_TOPIC_PATTERNS = (
+	("中国台湾穆斯林社群", r"中国台湾[^。！？\n]{0,40}穆斯林|穆斯林[^。！？\n]{0,40}中国台湾"),
+	("印尼护理人员与清真生活", r"印尼|印度尼西亚|护理人员|清真"),
+	("回族穆斯林与中国伊斯兰历史", r"回族|兰州牛肉面|清真寺|中国伊斯兰|伊斯兰教在中国"),
+	("东亚低生育和家庭关系", r"低出生率|低生育|家庭关系|孝道|结婚|孩子"),
+	("日本、韩国和中国台湾的社会困境", r"日本|韩国|东亚文化圈|低出生率|低生育"),
+	("西方媒体叙事和中国观感", r"美国媒体|西方媒体|宣传|中国不是|中国人民"),
+	("穆斯林社群如何与中国打交道", r"穆斯林[^。！？\n]{0,60}中国|中国[^。！？\n]{0,60}穆斯林|中国超级大国"),
+	("华语伊斯兰教育资源", r"普通话|中文[^。！？\n]{0,20}伊斯兰|讲座|微信群|学习资源|寻求知识"),
+	("动漫、叙事和东亚文化", r"动漫|漫画|讲故事|东方写作|日本写作"),
+	("婚姻危机与社群项目", r"婚姻|婚介|配偶|家庭单位"),
+	("贸易、战略和国际秩序", r"贸易|战略|国际秩序|全球舞台"),
+)
 KEYWORD_PATTERNS = [
 	("中国经济", r"中国经济|经济|增长|消费|出口|房地产|内需|脆弱|疲软"),
 	("财经解读", r"经济|财经|贸易|出口|消费|房地产|制造业|供应链|企业|市场"),
@@ -129,6 +149,57 @@ def _chapter_lines(run_dir: Path) -> list[str]:
 	return []
 
 
+def _strip_speaker_and_markup(text: str) -> str:
+	text = re.sub(r"(?s)^---.*?---", " ", text)
+	text = re.sub(r"^#+\s*", " ", text, flags=re.M)
+	text = re.sub(r"\bSpeaker\s+\d+\s*:\s*", " ", text)
+	text = re.sub(r"\[[^\]]{1,20}\]", " ", text)
+	text = re.sub(r"\([^)]{1,40}\)", " ", text)
+	return _clean_text(text)
+
+
+def _title_core(title: str, cover_title: dict[str, Any], episode_manifest: dict[str, Any]) -> str:
+	for value in (
+		episode_manifest.get("episode_subtitle"),
+		cover_title.get("translated_title_core"),
+		cover_title.get("title_text"),
+		title,
+	):
+		core = _clean_text(value, max_len=42)
+		if core:
+			core = re.sub(r"^.+?[：:]", "", core).strip()
+			core = re.sub(r"^第\s*\d+\s*集[：:：]?", "", core).strip()
+			if core:
+				return core
+	return "本集核心话题"
+
+
+def _description_topic_terms(text: str) -> list[str]:
+	matches: list[tuple[int, int, str]] = []
+	for label, pattern in DESCRIPTION_TOPIC_PATTERNS:
+		match = re.search(pattern, text, re.I)
+		if match:
+			matches.append((match.start(), len(matches), label))
+	matches.sort()
+	terms: list[str] = []
+	for _, _, label in matches:
+		if label not in terms:
+			terms.append(label)
+	return terms
+
+
+def _fallback_script_sentence(text: str) -> str:
+	for sentence in re.split(r"[。！？]\s*", text):
+		sentence = _clean_text(sentence)
+		if 18 <= len(sentence) <= 72 and not re.search(r"赞助|广告|访问|http|www|\.com|音乐", sentence, re.I):
+			return sentence
+	return ""
+
+
+def _is_production_note(description: str) -> bool:
+	return any(re.search(pattern, description) for pattern in DESCRIPTION_PRODUCTION_NOTE_PATTERNS)
+
+
 def _build_tags(run_dir: Path, title: str, source_metadata: dict[str, Any], cover_title: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
 	tags: list[str] = []
 	seen: set[str] = set()
@@ -166,17 +237,39 @@ def _build_tags(run_dir: Path, title: str, source_metadata: dict[str, Any], cove
 
 
 def _build_description(run_dir: Path, title: str, source_metadata: dict[str, Any], cover_title: dict[str, Any], tags: list[str]) -> str:
-	return PUBLIC_DESCRIPTION + "\n"
+	episode_manifest = _read_json_optional(run_dir / "episode_manifest.json")
+	core = _title_core(title, cover_title, episode_manifest)
+	script_text = _strip_speaker_and_markup(_read_text_optional(run_dir / "podcast_script.md", limit=16000))
+	context = _context_text(core, cover_title.get("title_text"), cover_title.get("video_title_text"), script_text)
+	terms = _description_topic_terms(context)
+	if "中国台湾" in core and "看中国" not in core:
+		terms = [term for term in terms if term != "穆斯林社群如何与中国打交道"]
+	terms = terms[:3]
+	if terms:
+		topic_phrase = "、".join(terms[:-1]) + ("，以及" + terms[-1] if len(terms) > 1 else terms[0])
+		if "？" in core or "?" in core:
+			description = f"这一集从“{core}”这个问题切入，重点谈到{topic_phrase}。"
+		else:
+			description = f"这一集围绕“{core}”展开，重点谈到{topic_phrase}。"
+	else:
+		fallback = _fallback_script_sentence(script_text)
+		description = f"这一集围绕“{core}”展开，梳理{fallback or '人物经历、社群处境与背后的现实张力'}。"
+	description = _clean_text(description, max_len=120).rstrip("；;，,")
+	if not description.endswith(("。", "！", "？")):
+		description += "。"
+	assert not _is_production_note(description), f"Description reads like a production note: {description}"
+	return description
 
 
-def _load_existing_schedule(path: Path) -> dict[str, Any]:
+def _load_existing_schedule(path: Path, episode_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
 	existing = _read_json_optional(path)
+	episode_manifest = episode_manifest or {}
 	return {
-		"scheduled_publish_at": existing.get("scheduled_publish_at"),
-		"scheduled_publish_timezone": existing.get("scheduled_publish_timezone") or "Asia/Shanghai",
-		"schedule_source": existing.get("schedule_source"),
-		"series_episode_index": existing.get("series_episode_index"),
-		"series_episode_count": existing.get("series_episode_count"),
+		"scheduled_publish_at": existing.get("scheduled_publish_at") or episode_manifest.get("scheduled_publish_at"),
+		"scheduled_publish_timezone": existing.get("scheduled_publish_timezone") or episode_manifest.get("scheduled_publish_timezone") or "Asia/Shanghai",
+		"schedule_source": existing.get("schedule_source") or episode_manifest.get("schedule_source"),
+		"series_episode_index": existing.get("series_episode_index") or episode_manifest.get("episode_index"),
+		"series_episode_count": existing.get("series_episode_count") or episode_manifest.get("episode_count"),
 	}
 
 
@@ -203,7 +296,7 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 
 	description = _build_description(run_dir, title, source_metadata, cover_title, tags)
 	publish_info_path = run_dir / "publish_info.txt"
-	publish_info_path.write_text(description, encoding="utf-8")
+	publish_info_path.write_text(description + "\n", encoding="utf-8")
 
 	metadata = {
 		"schema_version": "bilibili_upload_metadata.v1",
@@ -213,7 +306,7 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 		"tags": tags,
 		"category": "知识",
 		"creation_declaration": "含AI生成内容",
-		**_load_existing_schedule(run_dir / "bilibili_upload_metadata.json"),
+		**_load_existing_schedule(run_dir / "bilibili_upload_metadata.json", episode_manifest),
 		"selection_mode": source_metadata.get("selection_mode") or "youtube_podcast_translation",
 		"source_title": source_metadata.get("title") or cover_title.get("source_title"),
 		"source_channel": source_metadata.get("channel") or source_metadata.get("uploader"),
@@ -240,6 +333,8 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 		"tags": tags,
 		"tag_sources": tag_sources,
 		"tag_count": len(tags),
+		"description": description,
+		"description_strategy": "one_sentence_content_summary_from_episode_title_script_and_topic_terms",
 		"series_episode": bool(episode_manifest),
 		"episode_index": episode_manifest.get("episode_index"),
 		"episode_count": episode_manifest.get("episode_count"),

@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from chinese_number_display import normalize_comma_thousands_for_chinese_display
+
 
 TRANSLATE_MAX_CHARS = 3200
 TURN_MAX_ZH_CHARS = 520
@@ -42,7 +44,69 @@ SOURCE_FIXES = [
 	(r"\bCynica Podcast Network\b", "Sinica Podcast Network"),
 	(r"\bMaong\b", "Mao Zedong"),
 	(r"\bMa's philosophy\b", "Mao's philosophy"),
+	(r"\bHawaii Muslims\b", "Hui Muslims"),
+	(r"\bHi Muslims\b", "Hui Muslims"),
+	(r"\bH\s*U\s*I\b", "Hui"),
+	(r"\bLano beef noodles?\b", "Lanzhou beef noodles"),
+	(r"\bLanjo beef noodles?\b", "Lanzhou beef noodles"),
+	(r"\bLanzho[u]?\s+beef noodles?\b", "Lanzhou beef noodles"),
+	(r"\bhala restaurants?\b", "halal restaurants"),
+	(r"\bhalal? restaurants?\b", "halal restaurants"),
+	(r"\bmassaged\b", "masjids"),
+	(r"\btime ofman\b", "time of Uthman"),
+	(r"\bAllahbar(?:um)?\b", "Allahu Akbar"),
+	(r"\b50\s*100\s+years\b", "50 to 100 years"),
+	(r"\b50\s+or\s+100\s+years\b", "50 to 100 years"),
 ]
+
+
+SOURCE_FILLER_PATTERNS = [
+	r"\b(?:uh|um|erm|hmm)\b[,\s]*",
+	r"\bI mean\b[,\s]*",
+	r"\byou know\b[,\s]*",
+	r"\by'know\b[,\s]*",
+	r"\bkind of\b[,\s]*",
+	r"\bsort of\b[,\s]*",
+]
+
+
+SOURCE_AD_PATTERNS = {
+	"sponsor_or_ad": (
+		"sponsored by",
+		"brought to you by",
+		"partnering with",
+		"our sponsor",
+		"today's sponsor",
+		"paid partnership",
+	),
+	"contact_or_url": (
+		"http://",
+		"https://",
+		"www.",
+		"visit our website",
+		"visit us at",
+		"use code",
+		"promo code",
+	),
+	"membership_or_subscription_cta": (
+		"patreon",
+		"become a member",
+		"membership",
+		"subscribe to",
+		"like and subscribe",
+	),
+	"known_ad_terms": (
+		"my debt clinic",
+		"mydebtclinic",
+		"debt clinic",
+		"debtclinic",
+		"provision capital",
+		"provisioncap",
+		"debt relief",
+		"personal loans",
+		"credit card",
+	),
+}
 
 ZH_FIXES = [
 	("习近平平", "习近平"),
@@ -225,6 +289,42 @@ def _fix_source_text(text: str) -> str:
 	return _clean_space(value)
 
 
+def _source_ad_noise_reasons(text: str) -> list[str]:
+	lower = text.lower()
+	reasons: list[str] = []
+	for label, patterns in SOURCE_AD_PATTERNS.items():
+		if any(pattern in lower for pattern in patterns):
+			reasons.append(label)
+	if "[music]" in lower and any(reason in reasons for reason in ("sponsor_or_ad", "known_ad_terms", "contact_or_url")):
+		reasons.append("music_backed_ad_read")
+	return sorted(set(reasons))
+
+
+def _reduce_source_fillers(text: str) -> str:
+	value = re.sub(r"\[(?:music|applause|laughter|noise|intro|outro)\]", " ", text, flags=re.IGNORECASE)
+	for pattern in SOURCE_FILLER_PATTERNS:
+		value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+	value = re.sub(r"\b(right|okay|so)[,\s]+(?=\b\1\b)", "", value, flags=re.IGNORECASE)
+	value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+	value = re.sub(r"([,.;:!?]){2,}", r"\1", value)
+	value = re.sub(r"^\s*[,.;:!?]+\s*", "", value)
+	return _clean_space(value)
+
+
+def _prepare_source_text_for_translation(raw_source_text: str) -> tuple[str, str, bool, list[str]]:
+	source_text = _clean_source_caption_text(raw_source_text)
+	if len(source_text) < 3:
+		return "", source_text, False, []
+	fixed = _fix_source_text(source_text)
+	ad_reasons = _source_ad_noise_reasons(fixed)
+	if ad_reasons:
+		return "", source_text, True, ad_reasons
+	reduced = _reduce_source_fillers(fixed)
+	if len(reduced) < 3:
+		return "", source_text, False, []
+	return reduced, source_text, False, []
+
+
 def _fix_zh_text(text: str) -> str:
 	value = re.sub(r"(?<![A-Za-z])Xi\s+Jinping(?![A-Za-z])", "中国国家领导人", text, flags=re.IGNORECASE)
 	value = re.sub(r"\s+", "", value).strip()
@@ -234,6 +334,7 @@ def _fix_zh_text(text: str) -> str:
 		value = value.replace(bad, good)
 	value = re.sub(r"(?<![A-Za-z])Xi\s*Jinping(?![A-Za-z])", "中国国家领导人", value, flags=re.IGNORECASE)
 	value = re.sub(r"(?<![A-Za-z])Xi(?![A-Za-z])", "中国国家领导人", value)
+	value = normalize_comma_thousands_for_chinese_display(value)
 	value = value.replace("，。", "。").replace("。。", "。")
 	return value
 
@@ -409,10 +510,9 @@ def _parse_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
 	turns: list[dict[str, Any]] = []
 	for raw_start, raw_end, speaker in bounds:
 		raw_source_text = _clean_space(text[raw_start:raw_end].replace(">>", ""))
-		source_text = _clean_source_caption_text(raw_source_text)
-		if len(source_text) < 3:
+		fixed, source_text, dropped_as_ad, ad_reasons = _prepare_source_text_for_translation(raw_source_text)
+		if dropped_as_ad or len(fixed) < 3:
 			continue
-		fixed = _fix_source_text(source_text)
 		start_sec, end_sec = _time_for_offsets(offsets, raw_start, raw_end)
 		pieces = _sentence_split_en(fixed, TRANSLATE_MAX_CHARS)
 		for piece_index, piece in enumerate(pieces):
@@ -428,6 +528,11 @@ def _parse_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
 				"source_text": piece,
 				"source_text_raw_char_count": len(raw_source_text) if piece_index == 0 else 0,
 				"source_text_cleaned_char_count": len(source_text) if piece_index == 0 else 0,
+				"pre_translation_cleanup": {
+					"filler_reduction": True,
+					"dropped_as_ad": dropped_as_ad,
+					"ad_reasons": ad_reasons,
+				} if piece_index == 0 else {},
 			})
 	return _dedupe_adjacent_source_turns(turns)
 
@@ -487,10 +592,9 @@ def _parse_plain_source_turns(text: str, duration_sec: float) -> list[dict[str, 
 	total_chars = max(1, len(text))
 	for raw_start, raw_end, speaker in bounds:
 		raw_source_text = _clean_space(text[raw_start:raw_end].replace(">>", ""))
-		source_text = _clean_source_caption_text(raw_source_text)
-		if len(source_text) < 3:
+		fixed, source_text, dropped_as_ad, ad_reasons = _prepare_source_text_for_translation(raw_source_text)
+		if dropped_as_ad or len(fixed) < 3:
 			continue
-		fixed = _fix_source_text(source_text)
 		start_sec = duration_sec * raw_start / total_chars if duration_sec > 0 else 0.0
 		end_sec = duration_sec * raw_end / total_chars if duration_sec > 0 else start_sec
 		pieces = _sentence_split_en(fixed, TRANSLATE_MAX_CHARS)
@@ -507,6 +611,11 @@ def _parse_plain_source_turns(text: str, duration_sec: float) -> list[dict[str, 
 				"source_text": piece,
 				"source_text_raw_char_count": len(raw_source_text) if piece_index == 0 else 0,
 				"source_text_cleaned_char_count": len(source_text) if piece_index == 0 else 0,
+				"pre_translation_cleanup": {
+					"filler_reduction": True,
+					"dropped_as_ad": dropped_as_ad,
+					"ad_reasons": ad_reasons,
+				} if piece_index == 0 else {},
 			})
 	return turns
 
@@ -525,18 +634,17 @@ def _parse_segmented_source_turns(transcript: dict[str, Any]) -> list[dict[str, 
 		if not raw_text:
 			continue
 		speaker = str(item.get("speaker") or "").strip()
-		if speaker in {"0", "1"}:
+		if re.fullmatch(r"[0-3]", speaker):
 			speaker = f"Speaker {speaker}"
-		if speaker not in {"Speaker 0", "Speaker 1"}:
+		if not re.fullmatch(r"Speaker [0-3]", speaker):
 			if raw_text.lstrip().startswith(">>"):
 				current_speaker = "Speaker 1" if current_speaker == "Speaker 0" else "Speaker 0"
 			speaker = current_speaker
 		else:
 			current_speaker = speaker
-		source_text = _clean_source_caption_text(raw_text)
-		if len(source_text) < 3:
+		fixed, source_text, dropped_as_ad, ad_reasons = _prepare_source_text_for_translation(raw_text)
+		if dropped_as_ad or len(fixed) < 3:
 			continue
-		fixed = _fix_source_text(source_text)
 		start_value = item.get("start_sec", item.get("start", 0.0))
 		start_sec = float(start_value or 0.0)
 		if item.get("end_sec") is not None:
@@ -561,6 +669,11 @@ def _parse_segmented_source_turns(transcript: dict[str, Any]) -> list[dict[str, 
 				"source_text": piece,
 				"source_text_raw_char_count": len(raw_text) if piece_index == 0 else 0,
 				"source_text_cleaned_char_count": len(source_text) if piece_index == 0 else 0,
+				"pre_translation_cleanup": {
+					"filler_reduction": True,
+					"dropped_as_ad": dropped_as_ad,
+					"ad_reasons": ad_reasons,
+				} if piece_index == 0 else {},
 			})
 	return turns
 
@@ -736,30 +849,35 @@ def run_translation(run_dir: Path, sleep_sec: float) -> dict[str, Any]:
 	_write_json(cache_path, cache)
 	segments = _expand_translated_turns(source_turns, translated)
 	chapters = _build_chapters(segments)
+	speaker_ids = sorted({str(segment.get("speaker")) for segment in segments if re.fullmatch(r"Speaker [0-3]", str(segment.get("speaker")))}, key=lambda value: int(value.split()[1]))
 	speaker_mapping = {
 		"schema_version": "worldview-china-speaker-mapping.v1",
 		"mapping": {
-			"Speaker 0": {
-				"source_role": "Host / Eric Olander where inferred from transcript order",
-				"vibevoice_voice": "Xinran",
-				"note": "Female Chinese voice used for the original host role.",
-			},
-			"Speaker 1": {
-				"source_role": "Guest / Ker Gibbs where inferred from transcript order",
-				"vibevoice_voice": "BowenClean",
-				"note": "Male Chinese voice used for the original guest role.",
-			},
+			speaker: {
+				"source_role": f"Source speaker {speaker.split()[1]}",
+				"vibevoice_voice": None,
+				"note": "Final VibeVoice voice must come from the frozen 02a/02b/02c roster, not this translation fallback mapping.",
+			}
+			for speaker in speaker_ids
 		},
-		"inference_method": "first block before transcript speaker marker is host; subsequent >> markers toggle speakers",
+		"inference_method": "explicit Speaker 0..3 labels are preserved when present; unlabeled >> caption fallback can only alternate Speaker 0/1",
 	}
 	translation_json = {
 		"schema_version": "worldview-china-source-translation.v1",
 		"content_coverage": "full_translation",
 		"source_transcript": str(transcript_path),
 		"source_transcript_input_mode": transcript_input_mode,
-		"translation_method": "GoogleTranslator en->zh-CN with source ASR cleanup and no summarization",
+		"translation_method": "GoogleTranslator en->zh-CN with pre-translation source cleanup, no ads, filler reduction, and no summarization",
+		"pre_translation_requirements": {
+			"sponsor_ads_removed": True,
+			"source_filler_reduction_enabled": True,
+			"rolling_caption_deduplication_enabled": True,
+			"known_asr_term_normalization_enabled": True,
+			"comma_thousands_chinese_display_normalization_enabled": True,
+			"semantic_qa_required_before_script": True,
+		},
 		"source_caption_cleanup": {
-			"method": "rolling_caption_suffix_prefix_dedupe",
+			"method": "rolling_caption_suffix_prefix_dedupe + sponsor_ad_drop + source_filler_reduction",
 			"raw_source_chars": raw_source_chars,
 			"cleaned_source_chars": cleaned_source_chars,
 			"removed_source_chars": max(0, raw_source_chars - cleaned_source_chars),
@@ -781,8 +899,10 @@ def run_translation(run_dir: Path, sleep_sec: float) -> dict[str, Any]:
 		"- content_coverage: full_translation",
 		f"- source_transcript: {transcript_path}",
 		f"- source_transcript_input_mode: {transcript_input_mode}",
-		"- method: source ASR cleanup + GoogleTranslator en->zh-CN + Chinese turn splitting",
-		"- source_caption_cleanup: rolling_caption_suffix_prefix_dedupe",
+		"- method: pre-translation source cleanup + GoogleTranslator en->zh-CN + Chinese turn splitting",
+		"- source_caption_cleanup: rolling_caption_suffix_prefix_dedupe + sponsor_ad_drop + source_filler_reduction",
+		"- pre_translation_requirements: remove sponsor/ad/contact blocks; reduce dense source fillers; normalize known ASR terms before translation",
+		"- semantic_qa_required_before_script: true",
 		f"- raw_source_chars: {raw_source_chars}",
 		f"- cleaned_source_chars: {cleaned_source_chars}",
 		f"- removed_source_chars: {max(0, raw_source_chars - cleaned_source_chars)}",

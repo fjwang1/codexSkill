@@ -7,7 +7,7 @@ description: "Mandatory bridge for English or other non-Chinese Worldview China 
 
 Use this skill after `02b Source Voice Prompts` and before `05 VibeVoice Chunks`.
 
-For English or other non-Chinese source videos, this node is mandatory. The goal is not to generate the full podcast audio with Qwen3. The goal is to create two short Chinese prompt WAVs, one per source speaker, so VibeVoice receives Chinese voice prompts instead of English source clips.
+For English or other non-Chinese source videos, this node is mandatory. The goal is not to generate the full podcast audio with Qwen3. The goal is to create one short Chinese prompt WAV per frozen source speaker, up to 4 speakers, so VibeVoice receives Chinese voice prompts instead of English source clips.
 
 ## Inputs
 
@@ -56,9 +56,11 @@ Outputs:
 ├── qwen_generation.stdout.txt
 ├── qwen_generation.stderr.txt
 ├── qwen_speaker0/qwen_prompt_000.wav
-├── qwen_speaker1/qwen_prompt_000.wav
+├── ...
+├── qwen_speaker<N-1>/qwen_prompt_000.wav
 ├── reference/speaker0/reference.wav
-├── reference/speaker1/reference.wav
+├── ...
+├── reference/speaker<N-1>/reference.wav
 ├── registered/zh-<VoiceName>_qwenzh.wav
 ├── voice_prompt_manifest.json
 └── voice_prompt_report.md
@@ -74,7 +76,7 @@ Use `--no-register-voices` only for audits; downstream VibeVoice generation norm
 
 ## Method
 
-For each `Speaker 0` / `Speaker 1`:
+For each frozen `Speaker 0..Speaker N-1`:
 
 1. Read `02b-source-voice-prompts/voice_prompt_manifest.json`.
 2. Prefer one clean selected source clip of about `8-20s`; fall back to the 02b concatenated reference only when no selected clip exists.
@@ -95,6 +97,7 @@ lang_code       = zh
 ```text
 WC<Run>Speaker0QwenZH
 WC<Run>Speaker1QwenZH
+WC<Run>Speaker<N-1>QwenZH
 ```
 
 This keeps Qwen3 responsible for cross-lingual Chinese prompt creation, while VibeVoice remains responsible for the full continuous dialogue audio.
@@ -104,8 +107,8 @@ This keeps Qwen3 responsible for cross-lingual Chinese prompt creation, while Vi
 After generation, require:
 
 - `voice_prompt_manifest.json.status == "pass"`.
-- Both speakers have `speaker_voices[Speaker N].vibevoice_name`.
-- Both registered WAVs exist in `/Users/wangfangjia/code/VibeVoice/demo/voices/`.
+- Every frozen speaker has `speaker_voices["Speaker <index>"].vibevoice_name`.
+- Every registered WAV exists in `/Users/wangfangjia/code/VibeVoice/demo/voices/`.
 - WAV format is `pcm_s16le`, `24000 Hz`, `mono`.
 - Duration is normally `5-30s`.
 - No long silence; `silence_ratio` should be low.

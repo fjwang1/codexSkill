@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from chinese_number_display import normalize_comma_thousands_for_chinese_display
+
 
 CHAPTER_TARGET_CHARS = 3000
 CHAPTER_HARD_MAX_CHARS = 3800
@@ -136,6 +138,7 @@ def _stamp_to_seconds(stamp: Any) -> float:
 
 def _clean_text(text: str) -> str:
 	value = re.sub(r"\s+", "", text).strip()
+	value = normalize_comma_thousands_for_chinese_display(value)
 	value = value.replace("，。", "。").replace("。。", "。")
 	return value
 
@@ -258,7 +261,7 @@ def _bridge_segment(removed: list[dict[str, Any]], previous: dict[str, Any] | No
 		"source_end": _seconds_to_stamp(end_sec),
 		"source_start_sec": round(start_sec, 3),
 		"source_end_sec": round(end_sec, 3),
-		"speaker": speaker if speaker in {"Speaker 0", "Speaker 1"} else "Speaker 0",
+		"speaker": speaker if re.fullmatch(r"Speaker [0-3]", speaker) else "Speaker 0",
 		"source_text": "",
 		"zh_text": _bridge_text(removed, next_segment),
 		"safety_edit_action": "bridge",

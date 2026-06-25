@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from chinese_number_display import normalize_comma_thousands_for_chinese_display
+
 
 LEADER_NAME_REPLACEMENTS = [
 	("Trump-Xisummit", "中美领导人峰会"),
@@ -65,6 +67,7 @@ LEADER_NAME_REPLACEMENTS = [
 	("习近平", "中国国家领导人"),
 	("习主席", "中国国家领导人"),
 ]
+SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -91,7 +94,18 @@ def _clean_turn_text(text: str) -> str:
 		value = value.replace(bad, good)
 	value = re.sub(r"(?<![A-Za-z])Xi\s*Jinping(?![A-Za-z])", "中国国家领导人", value, flags=re.IGNORECASE)
 	value = re.sub(r"(?<![A-Za-z])Xi(?![A-Za-z])", "中国国家领导人", value)
+	value = normalize_comma_thousands_for_chinese_display(value)
 	return value
+
+
+def _speaker_index(speaker: str) -> int:
+	match = SPEAKER_RE.fullmatch(speaker)
+	assert match, f"Unsupported speaker: {speaker}"
+	return int(match.group(1))
+
+
+def _is_supported_speaker(speaker: str) -> bool:
+	return SPEAKER_RE.fullmatch(speaker) is not None
 
 
 def format_script(run_dir: Path) -> dict[str, Any]:
@@ -120,7 +134,7 @@ def format_script(run_dir: Path) -> dict[str, Any]:
 	turns: list[dict[str, Any]] = []
 	for segment in segments:
 		speaker = str(segment["speaker"])
-		assert speaker in {"Speaker 0", "Speaker 1"}, f"Unsupported speaker: {speaker}"
+		assert _is_supported_speaker(speaker), f"Unsupported speaker: {speaker}"
 		text = _clean_turn_text(str(segment["zh_text"]))
 		if not text:
 			continue
@@ -140,10 +154,8 @@ def format_script(run_dir: Path) -> dict[str, Any]:
 	root_script = run_dir / "podcast_script.md"
 	root_script.write_text(script_path.read_text(encoding="utf-8"), encoding="utf-8")
 
-	speaker_counts = {
-		"Speaker 0": sum(1 for turn in turns if turn["speaker"] == "Speaker 0"),
-		"Speaker 1": sum(1 for turn in turns if turn["speaker"] == "Speaker 1"),
-	}
+	speaker_ids = sorted({turn["speaker"] for turn in turns}, key=_speaker_index)
+	speaker_counts = {speaker: sum(1 for turn in turns if turn["speaker"] == speaker) for speaker in speaker_ids}
 	total_chars = sum(int(turn["char_count"]) for turn in turns)
 	report = [
 		"# Script Report",
@@ -154,8 +166,7 @@ def format_script(run_dir: Path) -> dict[str, Any]:
 		"- no_summarization: true",
 		"- source_order_preserved: true",
 		f"- turn_count: {len(turns)}",
-		f"- speaker_0_turns: {speaker_counts['Speaker 0']}",
-		f"- speaker_1_turns: {speaker_counts['Speaker 1']}",
+		*[f"- speaker_{_speaker_index(speaker)}_turns: {speaker_counts[speaker]}" for speaker in speaker_ids],
 		f"- total_display_chars: {total_chars}",
 		f"- script_sha256: {_sha256(script_path)}",
 		"",
@@ -185,7 +196,7 @@ def format_script(run_dir: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-	parser = argparse.ArgumentParser(description="Format translated source transcript into VibeVoice Speaker 0/1 podcast_script.md.")
+	parser = argparse.ArgumentParser(description="Format translated source transcript into VibeVoice Speaker 0..3 podcast_script.md.")
 	parser.add_argument("--run-dir", required=True, type=Path)
 	args = parser.parse_args()
 	result = format_script(args.run_dir.expanduser().resolve())

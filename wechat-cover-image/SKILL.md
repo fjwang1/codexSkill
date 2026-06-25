@@ -1,73 +1,336 @@
 ---
 name: wechat-cover-image
-description: Generate no-text WeChat public account cover images from full article drafts. Use when the user gives a WeChat article, asks for a 微信公众号封面图/头图/cover, or wants a metaphorical flat-design cover in the established 2.35:1 style.
+description: "为微信公众号文章生成无文字 2.35:1 封面图。Use when the user provides a WeChat public-account article draft and asks for 公众号封面图/头图/cover; the skill reads the article, abstracts its theme, and by default generates a unified foreign-media translation house style: simple, subject-forward, high-end magazine editorial, lively but restrained, design-conscious, text-free 2.35:1 cover. Use the 译见中国 color palette by default: white, near-black, Swiss red #D9251D, and restrained grays."
 ---
 
 # WeChat Cover Image
 
-Use this skill to generate a WeChat public account cover image from a full article draft. The output should be a visual summary of the article, not a title card.
+Generate one WeChat public-account cover image from one article draft.
+
+Input:
+
+```text
+one article draft, preferably Markdown or plain text
+optional style: auto | 外刊高级杂志风 | 写实 | 清新 | 美式漫画 | 科技风 | 杂志风 | 极简插画
+optional style modifiers: 克制高级感 | 轻微科技感 | 轻微电影感 | 轻微活力感 | 极简感
+```
+
+Output:
+
+```text
+2.35:1 horizontal cover image
+cover_manifest.json with article summary, abstracted theme, style, prompt, and output path
+```
 
 ## Core Rules
 
-- Produce a no-text image: no Chinese, English, letters, numbers, titles, captions, logos, or watermarks.
-- Do not paste the article title into the image. Extract the article's central idea and turn it into a visual metaphor.
-- Prefer WeChat cover ratio near `2.35:1`. Use the image model's native output size unless the user asks for a specific size.
-- Keep important elements in the central safe area because WeChat may crop thumbnails differently across placements.
-- Save the final selected image under `/Users/wangfangjia/generated-covers/` with a descriptive filename.
-- Use the built-in `image_gen` tool unless the user explicitly asks for a different generation path.
+- Read the article first. Do not design from the title alone.
+- Distill the article into:
+  - `core_proposition`: what the article is really saying
+  - `emotional_tone`: calm, anxious, critical, hopeful, absurd, etc.
+  - `visual_theme`: a short theme that can become an image
+  - `visual_metaphor`: one concrete scene or symbolic composition
+- Hard rule: the generated cover image must be text-free. Never ask the image model to render Chinese/English titles, letters, numbers, charts with labels, UI text, newspaper pages, documents, logos, badges, captions, subtitles, watermarks, or typography-like marks.
+- If the publishing workflow later needs a title, add it outside this skill in a separate layout/compositing step. This skill's image output is always a no-text visual base.
+- Default hard style rule: use one unified foreign-media translation cover style unless the user explicitly overrides it. The default style is simple, subject-forward, high-end magazine editorial, lively but restrained, premium, and design-conscious.
+- Default color direction: use the `译见中国` palette as a restraint, not as a literal Swiss-grid layout.
+- Output ratio must be `2.35:1`. Use `900x383` when post-processing to an exact WeChat-ready raster is practical.
+- Keep important visual information inside the center safe square because WeChat preview surfaces may crop the main cover.
+- Save final files under the caller's project directory when provided; otherwise use `/Users/wangfangjia/generated-covers/`.
+- Use `image_gen` for image generation unless the user explicitly asks for another path.
 
-## Visual Style
+## Cover Spec
 
-Base the style on these local references when available:
+Working production spec:
 
-- `/Users/wangfangjia/pinterest/22.jpeg`
-- `/Users/wangfangjia/pinterest/911 poster.jpeg`
+```text
+main cover ratio: 2.35:1
+common raster size: 900x383
+center safe square: about 383x383
+```
 
-Extract style, not content:
+Read `references/wechat-cover-spec.md` when exact sizing or source notes matter.
 
-- Large solid color planes.
-- Minimal flat/vector-like shapes.
-- Strong graphic composition with high thumbnail readability.
-- Sparse focal subject, lots of negative space.
-- Crisp edges, selective bold black outlines.
-- Retro screenprint/poster feeling.
-- Limited but vivid palette, especially teal, chartreuse/lime, cream, black, orange/coral.
-- Avoid photorealism, 3D rendering, glossy AI aesthetics, cyberpunk, robots, UI screens, and generic technology imagery.
+## Color System
+
+Default `译见中国` cover palette:
+
+```text
+Paper / light base: #FFFFFF
+Ink / deep subject: #1A1A1A
+Signal red accent: #D9251D
+Secondary gray:    #666666
+Divider gray:      #E8E8E8
+Soft gray:         #F4F4F4
+```
+
+Use these colors as a palette reference inside the magazine cover style:
+
+- Prefer white/light neutral backgrounds, deep near-black subjects, restrained gray atmosphere, and one controlled `#D9251D` red accent.
+- Red should be a small signal or focal accent, not a full red poster background.
+- Do not force strict Swiss grid geometry, mechanical bar charts, or abstract PPT-like line systems unless the article itself calls for them.
+- The image should still feel like a premium editorial cover, not a diagram, slide, infographic, dashboard, or template test.
+
+## Style System
+
+Default to a unified house style. Do not let `auto` choose a completely different visual genre per article.
+
+House style:
+
+```json
+{
+  "house_style_name": "外刊高级杂志风",
+  "primary_style": "杂志风",
+  "style_modifiers": ["克制高级感", "轻微活力感"],
+  "palette": "译见中国: white + near-black + Swiss red #D9251D + restrained grays",
+  "style_combo": "外刊高级杂志风 + 克制高级感 + 轻微活力感 + 译见中国配色"
+}
+```
+
+### Default House Style
+
+Use this unless the user explicitly asks for another style:
+
+```text
+high-end magazine editorial cover image, simple composition, one clear central subject, sophisticated visual metaphor, generous negative space, premium restrained palette based on white, near-black, restrained grays, and one controlled Swiss red #D9251D accent, crisp foreground/background separation, subtle motion or tension, no text, 2.35:1
+```
+
+Visual grammar:
+
+- Use one dominant subject or one dominant metaphor. Supporting objects are allowed only if they clarify the idea.
+- Keep the scene simple enough to read as a WeChat thumbnail.
+- Prefer a premium editorial image over a literal news photo, infographic, poster, comic panel, or sci-fi concept art.
+- Add vitality through composition, not clutter: diagonal perspective, depth, contrast, a single accent color, light, gesture, or a clean directional flow.
+- Keep a restrained but not dull palette: white/light neutral base, deep near-black subject, subtle gray tones, and one small `#D9251D` accent.
+- Put the core subject inside the center safe square.
+- Avoid generic stock-photo scenes, crowded collages, fake magazine covers, fake documents, visible screens with UI, and decorative background noise.
+
+Topic adaptation stays inside the house style:
+
+- Technology, AI, robotics, chips, EVs, automation, and supply chains: use magazine editorial with subtle technology materials and precise geometry. Do not switch to full cyberpunk, glowing code, or generic sci-fi.
+- Geopolitics, trade, security, and diplomacy: use symbolic objects, ports, borders, rooms, shadows, or controlled tension. Avoid flags, emblems, sensational scenes, and document text.
+- Economy, business, markets, and industrial policy: use a strong concrete object or spatial metaphor. Avoid charts, tickers, dashboards, and newspaper pages.
+- Social change, labor, demographics, education, and culture: use a human-scale editorial metaphor with restrained realism. Avoid staged stock-photo smiles or melodrama.
+
+Use this style recipe for `auto` or missing style:
+
+```json
+{
+  "house_style_name": "外刊高级杂志风",
+  "primary_style": "杂志风",
+  "style_modifiers": ["克制高级感", "轻微活力感"],
+  "style_combo": "外刊高级杂志风 + 克制高级感 + 轻微活力感 + 译见中国配色"
+}
+```
+
+Add at most one topic modifier when useful:
+
+```text
+轻微科技感 | 轻微电影感 | 极简感
+```
+
+Examples:
+
+- AI chip article: `外刊高级杂志风 + 克制高级感 + 轻微科技感 + 译见中国配色`
+- EV market article: `外刊高级杂志风 + 克制高级感 + 轻微活力感 + 译见中国配色`
+- rare-earth diplomacy article: `外刊高级杂志风 + 克制高级感 + 轻微电影感 + 译见中国配色`
+- abstract battery-recycling article: `外刊高级杂志风 + 克制高级感 + 极简感 + 译见中国配色`
+
+### Explicit Overrides
+
+Only use the older style families when the user explicitly asks for them. Even then, keep the output simple, subject-forward, premium, text-free, and compatible with the magazine house style and `译见中国` palette unless the user requests a different palette.
+
+### 写实
+
+Use only when explicitly requested, or when the user asks for a realistic documentary look.
+
+Prompt traits:
+
+```text
+documentary editorial realism, cinematic natural light, believable scene, restrained composition, white/near-black/gray palette with a small Swiss red #D9251D accent when natural, no text, 2.35:1, center-safe subject
+```
+
+Avoid:
+
+```text
+stock-photo cliches, fake newspaper pages, readable logos, sensational disaster imagery
+```
+
+### 清新
+
+Use only when explicitly requested, or when the user asks for a lighter visual tone.
+
+Prompt traits:
+
+```text
+bright clean editorial illustration or light realistic scene, airy composition, soft daylight, white/light gray base, controlled red #D9251D accent, no text, 2.35:1
+```
+
+Avoid:
+
+```text
+overly cute mascots, pastel clutter, childish expression unless the article is explicitly playful
+```
+
+### 美式漫画
+
+Use only when explicitly requested. Do not use this automatically for foreign-media translation covers.
+
+Prompt traits:
+
+```text
+American comic cover style, bold ink outlines, dynamic composition, vivid contrast, one controlled red accent, no text, 2.35:1
+```
+
+Avoid:
+
+```text
+superhero IP lookalikes, speech bubbles with text, excessive violence
+```
+
+### 科技风
+
+Use only when explicitly requested as the primary style. For normal AI/chip/EV articles, keep `杂志风` primary and add only `轻微科技感`.
+
+Prompt traits:
+
+```text
+clean technology editorial visual, precise materials, restrained white/black/gray palette with one Swiss red #D9251D accent, subtle futuristic mood, no readable UI, no text, 2.35:1
+```
+
+Avoid:
+
+```text
+generic glowing brains, floating code, illegible UI screens, cyberpunk haze unless the article tone really calls for it
+```
+
+### 杂志风
+
+This is the default primary style for this skill.
+
+Prompt traits:
+
+```text
+high-end magazine editorial cover image, sophisticated composition, strong central metaphor, restrained 译见中国 palette, no text, 2.35:1
+```
+
+Avoid:
+
+```text
+fake magazine mastheads, text blocks, overdesigned collage that fails at thumbnail size
+```
+
+### 极简插画
+
+Use only when explicitly requested as the primary style. For abstract structural articles, keep `杂志风` primary and add only `极简感`.
+
+Prompt traits:
+
+```text
+minimal flat editorial illustration, large shapes, strong negative space, crisp edges, central symbolic subject, white/near-black/gray palette with one Swiss red #D9251D accent, no text, 2.35:1
+```
+
+Local style references may be used when available:
+
+```text
+/Users/wangfangjia/pinterest/22.jpeg
+/Users/wangfangjia/pinterest/911 poster.jpeg
+```
+
+Extract style only, not content.
 
 ## Workflow
 
-1. Read the article and identify one core proposition, not just the topic.
-2. Translate the proposition into 1-3 visual metaphors. Prefer concrete scenes over diagrams.
-3. Choose the metaphor that is simplest at thumbnail size and emotionally aligned with the article.
-4. Compose for ultra-wide `2.35:1`: wide calmness, central safe area, strong focal structure, no edge-dependent meaning.
-5. Generate the image with `image_gen`.
-6. Copy the generated file from `/Users/wangfangjia/.codex/generated_images/...` to `/Users/wangfangjia/generated-covers/`.
-7. Report the saved path and the final prompt briefly.
+1. Read the article draft.
+2. Write a short design brief:
+   - `core_proposition`
+   - `theme`
+   - `house_style_name`
+   - `primary_style`
+   - `style_modifiers`
+   - `style_combo`
+   - `palette`
+   - `visual_metaphor`
+   - `dominant_subject`
+   - `composition`
+   - `negative_prompt`
+3. Generate the cover prompt.
+4. Call `image_gen`.
+5. Save the output image.
+6. If needed, crop/resize to an exact `2.35:1` cover, preferably `900x383`.
+7. Create `cover_manifest.json`.
+8. Report only the saved image path, manifest path, chosen theme, style, and prompt summary.
 
 ## Prompt Template
 
-Use and adapt this structure:
-
 ```text
-Create an ultra-wide 2.35:1 horizontal flat graphic WeChat cover image, using the model's native output size. No text, no letters, no numbers, no logos, no watermark.
+Create a 2.35:1 horizontal WeChat public account cover image. Absolutely no text, no letters, no numbers, no logos, no watermark, no typography-like marks.
 
-Reference style: bold minimal flat design inspired by the local references /Users/wangfangjia/pinterest/22.jpeg and /Users/wangfangjia/pinterest/911 poster.jpeg: large solid color fields, crisp vector-like edges, high contrast, simplified shapes, clean focal subject, sparse composition, retro screenprint poster feeling.
+Article core proposition: <one-sentence core_proposition>.
+Abstract theme: <theme>.
+House style: 外刊高级杂志风.
+Chosen style combo: <style_combo, defaulting to 外刊高级杂志风 + 克制高级感 + one light topic modifier + 译见中国配色>.
+Palette: white/light neutral base, near-black subject, restrained grays, one controlled Swiss red #D9251D accent. Use the palette as a color direction only; do not imitate a Swiss grid poster or infographic.
+Dominant subject: <one clear subject or metaphorical object>.
+Visual metaphor: <one concrete scene or symbolic composition>.
 
-Article idea: <one-sentence distilled thesis>.
+Composition: ultra-wide horizontal 2.35:1, one central subject inside the center safe square, simple premium magazine composition, generous negative space, subtle motion or tension, readable at small thumbnail size, clean foreground/background separation, no critical details near the edges.
 
-Visual metaphor: <describe the chosen scene without literal text>.
+Style details: high-end magazine editorial cover image, simple subject-forward design, sophisticated visual metaphor, restrained 译见中国 palette, premium materials and lighting, lively but not busy, no text.
 
-Composition for 2.35:1: ultra-wide landscape, central safe area, large negative space on left and right, strong focal subject readable at thumbnail size. Avoid relying on details near the edges.
-
-Palette and layout: teal, chartreuse/lime, cream, black, orange/coral; large flat planes; simple geometric shapes; selective bold black outlines.
-
-Avoid: text of any kind, title-card layout, robots, brain icons unless explicitly justified, computer screens, UI, photorealism, 3D rendering, gradients, generic AI glow.
+Negative prompt: no title card, no readable text, no pseudo-text, no letters, no numbers, no UI text, no charts with labels, no documents, no newspaper pages, no fake logos, no watermark, no collage, no crowded scene, no clutter, no low-quality AI artifacts, no rigid Swiss-grid poster, no infographic, no dashboard.
 ```
 
-## Metaphor Guidance
+## Manifest Schema
 
-- For essays about execution, discipline, feedback, or goals: use paths, target, obstacles, loops, shadows, or a calm figure moving through structured space.
-- For essays about clarity vs. confusion: use a clean central route contrasted with tangled side routes.
-- For essays about observation or decision-making: use a figure pausing before a field, chessboard-like landscape, or separated signal/noise shapes.
-- For essays about growth or learning: use transformation of messy shapes into ordered forms, but keep the image simple.
-- If the article has strong emotional content, represent the emotion through shape, scale, color, and spatial tension rather than facial expressions or words.
+Write:
+
+```json
+{
+  "schema_version": "wechat-cover-image.v1",
+  "article_path": "...",
+  "article_sha256": "...",
+  "created_at": "ISO-8601",
+  "cover_ratio": "2.35:1",
+  "target_size_px": "900x383",
+  "center_safe_square_px": "383x383",
+  "house_style_name": "外刊高级杂志风",
+  "primary_style": "杂志风",
+  "style_modifiers": ["克制高级感", "轻微活力感"],
+  "style_combo": "外刊高级杂志风 + 克制高级感 + 轻微活力感 + 译见中国配色",
+  "palette": {
+    "paper": "#FFFFFF",
+    "ink": "#1A1A1A",
+    "accent": "#D9251D",
+    "secondary": "#666666",
+    "divider": "#E8E8E8",
+    "soft_gray": "#F4F4F4"
+  },
+  "text_policy": "no visible text, letters, numbers, logos, watermarks, labels, or typography-like marks",
+  "core_proposition": "...",
+  "theme": "...",
+  "dominant_subject": "...",
+  "visual_metaphor": "...",
+  "prompt": "...",
+  "negative_prompt": "...",
+  "output_image_path": "...",
+  "postprocess": {
+    "cropped_or_resized": true,
+    "final_size_px": "900x383"
+  }
+}
+```
+
+## Quality Gate
+
+Pass only if:
+
+- The image is horizontal and `2.35:1` or post-processed to `900x383`.
+- No visible text, pseudo-text, letters, numbers, logos, labels, UI text, watermarks, or typography-like marks appear.
+- The cover expresses the article's theme, not merely a generic topic icon.
+- The cover follows the unified foreign-media magazine house style unless the user explicitly requested another style.
+- The image uses or is compatible with the `译见中国` palette: white/light base, near-black subject, restrained grays, and one controlled Swiss red `#D9251D` accent.
+- The image has one clear dominant subject, a simple composition, restrained premium palette, and enough visual energy to avoid looking static.
+- The image is not a collage, poster, infographic, busy sci-fi scene, comic panel, generic stock photo, or rigid Swiss-grid diagram unless explicitly requested.
+- The main subject remains readable when center-cropped.
+- The manifest records `house_style_name`, `primary_style`, `style_modifiers`, `style_combo`, `palette`, `dominant_subject`, and design reasoning.
