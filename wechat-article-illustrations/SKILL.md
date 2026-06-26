@@ -7,6 +7,13 @@ description: "为微信公众号长文按章节生成并嵌入正文插图。Use
 
 Generate and insert one body illustration per article chapter.
 
+Hard requirement:
+
+- Every Markdown H2 chapter must have exactly one body illustration inserted immediately after that H2 heading.
+- Cover images, WeChat thumbnails, title images, lead images, source article images, or fallback full-article images do **not** count as chapter illustrations.
+- If an article has one or more H2 headings, fallback full-article illustration mode is forbidden.
+- Do not publish or draft-submit an article whose H2 chapter count is greater than its inserted chapter-illustration count.
+
 Use this after `wechat/reviewed_article.md` exists and before `wechat-article-publish-draft` renders the article.
 
 ## Relationship To Cover Skill
@@ -20,7 +27,7 @@ Reuse the **style language** from `wechat-cover-image`, not the cover ratio:
 - Generous negative space.
 - Quiet, intelligent visual storytelling.
 - Text-free image.
-- `译见中国` palette: `#FFFFFF`, `#1A1A1A`, `#D9251D`, `#666666`, `#E8E8E8`, `#F4F4F4`.
+- `他山译读` palette: `#FFFFFF`, `#1A1A1A`, `#D9251D`, `#666666`, `#E8E8E8`, `#F4F4F4`.
 
 Body illustrations use a different ratio:
 
@@ -54,7 +61,7 @@ For each chapter, use only:
 
 This avoids repeating the same robot/cradle/cover metaphor across every chapter.
 
-If the article has no H2 headings, create at most 3 semantic sections from the body and record that fallback in the manifest.
+If the article has no H2 headings, create at most 3 semantic sections from the body and record that fallback in the manifest. If the article has any H2 heading, do not use fallback mode.
 
 ## Placement
 
@@ -146,6 +153,8 @@ The postprocess script expects:
 Pass only if:
 
 - Each H2 chapter has exactly one inserted illustration.
+- The inserted illustration count equals the H2 chapter count whenever H2 headings exist.
+- Cover/title/source/lead images are excluded from the illustration count.
 - Each illustration source/master is `2400x1600` or larger.
 - Each inline image is `3:2`, at least `2400px` wide, and referenced from `wechat/reviewed_article.md`.
 - Each prompt used only that chapter's content, not the whole article.

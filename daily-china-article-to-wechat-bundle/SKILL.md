@@ -674,6 +674,8 @@ articles/{candidate_id}_{slug}/illustrations/
 Rules:
 
 - Generate illustrations for every selected article. If an article has no H2 chapters, create one body illustration after the lead section and record `fallback_single_illustration=true` in `illustrations_manifest.json`.
+- Cover images, WeChat thumbnails, title images, lead images, source article images, or fallback full-article images do not count as chapter illustrations.
+- If an article has one or more H2 headings, fallback full-article illustration mode is forbidden. The inserted chapter-illustration count must equal the H2 chapter count.
 - Use only the content of the current H2 chapter when prompting each illustration.
 - Do not feed the whole article to every illustration prompt.
 - Use the same New Yorker-inspired conceptual editorial style as `wechat-cover-image`.
