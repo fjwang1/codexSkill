@@ -68,6 +68,15 @@ LEADER_NAME_REPLACEMENTS = [
 	("习主席", "中国国家领导人"),
 ]
 SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
+CJK_RE = r"\u3400-\u9fff"
+
+
+def _normalize_mixed_spacing(text: str) -> str:
+	value = re.sub(r"\s+", " ", text).strip()
+	value = re.sub(fr"(?<=[{CJK_RE}]) (?=[{CJK_RE}])", "", value)
+	value = re.sub(fr"(?<=[{CJK_RE}]) (?=[，。！？；：、）】》])", "", value)
+	value = re.sub(fr"(?<=[（【《]) (?=[{CJK_RE}])", "", value)
+	return value
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -88,7 +97,7 @@ def _sha256(path: Path) -> str:
 
 def _clean_turn_text(text: str) -> str:
 	value = re.sub(r"(?<![A-Za-z])Xi\s+Jinping(?![A-Za-z])", "中国国家领导人", text, flags=re.IGNORECASE)
-	value = re.sub(r"\s+", "", value).strip()
+	value = _normalize_mixed_spacing(value)
 	value = re.sub(r"^[：:，,。；;\s]+", "", value)
 	for bad, good in LEADER_NAME_REPLACEMENTS:
 		value = value.replace(bad, good)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat Article Illustrations"
+  short_description: "按章节生成并嵌入纽约客式无字公众号正文插图"
+  default_prompt: "Use $wechat-article-illustrations to create one text-free 3:2 illustration per H2 chapter and insert them into the reviewed WeChat article."

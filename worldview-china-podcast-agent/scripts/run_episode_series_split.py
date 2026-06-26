@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -22,6 +22,8 @@ DEFAULT_TARGET_MINUTES_MAX = 40.0
 DEFAULT_TARGET_MINUTES_IDEAL = 35.0
 DEFAULT_EPISODE_ORDER_MARKER_TEMPLATE = "第{episode_index}集"
 DEFAULT_EPISODE_TITLE_TEMPLATE = "{series_title}·{episode_order_marker}：{subtitle}"
+DEFAULT_SCHEDULED_PUBLISH_SLOTS = ("11:00", "17:00")
+SERIES_BALANCED_SLOT_SCHEDULE_SOURCE = "series_daily_11_17_balanced_ordered_slots"
 SERIES_NODE = "04b-series-episodes"
 DOWNSTREAM_NODES = [
 	"02d-title-cover",
@@ -80,13 +82,24 @@ def _read_text(path: Path) -> str:
 	return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+CJK_RE = r"\u3400-\u9fff"
+
+
+def _normalize_mixed_spacing(text: str) -> str:
+	value = re.sub(r"\s+", " ", str(text or "")).strip()
+	value = re.sub(fr"(?<=[{CJK_RE}]) (?=[{CJK_RE}])", "", value)
+	value = re.sub(fr"(?<=[{CJK_RE}]) (?=[，。！？；：、）】》])", "", value)
+	value = re.sub(fr"(?<=[（【《]) (?=[{CJK_RE}])", "", value)
+	return value
+
+
 def _normalize_tts_text(text: str) -> str:
-	value = re.sub(r"\s+", "", str(text or "")).strip()
+	value = _normalize_mixed_spacing(str(text or ""))
 	return normalize_comma_thousands_for_chinese_display(value)
 
 
 def _char_count(text: str) -> int:
-	return len(_normalize_tts_text(text))
+	return len(re.sub(r"\s+", "", _normalize_tts_text(text)))
 
 
 def _parse_time_to_sec(value: Any) -> float | None:
@@ -164,9 +177,16 @@ def _episode_order_marker(episode_index: int, template: str = DEFAULT_EPISODE_OR
 	return marker
 
 
-def _format_episode_title(series_title_prefix: str, episode_index: int, subtitle: str, title_template: str, order_marker_template: str) -> str:
+def _format_episode_title(
+	series_title_prefix: str,
+	episode_index: int,
+	subtitle: str,
+	title_template: str,
+	order_marker_template: str,
+	require_order_marker: bool = True,
+) -> str:
 	episode_label = _chinese_episode_label(episode_index)
-	order_marker = _episode_order_marker(episode_index, order_marker_template)
+	order_marker = _episode_order_marker(episode_index, order_marker_template) if require_order_marker else ""
 	title = title_template.format(
 		series_title=series_title_prefix,
 		series_title_prefix=series_title_prefix,
@@ -180,7 +200,8 @@ def _format_episode_title(series_title_prefix: str, episode_index: int, subtitle
 	)
 	assert series_title_prefix in title, "episode title template must include the shared series title"
 	assert subtitle in title, "episode title template must include the episode subtitle"
-	assert order_marker in title or str(episode_index) in title or episode_label in title, "episode title template must include an episode order marker"
+	if require_order_marker:
+		assert order_marker in title or str(episode_index) in title or episode_label in title, "episode title template must include an episode order marker"
 	return title
 
 
@@ -429,6 +450,12 @@ def _build_episode_plans(
 		if last_chars < min_chars and previous_chars + last_chars <= max_chars:
 			episodes_units[-2].extend(episodes_units[-1])
 			episodes_units.pop()
+		elif last_chars < min_chars and sum(unit.char_count for group in episodes_units for unit in group) < min_chars * 2:
+			warnings.append(
+				"source transcript is too short to form two 30-minute episodes without a short tail; "
+				"using one complete episode instead of creating a sub-30-minute final episode"
+			)
+			episodes_units = [[unit for group in episodes_units for unit in group]]
 	if len(episodes_units) == 1 and sum(unit.char_count for unit in episodes_units[0]) < min_chars:
 		warnings.append("source transcript is shorter than the 30-minute target; using one shorter episode")
 	plans: list[EpisodePlan] = []
@@ -743,32 +770,98 @@ def _parse_publish_start(value: str | None, timezone_name: str) -> datetime | No
 	return dt.astimezone(timezone)
 
 
-def _schedule_for_episode(first_publish: datetime | None, episode_index: int) -> dict[str, Any]:
+def _parse_publish_slots(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
+	if isinstance(value, str):
+		raw_slots = [slot.strip() for slot in value.split(",")]
+	else:
+		raw_slots = [str(slot).strip() for slot in value]
+	slots: list[str] = []
+	for raw_slot in raw_slots:
+		assert raw_slot, "scheduled publish slot must not be empty"
+		match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", raw_slot)
+		assert match, f"scheduled publish slot must use HH:MM 24-hour time: {raw_slot}"
+		slot = f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+		if slot not in slots:
+			slots.append(slot)
+	assert slots, "at least one scheduled publish slot is required"
+	return tuple(slots)
+
+
+def _slot_counts_for_episode_count(episode_count: int, slot_count: int) -> list[int]:
+	assert episode_count >= 1
+	assert slot_count >= 1
+	base = episode_count // slot_count
+	remainder = episode_count % slot_count
+	return [base + (1 if index < remainder else 0) for index in range(slot_count)]
+
+
+def _slot_assignment_for_episode(episode_index: int, episode_count: int, slot_count: int) -> tuple[int, int, list[int]]:
+	assert 1 <= episode_index <= episode_count
+	counts = _slot_counts_for_episode_count(episode_count, slot_count)
+	start = 1
+	for slot_index, count in enumerate(counts):
+		end = start + count - 1
+		if count > 0 and start <= episode_index <= end:
+			return slot_index, episode_index - start + 1, counts
+		start = end + 1
+	raise AssertionError(f"episode_index={episode_index} was not assigned to any publish slot")
+
+
+def _schedule_for_episode(
+	first_publish: datetime | None,
+	episode_index: int,
+	episode_count: int,
+	scheduled_publish_slots: tuple[str, ...],
+) -> dict[str, Any]:
 	if first_publish is None:
 		return {
 			"scheduled_publish_at": None,
 			"scheduled_publish_timezone": None,
 			"schedule_source": None,
 		}
-	publish_at = first_publish + timedelta(hours=episode_index - 1)
+	slots = _parse_publish_slots(scheduled_publish_slots)
+	slot_index, position_in_slot, slot_counts = _slot_assignment_for_episode(episode_index, episode_count, len(slots))
+	slot = slots[slot_index]
+	hour, minute = (int(part) for part in slot.split(":"))
+	publish_at = first_publish.replace(hour=hour, minute=minute, second=0, microsecond=0)
+	timezone_name = str(first_publish.tzinfo.key if hasattr(first_publish.tzinfo, "key") else first_publish.tzinfo)
 	return {
 		"scheduled_publish_at": publish_at.isoformat(),
-		"scheduled_publish_timezone": str(first_publish.tzinfo.key if hasattr(first_publish.tzinfo, "key") else first_publish.tzinfo),
-		"schedule_source": "series_first_publish_at_plus_episode_index_hours",
+		"scheduled_publish_timezone": timezone_name,
+		"schedule_source": SERIES_BALANCED_SLOT_SCHEDULE_SOURCE,
+		"series_schedule_policy": "balanced_daily_slots_ordered",
+		"series_schedule_slots": list(slots),
+		"series_schedule_base_date": publish_at.date().isoformat(),
+		"series_schedule_slot_index": slot_index + 1,
+		"series_schedule_slot_time": slot,
+		"series_schedule_slot_episode_count": slot_counts[slot_index],
+		"series_schedule_position_in_slot": position_in_slot,
 	}
 
 
 def _write_episode_seed_metadata(episode_dir: Path, schedule: dict[str, Any], episode_index: int, episode_count: int) -> None:
 	if not schedule.get("scheduled_publish_at"):
 		return
-	_write_json(episode_dir / "bilibili_upload_metadata.json", {
+	seed = {
 		"schema_version": "bilibili_upload_metadata.v1",
 		"scheduled_publish_at": schedule["scheduled_publish_at"],
 		"scheduled_publish_timezone": schedule["scheduled_publish_timezone"] or "Asia/Shanghai",
 		"schedule_source": schedule["schedule_source"],
 		"series_episode_index": episode_index,
 		"series_episode_count": episode_count,
-	})
+	}
+	for key in (
+		"series_schedule_policy",
+		"series_schedule_slots",
+		"series_schedule_base_date",
+		"series_schedule_slot_index",
+		"series_schedule_slot_time",
+		"series_schedule_slot_episode_count",
+		"series_schedule_position_in_slot",
+	):
+		if key in schedule:
+			seed[key] = schedule[key]
+	_write_json(episode_dir / "bilibili_upload_metadata.json", seed)
 
 
 def _write_execution_plan(run_dir: Path, series_manifest: dict[str, Any]) -> None:
@@ -831,6 +924,7 @@ def split_series(
 	target_minutes_max: float,
 	target_minutes_ideal: float,
 	force: bool,
+	scheduled_publish_slots: str | tuple[str, ...] | list[str] = DEFAULT_SCHEDULED_PUBLISH_SLOTS,
 ) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
 	assert run_dir.exists(), f"Missing run dir: {run_dir}"
@@ -851,10 +945,14 @@ def split_series(
 		target_minutes_ideal,
 	)
 	first_publish = _parse_publish_start(first_scheduled_publish_at, scheduled_publish_timezone)
+	parsed_publish_slots = _parse_publish_slots(scheduled_publish_slots)
 	node_dir = run_dir / SERIES_NODE
 	node_dir.mkdir(parents=True, exist_ok=True)
 	shared_cover_frame = _select_shared_cover_frame(run_dir)
 	episodes: list[dict[str, Any]] = []
+	multi_episode_series = len(episode_plans) > 1
+	effective_episode_title_template = episode_title_template if multi_episode_series else "{series_title}：{subtitle}"
+	effective_episode_order_marker_template = episode_order_marker_template if multi_episode_series else ""
 	for plan in episode_plans:
 		episode_dir = node_dir / f"episode_{plan.episode_index:03d}"
 		episode_dir.mkdir(parents=True, exist_ok=True)
@@ -867,10 +965,17 @@ def split_series(
 		_write_script_subset(episode_dir, renumbered_turns, safe_enabled)
 		source_video_segment = _create_episode_source_video(run_dir, episode_dir, plan, force)
 		episode_label = _chinese_episode_label(plan.episode_index)
-		order_marker = _episode_order_marker(plan.episode_index, episode_order_marker_template)
-		video_title = _format_episode_title(series_title_prefix, plan.episode_index, plan.subtitle, episode_title_template, episode_order_marker_template)
+		order_marker = _episode_order_marker(plan.episode_index, episode_order_marker_template) if multi_episode_series else ""
+		video_title = _format_episode_title(
+			series_title_prefix,
+			plan.episode_index,
+			plan.subtitle,
+			effective_episode_title_template,
+			effective_episode_order_marker_template,
+			require_order_marker=multi_episode_series,
+		)
 		cover_title = _cover_title(series_title_prefix, plan.subtitle)
-		schedule = _schedule_for_episode(first_publish, plan.episode_index)
+		schedule = _schedule_for_episode(first_publish, plan.episode_index, len(episode_plans), parsed_publish_slots)
 		_write_episode_seed_metadata(episode_dir, schedule, plan.episode_index, len(episode_plans))
 		episode_manifest = {
 			"schema_version": "worldview-china-podcast-series-episode.v1",
@@ -883,8 +988,8 @@ def split_series(
 			"episode_id": f"episode_{plan.episode_index:03d}",
 			"series_title_prefix": series_title_prefix,
 			"episode_subtitle": plan.subtitle,
-			"episode_title_template": episode_title_template,
-			"episode_order_marker_template": episode_order_marker_template,
+			"episode_title_template": effective_episode_title_template,
+			"episode_order_marker_template": effective_episode_order_marker_template,
 			"video_title": video_title,
 			"cover_title": cover_title,
 			"cover_title_omits_episode_index": True,
@@ -933,8 +1038,8 @@ def split_series(
 			"cover_title": cover_title,
 			"episode_subtitle": plan.subtitle,
 			"episode_order_marker": order_marker,
-			"episode_title_template": episode_title_template,
-			"episode_order_marker_template": episode_order_marker_template,
+			"episode_title_template": effective_episode_title_template,
+			"episode_order_marker_template": effective_episode_order_marker_template,
 			"estimated_zh_chars": plan.char_count,
 			"estimated_minutes": round(plan.estimated_minutes, 3),
 			"source_start_sec": plan.source_start_sec,
@@ -952,13 +1057,18 @@ def split_series(
 		"node": SERIES_NODE,
 		"series_title_prefix": series_title_prefix,
 		"episode_count": len(episodes),
-		"episode_title_template": episode_title_template,
-		"episode_order_marker_template": episode_order_marker_template,
+		"episode_title_template": effective_episode_title_template,
+		"episode_order_marker_template": effective_episode_order_marker_template,
 		"serial_execution_required": True,
 		"parallel_execution_allowed": False,
 		"bilibili_upload_overlap_allowed": True,
 		"final_publish_after_all_uploads": True,
 		"overlap_policy": "only_bilibili_upload_wait_or_verified_ready_to_submit_tabs_may_overlap_with_next_episode_production",
+		"bilibili_schedule_policy": "balanced_daily_slots_ordered" if first_publish else None,
+		"bilibili_schedule_source": SERIES_BALANCED_SLOT_SCHEDULE_SOURCE if first_publish else None,
+		"bilibili_schedule_slots": list(parsed_publish_slots) if first_publish else [],
+		"bilibili_schedule_base_date": first_publish.date().isoformat() if first_publish else None,
+		"bilibili_schedule_distribution": "episodes are assigned in ascending order to earlier daily slots first; when the episode count is odd, the earlier slot gets the extra episode",
 		"duration_estimation": estimation,
 		"target_minutes_min": target_minutes_min,
 		"target_minutes_max": target_minutes_max,
@@ -1000,8 +1110,9 @@ def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Split a translated Worldview China podcast run into serial publishable episode runs.")
 	parser.add_argument("--run-dir", required=True, type=Path)
 	parser.add_argument("--series-title-prefix", required=True, help="Shared series title, e.g. 沃尔夫访谈, 世界眼中的中国, or any justified concise series name.")
-	parser.add_argument("--first-scheduled-publish-at", help="First Bilibili scheduled publish datetime. Later episodes add one hour each. Accepts ISO or 'YYYY-MM-DD HH:MM'.")
+	parser.add_argument("--first-scheduled-publish-at", help="Bilibili scheduled publish date seed. The date is used with the ordered daily slots; accepts ISO or 'YYYY-MM-DD HH:MM'.")
 	parser.add_argument("--scheduled-publish-timezone", default="Asia/Shanghai")
+	parser.add_argument("--scheduled-publish-slots", default=",".join(DEFAULT_SCHEDULED_PUBLISH_SLOTS), help="Comma-separated daily Bilibili publish slots in HH:MM form. Default: 11:00,17:00.")
 	parser.add_argument(
 		"--episode-title-template",
 		default=DEFAULT_EPISODE_TITLE_TEMPLATE,
@@ -1035,6 +1146,7 @@ def main() -> int:
 		series_title_prefix=args.series_title_prefix,
 		first_scheduled_publish_at=args.first_scheduled_publish_at,
 		scheduled_publish_timezone=args.scheduled_publish_timezone,
+		scheduled_publish_slots=args.scheduled_publish_slots,
 		episode_title_template=args.episode_title_template,
 		episode_order_marker_template=args.episode_order_marker_template,
 		chars_per_minute_override=args.chars_per_minute,

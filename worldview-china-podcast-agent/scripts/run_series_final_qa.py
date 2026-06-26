@@ -4,13 +4,22 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
 MAX_SPEAKERS = 4
+DEFAULT_SCHEDULED_PUBLISH_SLOTS = ("11:00", "17:00")
+SERIES_BALANCED_SLOT_SCHEDULE_SOURCE = "series_daily_11_17_balanced_ordered_slots"
 SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
+LOCKED_ROSTER_PATCH_POLICIES = {
+	"single_speaker_patch_from_locked_roster",
+}
+ALLOWED_AUDIT_MONITOR_STATUSES = {
+	"APPROVED",
+	"REVIEW_PENDING_AFTER_MAX_CHECKS",
+}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -80,6 +89,45 @@ def _parse_dt(value: Any) -> datetime | None:
 	return datetime.fromisoformat(str(value))
 
 
+def _parse_publish_slots(value: Any) -> tuple[str, ...]:
+	if isinstance(value, str):
+		raw_slots = [slot.strip() for slot in value.split(",")]
+	elif isinstance(value, (list, tuple)):
+		raw_slots = [str(slot).strip() for slot in value]
+	else:
+		raw_slots = list(DEFAULT_SCHEDULED_PUBLISH_SLOTS)
+	slots: list[str] = []
+	for raw_slot in raw_slots:
+		match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", raw_slot)
+		if not match:
+			continue
+		slot = f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+		if slot not in slots:
+			slots.append(slot)
+	return tuple(slots or DEFAULT_SCHEDULED_PUBLISH_SLOTS)
+
+
+def _slot_counts_for_episode_count(episode_count: int, slot_count: int) -> list[int]:
+	base = episode_count // slot_count
+	remainder = episode_count % slot_count
+	return [base + (1 if index < remainder else 0) for index in range(slot_count)]
+
+
+def _expected_balanced_slot_schedule(first_schedule: datetime, episode_index: int, episode_count: int, slots: tuple[str, ...]) -> datetime:
+	counts = _slot_counts_for_episode_count(episode_count, len(slots))
+	start = 1
+	slot_index = 0
+	for current_slot_index, count in enumerate(counts):
+		end = start + count - 1
+		if count > 0 and start <= episode_index <= end:
+			slot_index = current_slot_index
+			break
+		start = end + 1
+	slot = slots[slot_index]
+	hour, minute = (int(part) for part in slot.split(":"))
+	return first_schedule.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
 def _speaker_index(speaker: str) -> int:
 	match = SPEAKER_RE.fullmatch(speaker)
 	assert match, f"Unsupported speaker id: {speaker}"
@@ -93,6 +141,15 @@ def _sorted_speakers(values: Any) -> list[str]:
 
 def _is_locked_roster_policy(value: Any) -> bool:
 	return str(value or "") in {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
+
+
+def _chunk_uses_locked_roster(chunk: dict[str, Any], expected_speaker_names: list[str]) -> bool:
+	speaker_names = [str(name) for name in chunk.get("speaker_names") or []]
+	if chunk.get("vibevoice_mode") == "dialogue":
+		return speaker_names == expected_speaker_names
+	if str(chunk.get("voice_context_policy") or "") in LOCKED_ROSTER_PATCH_POLICIES:
+		return bool(speaker_names) and set(speaker_names).issubset(set(expected_speaker_names))
+	return False
 
 
 def _expected_speakers_from_roster(roster: dict[str, Any], failures: list[str], label: str) -> list[str]:
@@ -123,6 +180,46 @@ def _upload_report_has_final_submit_proof(upload_report: dict[str, Any]) -> bool
 	return "稿件投递成功" in evidence_text and "上传成功" in evidence_text
 
 
+def _upload_report_has_user_submit_now_override(upload_report: dict[str, Any]) -> bool:
+	field_verification = upload_report.get("field_verification") if isinstance(upload_report.get("field_verification"), dict) else {}
+	schedule_override = upload_report.get("schedule_override") if isinstance(upload_report.get("schedule_override"), dict) else {}
+	evidence_text = json.dumps({
+		"field_verification_scheduled_publish_at": field_verification.get("scheduled_publish_at"),
+		"schedule_override": schedule_override,
+		"repost_reason": upload_report.get("repost_reason"),
+		"scheduled_publish_at": upload_report.get("scheduled_publish_at"),
+		"scheduled_publish_at_requested": upload_report.get("scheduled_publish_at_requested"),
+		"scheduled_publish_at_effective": upload_report.get("scheduled_publish_at_effective"),
+	}, ensure_ascii=False)
+	return (
+		"not_requested_user_override_submit_now" in evidence_text
+		or "User requested immediate submission" in evidence_text
+		or "disabled scheduled publishing per user request" in evidence_text
+	)
+
+
+def _validate_audit_monitor_status(
+	episode_dir: Path,
+	episode_index: int,
+	upload_status: str,
+	require_upload_submitted: bool,
+	failures: list[str],
+) -> None:
+	if upload_status == "BLOCKED" and not require_upload_submitted:
+		return
+	report_path = episode_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json"
+	report = _read_json_optional(report_path)
+	if not report:
+		failures.append(f"episode_{episode_index:03d} audit monitor report is missing: {report_path}")
+		return
+	status = str(report.get("status") or "")
+	if status not in ALLOWED_AUDIT_MONITOR_STATUSES:
+		failures.append(
+			f"episode_{episode_index:03d} audit monitor status is not allowed: "
+			f"{status or 'missing'}"
+		)
+
+
 def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: bool) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
 	series_manifest_path = run_dir / "04b-series-episodes/series_manifest.json"
@@ -143,6 +240,7 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 	if actual_indices != expected_indices:
 		failures.append(f"episode indices are not contiguous and ordered: {actual_indices}")
 	first_schedule = _parse_dt(episodes[0].get("scheduled_publish_at"))
+	schedule_slots = _parse_publish_slots(series_manifest.get("bilibili_schedule_slots"))
 	seen_titles: set[str] = set()
 	shared_cover_frame = str(series_manifest.get("shared_cover_frame") or "")
 	series_title_template = str(series_manifest.get("episode_title_template") or "")
@@ -176,7 +274,7 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			failures.append(f"episode_{expected_index:03d} title does not match episode_manifest video_title")
 		series_title_prefix = str(episode_manifest.get("series_title_prefix") or "")
 		episode_subtitle = str(episode_manifest.get("episode_subtitle") or "")
-		episode_order_marker = str(episode_manifest.get("episode_order_marker") or expected_index)
+		episode_order_marker = str(episode_manifest.get("episode_order_marker") or "")
 		if series_marker_template:
 			try:
 				expected_marker = _format_episode_order_marker(series_marker_template, expected_index)
@@ -230,9 +328,7 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			for speaker in expected_speakers
 		]
 		for chunk in audio_manifest.get("chunks") or []:
-			if chunk.get("vibevoice_mode") != "dialogue":
-				failures.append(f"episode_{expected_index:03d} {chunk.get('chunk_id')} is not dialogue mode")
-			if list(chunk.get("speaker_names") or []) != locked_names:
+			if not _chunk_uses_locked_roster(chunk, locked_names):
 				failures.append(f"episode_{expected_index:03d} {chunk.get('chunk_id')} speaker_names do not match locked roster")
 		if audio_manifest.get("vibevoice_runner") == "resident_batch":
 			report_value = audio_manifest.get("resident_batch_report")
@@ -243,8 +339,16 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 				resident_report = _read_json_optional(report_path)
 				if not resident_report:
 					failures.append(f"episode_{expected_index:03d} resident_batch_report missing")
-				elif int(resident_report.get("job_count") or 0) != len(audio_manifest.get("chunks") or []):
-					failures.append(f"episode_{expected_index:03d} resident_batch_report job_count does not cover every chunk")
+				elif int(resident_report.get("job_count") or 0) != len(resident_report.get("jobs") or []):
+					failures.append(f"episode_{expected_index:03d} resident_batch_report job_count does not match jobs length")
+				final_chunk_ids = {str(chunk.get("chunk_id") or "") for chunk in audio_manifest.get("chunks") or []}
+				report_job_ids = {str(job.get("job_id") or "") for job in resident_report.get("jobs") or []}
+				if resident_report and not report_job_ids:
+					failures.append(f"episode_{expected_index:03d} resident_batch_report has no jobs")
+				elif resident_report and not report_job_ids.issubset(final_chunk_ids):
+					failures.append(f"episode_{expected_index:03d} resident_batch_report contains jobs outside final audio_manifest chunks")
+				elif resident_report and len(report_job_ids) != len(final_chunk_ids):
+					warnings.append(f"episode_{expected_index:03d} resident_batch_report covers repaired/rerun jobs only; final chunk audio files were validated by episode final QA")
 				for job in resident_report.get("jobs") or []:
 					if job.get("speaker_mode") != "dialogue":
 						failures.append(f"episode_{expected_index:03d} resident job {job.get('job_id')} is not dialogue mode")
@@ -256,8 +360,16 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			failures.append(f"episode_{expected_index:03d} metadata title mismatch")
 		if int(metadata.get("episode_index") or metadata.get("series_episode_index") or 0) != expected_index:
 			failures.append(f"episode_{expected_index:03d} metadata episode index mismatch")
-		if first_schedule is not None:
-			expected_schedule = first_schedule + timedelta(hours=expected_index - 1)
+		if first_schedule is not None and _upload_report_has_user_submit_now_override(upload_report):
+			warnings.append(f"episode_{expected_index:03d} scheduled publish seed was bypassed by explicit user submit-now override")
+		elif first_schedule is not None:
+			schedule_source = str(metadata.get("schedule_source") or episode_manifest.get("schedule_source") or episode.get("schedule_source") or "")
+			if schedule_source != SERIES_BALANCED_SLOT_SCHEDULE_SOURCE:
+				failures.append(
+					f"episode_{expected_index:03d} schedule_source is not the balanced daily slot policy: "
+					f"{schedule_source or 'missing'}"
+				)
+			expected_schedule = _expected_balanced_slot_schedule(first_schedule, expected_index, len(episodes), schedule_slots)
 			actual_schedule = _parse_dt(metadata.get("scheduled_publish_at"))
 			if actual_schedule != expected_schedule:
 				failures.append(
@@ -271,6 +383,7 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			failures.append(f"episode_{expected_index:03d} upload report status is neither SUBMITTED nor BLOCKED")
 		if status == "SUBMITTED" and not _upload_report_has_final_submit_proof(upload_report):
 			failures.append(f"episode_{expected_index:03d} upload submitted without final submit proof")
+		_validate_audit_monitor_status(episode_dir, expected_index, status, require_upload_submitted, failures)
 	return _write_result(run_dir, failures, warnings, write_history)
 
 

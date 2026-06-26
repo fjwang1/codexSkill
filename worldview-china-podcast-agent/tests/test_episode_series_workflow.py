@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,15 +34,21 @@ def _load_module(name: str, path: Path) -> Any:
 series_split = _load_module("run_episode_series_split", SKILL_DIR / "scripts/run_episode_series_split.py")
 series_qa = _load_module("run_series_final_qa", SKILL_DIR / "scripts/run_series_final_qa.py")
 revoice = _load_module("run_source_video_revoice", SKILL_DIR / "scripts/run_source_video_revoice.py")
+turn_retime = _load_module("run_turn_retime_video", SKILL_DIR / "scripts/run_turn_retime_video.py")
 final_qa_script = _load_module("run_final_qa", SKILL_DIR / "scripts/run_final_qa.py")
 voice_consistency = _load_module("run_voice_consistency_qa", SKILL_DIR / "scripts/run_voice_consistency_qa.py")
 vibevoice_chunks = _load_module("run_vibevoice_chunks", SKILL_DIR / "scripts/run_vibevoice_chunks.py")
+prepare_vibevoice_inputs = _load_module(
+	"prepare_vibevoice_audio_inputs",
+	Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-vibevoice-audio/scripts/prepare_vibevoice_audio_inputs.py"),
+)
 audio_integrity = _load_module("run_audio_transcript_integrity_qa", SKILL_DIR / "scripts/run_audio_transcript_integrity_qa.py")
 text_compliance = _load_module(
 	"run_bilibili_text_compliance_review",
 	SKILL_DIR / "skills/worldview-china-bilibili-text-compliance-review/scripts/run_bilibili_text_compliance_review.py",
 )
 selected_registry = _load_module("selected_video_registry", SKILL_DIR / "scripts/selected_video_registry.py")
+publish_slot_ledger = _load_module("publish_slot_ledger", SKILL_DIR / "scripts/publish_slot_ledger.py")
 source_translation = _load_module("run_source_translation", SKILL_DIR / "scripts/run_source_translation.py")
 translation_semantic_qa = _load_module("run_translation_semantic_qa", SKILL_DIR / "scripts/run_translation_semantic_qa.py")
 script_format = _load_module("run_podcast_script_format", SKILL_DIR / "scripts/run_podcast_script_format.py")
@@ -50,6 +57,7 @@ source_voice_prompts = _load_module(
 	SKILL_DIR / "skills/worldview-china-source-voice-prompts/scripts/extract_source_voice_prompts.py",
 )
 speaker_census = _load_module("run_speaker_census", SKILL_DIR / "scripts/run_speaker_census.py")
+source_audio_events = _load_module("run_source_audio_event_census", SKILL_DIR / "scripts/run_source_audio_event_census.py")
 qwen_prompts = _load_module(
 	"build_qwen_vibevoice_prompts",
 	SKILL_DIR / "skills/worldview-china-qwen-vibevoice-prompts/scripts/build_qwen_vibevoice_prompts.py",
@@ -61,6 +69,14 @@ metadata_script = _load_module(
 title_cover_script = _load_module(
 	"build_title_cover",
 	SKILL_DIR / "skills/worldview-china-podcast-title-cover/scripts/build_title_cover.py",
+)
+dialogue_timeline_builder = _load_module(
+	"build_dialogue_timeline_from_asr",
+	Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-audio-alignment/scripts/build_dialogue_timeline_from_asr.py"),
+)
+subtitle_builder = _load_module(
+	"build_subtitles_from_timeline",
+	Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-alignment/scripts/build_subtitles_from_timeline.py"),
 )
 
 
@@ -238,9 +254,88 @@ def _make_parent_run(run_dir: Path, chapter_count: int = 4, chars_per_segment: i
 	)
 
 
-def test_episode_series_split_creates_ordered_episode_runs_with_hourly_schedule(tmp_path: Path) -> None:
+def test_bilibili_text_compliance_records_registry_and_file_hashes(tmp_path: Path) -> None:
 	run_dir = tmp_path / "run"
-	_make_parent_run(run_dir)
+	run_dir.mkdir(parents=True)
+	script_path = run_dir / "podcast_script.md"
+	title_path = run_dir / "video_title.txt"
+	script_path.write_text("Speaker 0: 这一集讨论中国经济和国际市场的变化。\n", encoding="utf-8")
+	title_path.write_text("美国学者：中国经济还有哪些韧性\n", encoding="utf-8")
+
+	result = text_compliance.run_review(run_dir=run_dir, stage="test")
+
+	assert result["status"] == "PASS"
+	assert result["risk_registry"]["load_status"] == "loaded"
+	assert result["risk_registry"]["deterministic_rule_ids_missing_from_registry"] == []
+	assert result["reviewed_file_hashes"][str(script_path.resolve())] == _sha256(script_path)
+	assert result["reviewed_file_hashes"][str(title_path.resolve())] == _sha256(title_path)
+
+
+def test_final_qa_rejects_stale_text_compliance_hashes(tmp_path: Path) -> None:
+	run_dir = tmp_path / "run"
+	script_path = run_dir / "podcast_script.md"
+	script_path.parent.mkdir(parents=True)
+	script_path.write_text("Speaker 0: 第一版安全文本。\n", encoding="utf-8")
+	review = {
+		"reviewed_file_hashes": {
+			str(script_path.resolve()): _sha256(script_path),
+		},
+	}
+	script_path.write_text("Speaker 0: 第二版视频修复后的文本。\n", encoding="utf-8")
+
+	failures: list[str] = []
+	final_qa_script._require_reviewed_file_hashes_current(
+		review,
+		{"podcast_script": script_path},
+		failures,
+		"Bilibili text compliance review",
+	)
+
+	assert any("stale" in failure for failure in failures)
+
+
+def test_series_final_qa_requires_allowed_audit_monitor_status(tmp_path: Path) -> None:
+	episode_dir = tmp_path / "episode_001"
+	failures: list[str] = []
+	series_qa._validate_audit_monitor_status(
+		episode_dir,
+		1,
+		upload_status="SUBMITTED",
+		require_upload_submitted=True,
+		failures=failures,
+	)
+	assert any("audit monitor report is missing" in failure for failure in failures)
+
+	_write_json(episode_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json", {
+		"status": "RETURNED_NEEDS_REPAIR",
+	})
+	failures = []
+	series_qa._validate_audit_monitor_status(
+		episode_dir,
+		1,
+		upload_status="SUBMITTED",
+		require_upload_submitted=True,
+		failures=failures,
+	)
+	assert any("audit monitor status is not allowed" in failure for failure in failures)
+
+	_write_json(episode_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json", {
+		"status": "REVIEW_PENDING_AFTER_MAX_CHECKS",
+	})
+	failures = []
+	series_qa._validate_audit_monitor_status(
+		episode_dir,
+		1,
+		upload_status="SUBMITTED",
+		require_upload_submitted=True,
+		failures=failures,
+	)
+	assert failures == []
+
+
+def test_episode_series_split_creates_ordered_episode_runs_with_balanced_daily_slot_schedule(tmp_path: Path) -> None:
+	run_dir = tmp_path / "run"
+	_make_parent_run(run_dir, chapter_count=6)
 	manifest = series_split.split_series(
 		run_dir=run_dir,
 		series_title_prefix="嘉宾观察",
@@ -255,21 +350,27 @@ def test_episode_series_split_creates_ordered_episode_runs_with_hourly_schedule(
 		target_minutes_ideal=1.5,
 		force=True,
 	)
-	assert manifest["episode_count"] == 2
+	assert manifest["episode_count"] == 3
 	assert manifest["serial_execution_required"] is True
 	assert manifest["parallel_execution_allowed"] is False
 	assert manifest["bilibili_upload_overlap_allowed"] is True
 	assert manifest["final_publish_after_all_uploads"] is True
+	assert manifest["bilibili_schedule_policy"] == "balanced_daily_slots_ordered"
+	assert manifest["bilibili_schedule_source"] == "series_daily_11_17_balanced_ordered_slots"
+	assert manifest["bilibili_schedule_slots"] == ["11:00", "17:00"]
 	assert manifest["episode_title_template"] == "{series_title}·{episode_order_marker}：{subtitle}"
 	assert manifest["episode_order_marker_template"] == "第{episode_index}集"
 	assert manifest["target_chars_min"] == 100
 	assert manifest["target_chars_max"] == 200
 	first = manifest["episodes"][0]
 	second = manifest["episodes"][1]
+	third = manifest["episodes"][2]
 	assert first["video_title"] == "嘉宾观察·第1集：中国经济主题1与中国经济主题2"
 	assert second["video_title"] == "嘉宾观察·第2集：中国经济主题3与中国经济主题4"
+	assert third["video_title"] == "嘉宾观察·第3集：中国经济主题5与中国经济主题6"
 	assert first["scheduled_publish_at"] == "2026-06-24T11:00:00+08:00"
-	assert second["scheduled_publish_at"] == "2026-06-24T12:00:00+08:00"
+	assert second["scheduled_publish_at"] == "2026-06-24T11:00:00+08:00"
+	assert third["scheduled_publish_at"] == "2026-06-24T17:00:00+08:00"
 	for episode in manifest["episodes"]:
 		episode_dir = Path(episode["episode_run_dir"])
 		episode_manifest = _read_json(episode_dir / "episode_manifest.json")
@@ -278,7 +379,133 @@ def test_episode_series_split_creates_ordered_episode_runs_with_hourly_schedule(
 		assert episode_manifest["final_publish_after_all_uploads"] is True
 		assert episode_manifest["episode_order_marker_template"] == manifest["episode_order_marker_template"]
 		assert (episode_dir / "04-podcast-script/podcast_script.md").exists()
-		assert _read_json(episode_dir / "bilibili_upload_metadata.json")["scheduled_publish_at"] == episode["scheduled_publish_at"]
+		metadata_seed = _read_json(episode_dir / "bilibili_upload_metadata.json")
+		assert metadata_seed["scheduled_publish_at"] == episode["scheduled_publish_at"]
+		assert metadata_seed["schedule_source"] == "series_daily_11_17_balanced_ordered_slots"
+
+
+def test_publish_slot_ledger_plans_empty_daily_slots(tmp_path: Path) -> None:
+	root_dir = tmp_path / "worldview-root"
+	root_dir.mkdir()
+	plan = publish_slot_ledger.plan_slots(
+		root_dir=root_dir,
+		target_date="2026-06-27",
+		slots=("11:00", "17:00"),
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 9, 0, tzinfo=timezone.utc),
+	)
+	assert plan["should_run"] is True
+	assert plan["next_slot"] == "11:00"
+	assert [slot["slot"] for slot in plan["missing_slots"]] == ["11:00", "17:00"]
+	assert plan["satisfied_slots"] == []
+
+
+def test_publish_slot_ledger_reserves_one_slot_without_filling_the_day(tmp_path: Path) -> None:
+	root_dir = tmp_path / "worldview-root"
+	root_dir.mkdir()
+	reservation = publish_slot_ledger.reserve_slots(
+		root_dir=root_dir,
+		target_date="2026-06-27",
+		slots=("11:00",),
+		run_dir=tmp_path / "run-1",
+		run_id="run-1",
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 9, 0, tzinfo=timezone.utc),
+	)
+	assert reservation["reserved_slots"][0]["slot"] == "11:00"
+	plan = publish_slot_ledger.plan_slots(
+		root_dir=root_dir,
+		target_date="2026-06-27",
+		slots=("11:00", "17:00"),
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 10, 0, tzinfo=timezone.utc),
+	)
+	assert [slot["slot"] for slot in plan["satisfied_slots"]] == ["11:00"]
+	assert [slot["slot"] for slot in plan["missing_slots"]] == ["17:00"]
+	assert plan["should_run"] is True
+	assert plan["next_slot"] == "17:00"
+
+
+def test_publish_slot_ledger_commit_run_fills_slots_from_submitted_series(tmp_path: Path) -> None:
+	root_dir = tmp_path / "worldview-root"
+	root_dir.mkdir()
+	run_dir = root_dir / "20260626_1"
+	episode_dirs = [run_dir / "04b-series-episodes/episode_001", run_dir / "04b-series-episodes/episode_002"]
+	for index, (episode_dir, hour) in enumerate(zip(episode_dirs, (11, 17), strict=True), start=1):
+		_write_json(episode_dir / "bilibili_upload_metadata.json", {
+			"title": f"世界眼中的中国·第{index}集：测试标题",
+			"scheduled_publish_at": f"2026-06-27T{hour:02d}:00:00+08:00",
+			"scheduled_publish_timezone": "Asia/Shanghai",
+			"video_path": str(episode_dir / "video/final_video.mp4"),
+		})
+		_write_json(episode_dir / "bilibili_upload_draft_report.json", {
+			"status": "SUBMITTED",
+			"final_submit_clicked": True,
+		})
+		_write_json(episode_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json", {
+			"status": "APPROVED",
+		})
+	_write_json(run_dir / "04b-series-episodes/series_manifest.json", {
+		"episodes": [{"episode_run_dir": str(episode_dir)} for episode_dir in episode_dirs],
+	})
+	commit = publish_slot_ledger.commit_run(
+		root_dir=root_dir,
+		run_dir=run_dir,
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+	)
+	assert [slot["slot"] for slot in commit["committed_slots"]] == ["11:00", "17:00"]
+	plan = publish_slot_ledger.plan_slots(
+		root_dir=root_dir,
+		target_date="2026-06-27",
+		slots=("11:00", "17:00"),
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 12, 30, tzinfo=timezone.utc),
+	)
+	assert plan["should_run"] is False
+	assert [slot["status"] for slot in plan["satisfied_slots"]] == ["APPROVED", "APPROVED"]
+	assert plan["missing_slots"] == []
+
+
+def test_publish_slot_ledger_ignores_stale_reservation_and_returned_submission(tmp_path: Path) -> None:
+	root_dir = tmp_path / "worldview-root"
+	root_dir.mkdir()
+	publish_slot_ledger.reserve_slots(
+		root_dir=root_dir,
+		target_date="2026-06-27",
+		slots=("11:00",),
+		run_dir=tmp_path / "old-run",
+		run_id="old-run",
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 25, 8, 0, tzinfo=timezone.utc),
+	)
+	run_dir = root_dir / "20260626_2"
+	_write_json(run_dir / "bilibili_upload_metadata.json", {
+		"title": "世界眼中的中国：退回样例",
+		"scheduled_publish_at": "2026-06-27T17:00:00+08:00",
+		"scheduled_publish_timezone": "Asia/Shanghai",
+	})
+	_write_json(run_dir / "bilibili_upload_draft_report.json", {"status": "SUBMITTED"})
+	_write_json(run_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json", {
+		"status": "RETURNED_NEEDS_REPAIR",
+	})
+	publish_slot_ledger.commit_run(
+		root_dir=root_dir,
+		run_dir=run_dir,
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+	)
+	plan = publish_slot_ledger.plan_slots(
+		root_dir=root_dir,
+		target_date="2026-06-27",
+		slots=("11:00", "17:00"),
+		timezone_name="Asia/Shanghai",
+		now=datetime(2026, 6, 26, 12, 30, tzinfo=timezone.utc),
+		reservation_ttl_hours=18,
+	)
+	assert [slot["slot"] for slot in plan["missing_slots"]] == ["11:00", "17:00"]
+	assert plan["slot_statuses"]["2026-06-27T11:00"]["stale_reservation"] is True
+	assert plan["slot_statuses"]["2026-06-27T17:00"]["status"] == "RETURNED_NEEDS_REPAIR"
 
 
 def test_episode_series_split_materializes_source_episode_video_when_source_exists(tmp_path: Path) -> None:
@@ -351,6 +578,147 @@ def test_title_cover_series_mode_uses_indexed_video_title_and_unindexed_cover_ti
 	assert manifest["title_policy"] == "series_episode_indexed_video_title_plus_unindexed_cover_title"
 
 
+def test_title_cover_rejects_internal_column_prefix_and_generic_core(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	_write_json(run_dir / "02-source-capture/youtube-media/source.info.json", {"title": "The Day After: America, China and a Changed Middle East"})
+	_write_png(run_dir / "02-source-capture/source-video-frame-qa/middle.png")
+	with pytest.raises(AssertionError, match="not the channel/series/topic label"):
+		title_cover_script.build_title_cover(
+			run_dir=run_dir,
+			translated_title_core="中东停火与中国经济足迹",
+			source_identity_label="世界眼中的中国",
+			identity_basis=None,
+			frame=None,
+			frame_key="auto",
+			source_time_sec=None,
+			highlight_texts=None,
+			episode_index=None,
+			episode_title_template="{series_title}：{subtitle}",
+			episode_order_marker_template="",
+			cover_include_episode_index=False,
+			force=False,
+		)
+	with pytest.raises(AssertionError, match="too generic"):
+		title_cover_script.build_title_cover(
+			run_dir=run_dir,
+			translated_title_core="中东停火与中国经济足迹",
+			source_identity_label="中东中国问题专家",
+			identity_basis="test identity basis",
+			frame=None,
+			frame_key="auto",
+			source_time_sec=None,
+			highlight_texts=None,
+			episode_index=None,
+			episode_title_template="{series_title}：{subtitle}",
+			episode_order_marker_template="",
+			cover_include_episode_index=False,
+			force=False,
+		)
+	with pytest.raises(AssertionError, match="too generic"):
+		title_cover_script.build_title_cover(
+			run_dir=run_dir,
+			translated_title_core="中国在中东做大生意，却不想接美国的安全班",
+			source_identity_label="中国中东问题专家",
+			identity_basis="test identity basis",
+			frame=None,
+			frame_key="auto",
+			source_time_sec=None,
+			highlight_texts=None,
+			episode_index=None,
+			episode_title_template="{series_title}：{subtitle}",
+			episode_order_marker_template="",
+			cover_include_episode_index=False,
+			force=False,
+		)
+
+
+def test_title_cover_allows_short_generic_identity_fallback(tmp_path: Path) -> None:
+	for label in ("中东专家", "中国问题专家"):
+		run_dir = tmp_path / label
+		_write_json(run_dir / "02-source-capture/youtube-media/source.info.json", {"title": "The Day After: America, China and a Changed Middle East"})
+		_write_png(run_dir / "02-source-capture/source-video-frame-qa/middle.png")
+		_write_png(run_dir / "cover/cover_4k.png")
+		manifest = title_cover_script.build_title_cover(
+			run_dir=run_dir,
+			translated_title_core="中国在中东做大生意，却不想接美国的班？",
+			source_identity_label=label,
+			identity_basis="Source supports this domain label; no brighter concise public title is available for the Bilibili prefix.",
+			frame=None,
+			frame_key="auto",
+			source_time_sec=None,
+			highlight_texts=[label, "做大生意"],
+			episode_index=None,
+			episode_title_template="{series_title}：{subtitle}",
+			episode_order_marker_template="",
+			cover_include_episode_index=False,
+			force=False,
+		)
+		cover_title = _read_json(run_dir / "cover/cover_title.json")
+		assert (run_dir / "video_title.txt").read_text(encoding="utf-8").strip() == f"{label}：中国在中东做大生意，却不想接美国的班？"
+		assert cover_title["identity_label_policy"]["type"] == "fallback_generic"
+		assert cover_title["attractive_title_policy"]["identity_label_policy"]["type"] == "fallback_generic"
+		assert manifest["identity_label_policy"]["type"] == "fallback_generic"
+
+
+def test_title_cover_generic_identity_fallback_requires_basis(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	_write_json(run_dir / "02-source-capture/youtube-media/source.info.json", {"title": "The Day After: America, China and a Changed Middle East"})
+	_write_png(run_dir / "02-source-capture/source-video-frame-qa/middle.png")
+	with pytest.raises(AssertionError, match="require identity_basis"):
+		title_cover_script.build_title_cover(
+			run_dir=run_dir,
+			translated_title_core="中国在中东做大生意，却不想接美国的班？",
+			source_identity_label="中东专家",
+			identity_basis=None,
+			frame=None,
+			frame_key="auto",
+			source_time_sec=None,
+			highlight_texts=None,
+			episode_index=None,
+			episode_title_template="{series_title}：{subtitle}",
+			episode_order_marker_template="",
+			cover_include_episode_index=False,
+			force=False,
+		)
+
+
+def test_title_cover_respects_single_episode_empty_order_marker(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	title = "旅居中东20年学者：中国在中东做大生意，却不想接美国的安全班"
+	_write_json(run_dir / "02-source-capture/youtube-media/source.info.json", {"title": "The Day After"})
+	_write_json(run_dir / "episode_manifest.json", {
+		"schema_version": "worldview-china-podcast-series-episode.v1",
+		"episode_index": 1,
+		"episode_count": 1,
+		"episode_order_marker": "",
+		"episode_title_template": "{series_title}：{subtitle}",
+		"episode_order_marker_template": "",
+		"video_title": title,
+		"cover_title": title,
+	})
+	_write_png(run_dir / "02-source-capture/source-video-frame-qa/middle.png")
+	_write_png(run_dir / "cover/cover_4k.png")
+	manifest = title_cover_script.build_title_cover(
+		run_dir=run_dir,
+		translated_title_core="中国在中东做大生意，却不想接美国的安全班",
+		source_identity_label="旅居中东20年学者",
+		identity_basis="test identity basis",
+		frame=None,
+		frame_key="auto",
+		source_time_sec=None,
+		highlight_texts=["旅居中东20年学者", "安全班"],
+		episode_index=1,
+		episode_title_template="{series_title}：{subtitle}",
+		episode_order_marker_template="",
+		cover_include_episode_index=False,
+		force=False,
+	)
+	cover_title = _read_json(run_dir / "cover/cover_title.json")
+	assert (run_dir / "video_title.txt").read_text(encoding="utf-8").strip() == title
+	assert cover_title["episode_order_marker"] == ""
+	assert manifest["episode_order_marker"] == ""
+
+
 def test_bilibili_metadata_preserves_series_schedule_and_episode_fields(tmp_path: Path) -> None:
 	run_dir = tmp_path / "episode"
 	(run_dir / "video").mkdir(parents=True)
@@ -383,7 +751,14 @@ def test_bilibili_metadata_preserves_series_schedule_and_episode_fields(tmp_path
 	_write_json(run_dir / "bilibili_upload_metadata.json", {
 		"scheduled_publish_at": "2026-06-24T11:00:00+08:00",
 		"scheduled_publish_timezone": "Asia/Shanghai",
-		"schedule_source": "series_first_publish_at_plus_episode_index_hours",
+		"schedule_source": "series_daily_11_17_balanced_ordered_slots",
+		"series_schedule_policy": "balanced_daily_slots_ordered",
+		"series_schedule_slots": ["11:00", "17:00"],
+		"series_schedule_base_date": "2026-06-24",
+		"series_schedule_slot_index": 1,
+		"series_schedule_slot_time": "11:00",
+		"series_schedule_slot_episode_count": 1,
+		"series_schedule_position_in_slot": 1,
 		"series_episode_index": 1,
 		"series_episode_count": 2,
 	})
@@ -427,9 +802,16 @@ def test_bilibili_metadata_inherits_series_schedule_from_episode_manifest_withou
 		"series_title_prefix": "嘉宾观察",
 		"episode_subtitle": "外企为什么仍看重中国市场",
 		"video_title": "嘉宾观察·第2集：外企为什么仍看重中国市场",
-		"scheduled_publish_at": "2026-06-24T12:00:00+08:00",
+		"scheduled_publish_at": "2026-06-24T17:00:00+08:00",
 		"scheduled_publish_timezone": "Asia/Shanghai",
-		"schedule_source": "series_first_publish_at_plus_episode_index_hours",
+		"schedule_source": "series_daily_11_17_balanced_ordered_slots",
+		"series_schedule_policy": "balanced_daily_slots_ordered",
+		"series_schedule_slots": ["11:00", "17:00"],
+		"series_schedule_base_date": "2026-06-24",
+		"series_schedule_slot_index": 2,
+		"series_schedule_slot_time": "17:00",
+		"series_schedule_slot_episode_count": 1,
+		"series_schedule_position_in_slot": 1,
 	})
 	(run_dir / "podcast_script.md").write_text(
 		"Speaker 0: 外企仍然看重中国市场，是因为供应链、消费和本地经营仍然有现实价值。\n",
@@ -440,14 +822,14 @@ def test_bilibili_metadata_inherits_series_schedule_from_episode_manifest_withou
 		run_dir / "bilibili_upload_metadata.json",
 		run_dir / "10-bilibili-publish/publish_metadata_report.json",
 	)
-	assert metadata["scheduled_publish_at"] == "2026-06-24T12:00:00+08:00"
+	assert metadata["scheduled_publish_at"] == "2026-06-24T17:00:00+08:00"
 	assert metadata["scheduled_publish_timezone"] == "Asia/Shanghai"
-	assert metadata["schedule_source"] == "series_first_publish_at_plus_episode_index_hours"
+	assert metadata["schedule_source"] == "series_daily_11_17_balanced_ordered_slots"
 	assert metadata["series_episode_index"] == 2
 	assert metadata["series_episode_count"] == 2
 	assert "外企仍然看重中国市场" in metadata["description"]
 	assert "替换为中文对话音频" not in metadata["description"]
-	assert report["scheduled_publish_at"] == "2026-06-24T12:00:00+08:00"
+	assert report["scheduled_publish_at"] == "2026-06-24T17:00:00+08:00"
 
 
 def test_revoice_uses_episode_manifest_as_formal_source_segment(tmp_path: Path) -> None:
@@ -576,6 +958,93 @@ def test_revoice_prefers_precut_episode_source_video(tmp_path: Path) -> None:
 	assert manifest["visual_mode"] == "source_video_revoice_episode_segment"
 
 
+def test_dialogue_timeline_uses_asr_timing_and_avoids_hard_phrase_splits(tmp_path: Path) -> None:
+	project_dir = tmp_path / "project"
+	text = (
+		"他长期研究中国与中东，是阿布扎比扎耶德大学的政治学者、大西洋理事会非常驻高级研究员，"
+		"也是China MENA Podcast的主持人。"
+	)
+	_make_silent_wav(project_dir / "audio/final_podcast.wav", duration=12.0)
+	_write_json(project_dir / "audio/audio_manifest.json", {
+		"script_sha256": "test",
+		"turns": [{"turn_index": 1, "speaker": "Speaker 0", "text": text}],
+	})
+	norm_chars = [char for char in text.lower() if char.isalnum()]
+	words = [
+		{"word": char, "start": round(index * 0.12, 3), "end": round(index * 0.12 + 0.08, 3), "probability": 0.99}
+		for index, char in enumerate(norm_chars)
+	]
+	asr_path = project_dir / "audio/asr_alignment.json"
+	_write_json(asr_path, {"segments": [{"text": text, "start": 0.0, "end": 10.0, "words": words}]})
+	timeline = dialogue_timeline_builder.build_timeline(project_dir, asr_path, project_dir / "audio/dialogue_timeline.json")
+	cue_texts = [str(cue["text"]) for cue in timeline["cues"]]
+	assert timeline["subtitle_cue_policy"]["cue_text_policy"] == "complete_sentence_or_semantic_clause_no_hard_width_split"
+	assert timeline["subtitle_cue_policy"]["cue_timing_policy"] == "asr_character_span"
+	assert not any(text.endswith("非") for text in cue_texts)
+	assert "常驻高级研究员，" not in cue_texts
+	assert any("大西洋理事会非常驻高级研究员" in text for text in cue_texts)
+	assert all(cue.get("timing_source") == "asr_character_span" for cue in timeline["cues"])
+
+
+def test_subtitle_builder_records_timing_and_segmentation_policy(tmp_path: Path) -> None:
+	if not subtitle_builder.SUBTITLE_FONT_PATH.exists():
+		pytest.skip(f"subtitle font missing: {subtitle_builder.SUBTITLE_FONT_PATH}")
+	project_dir = tmp_path / "project"
+	_make_silent_wav(project_dir / "audio/final_podcast.wav", duration=4.0)
+	(project_dir / "podcast_script.md").write_text("Speaker 0: 这是第一句。这是第二句。\n", encoding="utf-8")
+	_write_json(project_dir / "audio/dialogue_timeline.json", {
+		"asr_summary": {"matched_script_ratio": 1.0},
+		"turns": [{
+			"turn_index": 1,
+			"turn_id": "turn_0001",
+			"speaker": "Speaker 0",
+			"text": "这是第一句。这是第二句。",
+			"start_sec": 0.25,
+			"end_sec": 2.4,
+			"alignment_confidence": "high",
+			"asr_matched_char_ratio": 1.0,
+		}],
+		"cues": [
+			{
+				"cue_index": 1,
+				"turn_index": 1,
+				"turn_id": "turn_0001",
+				"speaker": "Speaker 0",
+				"text": "这是第一句。",
+				"start_sec": 0.25,
+				"end_sec": 1.2,
+				"alignment_confidence": "high",
+			},
+			{
+				"cue_index": 2,
+				"turn_index": 1,
+				"turn_id": "turn_0001",
+				"speaker": "Speaker 0",
+				"text": "这是第二句。",
+				"start_sec": 1.2,
+				"end_sec": 2.4,
+				"alignment_confidence": "high",
+			},
+		],
+	})
+	result = subtitle_builder.build_subtitles(
+		project_dir,
+		subtitle_builder.GLOBAL_LEAD_SEC,
+		subtitle_builder.TAIL_SEC,
+		subtitle_builder.NEXT_CUE_OVERLAP_SEC,
+	)
+	manifest = _read_json(project_dir / "video/subtitle_manifest.json")
+	assert result["timing_policy"] == "PASS"
+	assert result["segmentation_policy"] == "PASS"
+	assert manifest["global_lead_sec"] == 0.12
+	assert manifest["timing_policy"]["status"] == "PASS"
+	assert manifest["timing_policy"]["lead_applied_per_split_cue"] is True
+	assert manifest["segmentation_policy"]["status"] == "PASS"
+	assert manifest["segmentation_policy"]["dangling_fragment_violation_count"] == 0
+	assert [cue["display_text"] for cue in manifest["cues"]] == ["这是第一句", "这是第二句"]
+	assert manifest["cues"][0]["start_sec"] == pytest.approx(0.13, abs=0.001)
+
+
 def test_revoice_cli_defaults_to_burned_subtitles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(sys, "argv", ["run_source_video_revoice.py", "--run-dir", str(tmp_path)])
 	args = revoice.parse_args()
@@ -595,8 +1064,9 @@ def test_revoice_burned_subtitles_outputs_2k_1440p(monkeypatch: pytest.MonkeyPat
 	_make_silent_wav(audio, duration=1.0)
 	_write_json(run_dir / "video/subtitle_manifest.json", {"cues": [{"index": 1, "start_sec": 0.0, "end_sec": 1.0, "text": "测试字幕"}]})
 
-	def fake_overlay(work_dir: Path, subtitle_manifest: Path, target_duration: float) -> tuple[Path, list[dict[str, Any]]]:
+	def fake_overlay(work_dir: Path, subtitle_manifest: Path, target_duration: float, time_offset_sec: float = 0.0) -> tuple[Path, list[dict[str, Any]]]:
 		assert subtitle_manifest.exists()
+		assert time_offset_sec == 0.0
 		work_dir.mkdir(parents=True, exist_ok=True)
 		overlay = work_dir / "subtitle_overlay.mov"
 		subprocess.run([
@@ -642,6 +1112,263 @@ def test_revoice_burned_subtitles_outputs_2k_1440p(monkeypatch: pytest.MonkeyPat
 	assert manifest["burned_subtitle_render"]["target_video_height"] == 1440
 	assert int(stream["width"]) == 2560
 	assert int(stream["height"]) == 1440
+
+
+def test_turn_retime_extends_short_source_turn_to_audio_boundary(tmp_path: Path) -> None:
+	source_video = tmp_path / "source.mp4"
+	source_video.write_bytes(b"fake source")
+	source_turn_map = tmp_path / "source_turns.json"
+	audio_timeline = tmp_path / "audio_timeline.json"
+	visual_activity = tmp_path / "visual_activity.json"
+	output_plan = tmp_path / "retime_plan.json"
+	_write_json(source_turn_map, [
+		{"turn_index": 1, "speaker": "Speaker 0", "start": 0.0, "end": 2.0, "text": "hello"},
+	])
+	_write_json(audio_timeline, {
+		"turns": [
+			{"turn_index": 1, "turn_id": "turn_0001", "speaker": "Speaker 0", "start_sec": 0.0, "end_sec": 3.0},
+		],
+	})
+	_write_json(visual_activity, {
+		"protected_ranges": [],
+		"low_motion_ranges": [],
+	})
+	plan = turn_retime.build_retime_plan(
+		source_video,
+		source_turn_map,
+		audio_timeline,
+		visual_activity,
+		output_plan,
+		min_extend_sec=0.01,
+	)
+	assert plan["status"] == "pass"
+	assert plan["summary"]["target_duration_sec"] == 3.0
+	assert plan["summary"]["estimated_video_duration_sec"] == 3.0
+	assert plan["summary"]["extended_duration_sec"] == 1.0
+	assert plan["summary"]["turn_boundary_drift_violation_count"] == 0
+	assert plan["turns"][0]["extension_segments"][0]["source_mode"] == "freeze_tail"
+	assert [segment["source_mode"] for segment in plan["edit_segments"]] == ["video_range", "freeze_tail"]
+
+
+def test_turn_retime_accepts_source_start_sec_fields(tmp_path: Path) -> None:
+	source_video = tmp_path / "source.mp4"
+	source_video.write_bytes(b"fake source")
+	source_turn_map = tmp_path / "source_turns.json"
+	audio_timeline = tmp_path / "audio_timeline.json"
+	visual_activity = tmp_path / "visual_activity.json"
+	output_plan = tmp_path / "retime_plan.json"
+	_write_json(source_turn_map, {
+		"turns": [
+			{"turn_index": 1, "speaker": "Speaker 0", "source_start_sec": 0.0, "source_end_sec": 2.0, "text": "hello"},
+		],
+	})
+	_write_json(audio_timeline, {
+		"turns": [
+			{"turn_index": 1, "turn_id": "turn_0001", "speaker": "Speaker 0", "start_sec": 0.0, "end_sec": 2.0},
+		],
+	})
+	_write_json(visual_activity, {
+		"protected_ranges": [],
+		"low_motion_ranges": [],
+	})
+	plan = turn_retime.build_retime_plan(
+		source_video,
+		source_turn_map,
+		audio_timeline,
+		visual_activity,
+		output_plan,
+	)
+	assert plan["status"] == "pass"
+	assert plan["summary"]["turn_count"] == 1
+	assert plan["turns"][0]["source_start_sec"] == 0.0
+
+
+def test_turn_retime_preserves_opening_non_dialogue_as_audio_offset(tmp_path: Path) -> None:
+	source_video = tmp_path / "source.mp4"
+	source_video.write_bytes(b"fake source")
+	source_turn_map = tmp_path / "source_turns.json"
+	audio_timeline = tmp_path / "audio_timeline.json"
+	visual_activity = tmp_path / "visual_activity.json"
+	output_plan = tmp_path / "retime_plan.json"
+	_write_json(source_turn_map, [
+		{"turn_index": 1, "speaker": "Speaker 0", "start": 1.0, "end": 3.0, "text": "[music]"},
+		{"turn_index": 2, "speaker": "Speaker 1", "start": 5.0, "end": 8.0, "text": "welcome"},
+	])
+	_write_json(audio_timeline, {
+		"turns": [
+			{"turn_index": 1, "turn_id": "turn_0001", "speaker": "Speaker 1", "start_sec": 0.0, "end_sec": 3.0},
+		],
+	})
+	_write_json(visual_activity, {
+		"protected_ranges": [],
+		"low_motion_ranges": [],
+	})
+	plan = turn_retime.build_retime_plan(
+		source_video,
+		source_turn_map,
+		audio_timeline,
+		visual_activity,
+		output_plan,
+		min_extend_sec=0.01,
+	)
+	assert plan["status"] == "pass"
+	assert plan["summary"]["audio_start_offset_sec"] == 5.0
+	assert plan["summary"]["target_duration_sec"] == 8.0
+	assert [turn["non_dialogue"] for turn in plan["turns"][:3]] == [True, True, True]
+	assert plan["turns"][3]["speaker"] == "Speaker 1"
+	assert plan["turns"][3]["target_duration_sec"] == 3.0
+
+
+def test_turn_retime_marks_reusable_source_background_audio_for_revoice_mix(tmp_path: Path) -> None:
+	source_video = tmp_path / "source.mp4"
+	source_video.write_bytes(b"fake source")
+	source_turn_map = tmp_path / "source_turns.json"
+	audio_timeline = tmp_path / "audio_timeline.json"
+	visual_activity = tmp_path / "visual_activity.json"
+	output_plan = tmp_path / "retime_plan.json"
+	_write_json(source_turn_map, [
+		{"turn_index": 1, "speaker": "Speaker 0", "start": 0.0, "end": 1.0, "text": "[music]"},
+		{"turn_index": 2, "speaker": "Speaker 1", "start": 2.0, "end": 4.0, "text": "welcome"},
+	])
+	_write_json(audio_timeline, {
+		"turns": [
+			{"turn_index": 1, "turn_id": "turn_0001", "speaker": "Speaker 1", "start_sec": 0.0, "end_sec": 2.0},
+		],
+	})
+	_write_json(visual_activity, {
+		"protected_ranges": [],
+		"low_motion_ranges": [],
+	})
+	plan = turn_retime.build_retime_plan(
+		source_video,
+		source_turn_map,
+		audio_timeline,
+		visual_activity,
+		output_plan,
+		min_extend_sec=0.01,
+	)
+	assert plan["status"] == "pass"
+	assert plan["summary"]["audio_start_offset_sec"] == 2.0
+	music_segments = [segment for segment in plan["edit_segments"] if segment.get("source_audio_event_type") == "music"]
+	assert len(music_segments) == 1
+	assert music_segments[0]["reuse_source_audio"] is True
+	background_segments = revoice._source_background_audio_segments(plan, audio_start_offset_sec=2.0)
+	assert background_segments == [{
+		"segment_index": music_segments[0]["segment_index"],
+		"source_start_sec": 0.0,
+		"source_end_sec": 1.0,
+		"target_start_sec": 0.0,
+		"target_end_sec": 1.0,
+		"duration_sec": 1.0,
+		"event_type": "music",
+		"gain": revoice.SOURCE_BACKGROUND_AUDIO_GAIN,
+	}]
+	audio_filter, audio_label, mix_manifest = revoice._audio_filter_for_mix(2.0, background_segments, source_audio_input_index=2)
+	assert audio_label == "[aout]"
+	assert "atrim=start=0.000:end=1.000" in audio_filter
+	assert "adelay=2000:all=1" in audio_filter
+	assert mix_manifest["source_background_audio_reused"] is True
+
+
+def test_source_audio_event_census_marks_only_non_speech_background_reusable(tmp_path: Path) -> None:
+	if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+		pytest.skip("ffmpeg/ffprobe not available")
+	run_dir = tmp_path / "run"
+	source_audio = run_dir / "02-source-capture/youtube-media/source.wav"
+	source_turn_map = run_dir / "02b-source-voice-prompts/source_speaker_timeline.normalized.json"
+	_make_tone_wav(source_audio, duration=4.0)
+	_write_json(source_turn_map, [
+		{"turn_index": 1, "speaker": "Speaker 0", "start": 0.0, "end": 1.0, "text": "[music]"},
+		{"turn_index": 2, "speaker": "Speaker 1", "start": 1.0, "end": 3.0, "text": "spoken words"},
+		{"turn_index": 3, "speaker": "Speaker 0", "start": 3.0, "end": 4.0, "text": "[silence]"},
+	])
+	result = source_audio_events.build_source_audio_event_census(
+		run_dir=run_dir,
+		source_audio=source_audio,
+		source_turn_map=source_turn_map,
+		output_path=run_dir / "02a-source-audio-events/source_audio_events.json",
+	)
+	events = result["events"]
+	assert [event["event_type"] for event in events if event["evidence"]["basis"] == "source_timeline_explicit_non_speech_tag"] == ["music", "silence"]
+	assert next(event for event in events if event["event_type"] == "music")["reuse_source_audio"] is True
+	assert next(event for event in events if event["event_type"] == "silence")["reuse_source_audio"] is False
+
+
+def test_revoice_turn_audio_timeline_selection_skips_stale_06c_copy(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	audio = run_dir / "audio/final_podcast.wav"
+	_make_silent_wav(audio, duration=3.0)
+	_write_json(run_dir / "06c-audio-timeline-alignment/turn_audio_timeline.json", {
+		"audio_sha256": "stale",
+		"duration_sec": 4.0,
+		"turns": [{"turn_index": 1, "speaker": "Speaker 0", "start_sec": 0.0, "end_sec": 4.0}],
+	})
+	_write_json(run_dir / "audio/dialogue_timeline.json", {
+		"audio_sha256": _sha256(audio),
+		"duration_sec": 3.0,
+		"turns": [{"turn_index": 1, "speaker": "Speaker 0", "start_sec": 0.0, "end_sec": 3.0}],
+	})
+	path, reason = revoice._select_turn_audio_timeline(run_dir, None, audio, 3.0)
+	assert path == (run_dir / "audio/dialogue_timeline.json").resolve()
+	assert reason == "audio_dialogue_timeline_current_fallback"
+
+
+def test_revoice_background_mix_uses_parent_source_wav_for_preclipped_episode(tmp_path: Path) -> None:
+	parent = tmp_path / "parent"
+	episode = parent / "04b-series-episodes/episode_001"
+	source_audio = parent / "02-source-capture/youtube-media/source.wav"
+	source_video = episode / "04b-source-video-segment/source_episode.mp4"
+	_make_silent_wav(source_audio, duration=4.0)
+	_make_test_video(source_video, duration=2.0)
+	selected_audio, offset, reason = revoice._resolve_source_audio_for_background_mix(
+		episode,
+		source_video,
+		{"parent_run_dir": str(parent)},
+		source_is_preclipped_episode=True,
+		semantic_source_start_sec=1.0,
+	)
+	assert selected_audio == source_audio.resolve()
+	assert offset == 1.0
+	assert reason == "parent_source_wav_for_preclipped_episode"
+
+
+def test_turn_retime_groups_consecutive_audio_turns_by_speaker(tmp_path: Path) -> None:
+	source_video = tmp_path / "source.mp4"
+	source_video.write_bytes(b"fake source")
+	source_turn_map = tmp_path / "source_turns.json"
+	audio_timeline = tmp_path / "audio_timeline.json"
+	visual_activity = tmp_path / "visual_activity.json"
+	output_plan = tmp_path / "retime_plan.json"
+	_write_json(source_turn_map, [
+		{"turn_index": 1, "speaker": "Speaker 1", "start": 0.0, "end": 10.0, "text": "long host intro"},
+		{"turn_index": 2, "speaker": "Speaker 0", "start": 10.0, "end": 12.0, "text": "guest reply"},
+	])
+	_write_json(audio_timeline, {
+		"turns": [
+			{"turn_index": 1, "turn_id": "turn_0001", "speaker": "Speaker 1", "start_sec": 0.0, "end_sec": 4.0},
+			{"turn_index": 2, "turn_id": "turn_0002", "speaker": "Speaker 1", "start_sec": 4.5, "end_sec": 6.0},
+			{"turn_index": 3, "turn_id": "turn_0003", "speaker": "Speaker 0", "start_sec": 6.5, "end_sec": 8.5},
+		],
+	})
+	_write_json(visual_activity, {
+		"protected_ranges": [],
+		"low_motion_ranges": [{"start_sec": 2.0, "end_sec": 9.0}],
+	})
+	plan = turn_retime.build_retime_plan(
+		source_video,
+		source_turn_map,
+		audio_timeline,
+		visual_activity,
+		output_plan,
+		min_trim_sec=0.1,
+		min_kept_segment_sec=0.5,
+	)
+	assert plan["status"] == "pass"
+	assert plan["turns"][0]["audio_turn_indices"] == [1, 2]
+	assert plan["turns"][0]["following_silence_held_by_current_speaker_sec"] == 0.5
+	assert plan["turns"][0]["target_duration_sec"] == 6.5
+	assert plan["turns"][1]["audio_turn_indices"] == [3]
+	assert plan["summary"]["turn_boundary_drift_violation_count"] == 0
 
 
 def test_audio_transcript_integrity_qa_uses_complete_audio_asr_before_timeline(tmp_path: Path) -> None:
@@ -840,6 +1567,68 @@ def test_voice_consistency_lineage_rejects_default_voice_leakage(tmp_path: Path)
 	assert "Xinran" in messages
 
 
+def test_voice_consistency_lineage_rejects_speaker_map_role_gender_conflict(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode"
+	_write_json(run_dir / "02a-speaker-census/speaker_roster.json", {
+		"schema_version": "worldview-china-speaker-census.v1",
+		"status": "frozen",
+		"speaker_count": 2,
+		"voice_count": 2,
+		"speakers": {
+			"Speaker 0": {
+				"description": "Jonathan Fulton, guest; male voice, right side of split-screen.",
+			},
+			"Speaker 1": {
+				"description": "Elizabeth Economy, host; female voice, left side of split-screen.",
+			},
+		},
+	})
+	_write_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json", {
+		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
+		"status": "pass",
+		"speaker_voices": {
+			"Speaker 0": {
+				"vibevoice_name": "Voice0",
+				"reference_wav": str(run_dir / "voices/Voice0.wav"),
+			},
+			"Speaker 1": {
+				"vibevoice_name": "Voice1",
+				"reference_wav": str(run_dir / "voices/Voice1.wav"),
+			},
+		},
+	})
+	_write_json(run_dir / "audio/audio_manifest.json", {
+		"speaker_voices": {"Speaker 0": "Voice0", "Speaker 1": "Voice1"},
+		"voice_context_policy": "locked_two_speaker_roster",
+		"speaker_map": {
+			"Speaker 0": {"display_role": "女主持", "vibevoice_name": "Voice0"},
+			"Speaker 1": {"display_role": "男分析者", "vibevoice_name": "Voice1"},
+		},
+	})
+	_write_json(run_dir / "05-vibevoice-chunks/chunk_plan.json", {
+		"voice_context_policy": "locked_two_speaker_roster",
+		"chunks": [],
+	})
+	result = voice_consistency.run_voice_consistency_qa(run_dir, lineage_only=True)
+	assert result["overall_status"] == "FAIL"
+	messages = "\n".join(finding["message"] for finding in result["lineage"]["findings"])
+	assert "role gender hint female conflicts" in messages
+	assert "role gender hint male conflicts" in messages
+
+
+def test_voice_consistency_acoustic_identity_mismatch_is_fail() -> None:
+	status, reason = voice_consistency._classify_acoustic_sample(
+		"Speaker 1",
+		"Speaker 0",
+		assigned_score=0.5,
+		margin=-0.02,
+		min_similarity_margin=0.01,
+		min_assigned_similarity=-0.20,
+	)
+	assert status == "FAIL"
+	assert reason == "voice_identity_mismatch"
+
+
 def test_vibevoice_chunk_annotation_removes_default_voice_metadata(tmp_path: Path) -> None:
 	audio_dir = tmp_path / "chunk/audio"
 	_write_json(audio_dir / "audio_manifest.json", {
@@ -862,6 +1651,53 @@ def test_vibevoice_chunk_annotation_removes_default_voice_metadata(tmp_path: Pat
 	assert manifest["voice_context_policy"] == "locked_two_speaker_roster"
 	assert manifest["speaker_map"]["Speaker 0"]["vibevoice_name"] == "Voice0"
 	assert "default_vibevoice_name" not in manifest["speaker_map"]["Speaker 0"]
+
+
+def test_prepare_vibevoice_inputs_uses_worldview_speaker_map_override(tmp_path: Path) -> None:
+	project_dir = tmp_path / "chunk"
+	project_dir.mkdir()
+	(project_dir / "podcast_script.md").write_text(
+		"Speaker 1: 欢迎来到节目。\nSpeaker 0: 谢谢你，Liz。\n",
+		encoding="utf-8",
+	)
+	_write_json(project_dir / "speaker_map.json", {
+		"schema_version": "worldview-china-vibevoice-speaker-map.v1",
+		"speaker_map": {
+			"Speaker 0": {"display_role": "Jonathan Fulton", "vibevoice_name": "Voice0"},
+			"Speaker 1": {"display_role": "Elizabeth Economy", "vibevoice_name": "Voice1"},
+		},
+	})
+	speaker_map, source = prepare_vibevoice_inputs._load_speaker_map(project_dir)
+	turns = prepare_vibevoice_inputs._parse_turns(
+		(project_dir / "podcast_script.md").read_text(encoding="utf-8"),
+		speaker_map,
+	)
+	assert source.endswith("speaker_map.json")
+	assert turns[0]["speaker"] == "Speaker 1"
+	assert turns[0]["display_role"] == "Elizabeth Economy"
+	assert turns[1]["display_role"] == "Jonathan Fulton"
+
+
+def test_resident_batch_remaps_out_of_order_global_speakers_to_local_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+	fake_torch = types.ModuleType("torch")
+	monkeypatch.setitem(sys.modules, "torch", fake_torch)
+	resident_batch = _load_module(
+		"run_vibevoice_resident_batch_test",
+		Path("/Users/wangfangjia/.codex/skills/vibevoice-dialogue-tts/scripts/run_vibevoice_resident_batch.py"),
+	)
+	scripts, speaker_numbers = resident_batch._parse_txt_script(
+		"Speaker 1: 开场由二号全局说话人先说。\nSpeaker 0: 然后一号全局说话人回答。\n"
+	)
+	remapped, voice_sample_speaker_numbers, global_to_local = resident_batch._remap_scripts_to_local_speakers(
+		scripts,
+		speaker_numbers,
+	)
+	assert voice_sample_speaker_numbers == ["1", "0"]
+	assert global_to_local == {"1": "0", "0": "1"}
+	assert remapped == [
+		"Speaker 0: 开场由二号全局说话人先说。",
+		"Speaker 1: 然后一号全局说话人回答。",
+	]
 
 
 def test_bilibili_text_compliance_review_ignores_source_text_fields(tmp_path: Path) -> None:
@@ -907,7 +1743,7 @@ def test_vibevoice_chunks_dry_run_defaults_to_mps_auto(tmp_path: Path) -> None:
 		split_all_chunks=False,
 		split_long_turn_max_chars=vibevoice_chunks.DEFAULT_SPLIT_LONG_TURN_MAX_CHARS,
 		fixed_chunk_plan_json=None,
-		postprocess_min_source_max_volume=-8.0,
+		postprocess_min_source_max_volume=vibevoice_chunks.DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME,
 		voice_prompt_policy="qwen_chinese_required",
 		generation_runner="resident_batch",
 		voice_context_policy="locked_two_speaker_roster",
@@ -1116,7 +1952,7 @@ def test_vibevoice_chunks_locked_roster_supports_single_speaker_chunk_from_three
 		split_all_chunks=False,
 		split_long_turn_max_chars=vibevoice_chunks.DEFAULT_SPLIT_LONG_TURN_MAX_CHARS,
 		fixed_chunk_plan_json=None,
-		postprocess_min_source_max_volume=-8.0,
+		postprocess_min_source_max_volume=vibevoice_chunks.DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME,
 		voice_prompt_policy="qwen_chinese_required",
 		generation_runner="resident_batch",
 		voice_context_policy="locked_multi_speaker_roster",
@@ -1540,6 +2376,9 @@ def _write_minimal_series_episode_runtime_contracts(episode_dir: Path) -> None:
 			"speaker_names": locked_speaker_names,
 		}],
 	})
+	_write_json(episode_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json", {
+		"status": "APPROVED",
+	})
 
 
 def _write_minimal_series_final_qa_run(
@@ -1566,6 +2405,9 @@ def _write_minimal_series_final_qa_run(
 		"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
 		"episode_order_marker_template": "第{episode_index}集",
 		"video_title": title,
+		"scheduled_publish_at": schedule.isoformat(),
+		"scheduled_publish_timezone": "Asia/Shanghai",
+		"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 	})
 	_write_json(episode_dir / "cover/cover_title.json", {
 		"title_text": "嘉宾观察：主题1",
@@ -1582,6 +2424,7 @@ def _write_minimal_series_final_qa_run(
 		"title": title,
 		"episode_index": 1,
 		"scheduled_publish_at": schedule.isoformat(),
+		"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 	})
 	_write_json(episode_dir / "bilibili_upload_draft_report.json", upload_report)
 	_write_json(run_dir / "04b-series-episodes/series_manifest.json", {
@@ -1590,6 +2433,8 @@ def _write_minimal_series_final_qa_run(
 		"parallel_execution_allowed": False,
 		"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
 		"episode_order_marker_template": "第{episode_index}集",
+		"bilibili_schedule_source": "series_daily_11_17_balanced_ordered_slots",
+		"bilibili_schedule_slots": ["11:00", "17:00"],
 		"shared_cover_frame": str(shared_frame),
 		"episodes": [{
 			"episode_index": 1,
@@ -1622,6 +2467,7 @@ def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path
 			"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
 			"episode_order_marker_template": "第{episode_index}集",
 			"video_title": title,
+			"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 		})
 		_write_json(episode_dir / "cover/cover_title.json", {
 			"title_text": f"嘉宾观察：主题{index}",
@@ -1633,12 +2479,13 @@ def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path
 		})
 		_write_json(episode_dir / "09-final-qa/final-qa-result.json", {"overall_status": "PASS"})
 		_write_minimal_series_episode_runtime_contracts(episode_dir)
-		schedule = first_schedule + timedelta(hours=index - 1)
+		schedule = first_schedule.replace(hour=11 if index == 1 else 17)
 		_write_json(episode_dir / "bilibili_upload_metadata.json", {
 			"workflow": "worldview-china-podcast-agent",
 			"title": title,
 			"episode_index": index,
 			"scheduled_publish_at": schedule.isoformat(),
+			"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 		})
 		_write_json(episode_dir / "bilibili_upload_draft_report.json", {
 			"status": "SUBMITTED",
@@ -1648,6 +2495,7 @@ def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path
 			"episode_index": index,
 			"episode_run_dir": str(episode_dir),
 			"scheduled_publish_at": schedule.isoformat(),
+			"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 		})
 	_write_json(run_dir / "04b-series-episodes/series_manifest.json", {
 		"schema_version": "worldview-china-podcast-series.v1",
@@ -1655,6 +2503,8 @@ def test_series_final_qa_passes_when_all_episode_contracts_are_complete(tmp_path
 		"parallel_execution_allowed": False,
 		"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
 		"episode_order_marker_template": "第{episode_index}集",
+		"bilibili_schedule_source": "series_daily_11_17_balanced_ordered_slots",
+		"bilibili_schedule_slots": ["11:00", "17:00"],
 		"shared_cover_frame": str(shared_frame),
 		"episodes": episodes,
 	})
@@ -1672,6 +2522,30 @@ def test_series_final_qa_accepts_legacy_bilibili_success_evidence(tmp_path: Path
 	})
 	result = series_qa.run_series_qa(run_dir, require_upload_submitted=True, write_history=False)
 	assert result["overall_status"] == "PASS"
+
+
+def test_series_final_qa_accepts_user_submit_now_override_for_stale_schedule_seed(tmp_path: Path) -> None:
+	run_dir = tmp_path / "run"
+	_write_minimal_series_final_qa_run(run_dir, {
+		"status": "SUBMITTED",
+		"final_submit_clicked": True,
+		"field_verification": {
+			"scheduled_publish_at": "not_requested_user_override_submit_now",
+		},
+		"schedule_override": {
+			"reason": "User requested immediate submission because the scheduled time had already passed.",
+		},
+	})
+	metadata_path = run_dir / "04b-series-episodes/episode_001/bilibili_upload_metadata.json"
+	metadata = _read_json(metadata_path)
+	metadata["scheduled_publish_at"] = None
+	metadata["schedule_source"] = "series_first_publish_at_plus_episode_index_hours"
+	_write_json(metadata_path, metadata)
+
+	result = series_qa.run_series_qa(run_dir, require_upload_submitted=True, write_history=False)
+
+	assert result["overall_status"] == "PASS"
+	assert any("submit-now override" in warning for warning in result["warnings"])
 
 
 def test_series_final_qa_rejects_submitted_upload_without_final_submit_proof(tmp_path: Path) -> None:
@@ -1707,6 +2581,7 @@ def test_series_final_qa_rejects_mixed_order_marker_template(tmp_path: Path) -> 
 			"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
 			"episode_order_marker_template": marker_template,
 			"video_title": title,
+			"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 		})
 		_write_json(episode_dir / "cover/cover_title.json", {
 			"title_text": f"嘉宾观察：主题{index}",
@@ -1715,12 +2590,13 @@ def test_series_final_qa_rejects_mixed_order_marker_template(tmp_path: Path) -> 
 		})
 		_write_json(episode_dir / "02d-title-cover/title_cover_manifest.json", {"frame_selection": {"path": str(shared_frame)}})
 		_write_json(episode_dir / "09-final-qa/final-qa-result.json", {"overall_status": "PASS"})
-		schedule = first_schedule + timedelta(hours=index - 1)
+		schedule = first_schedule.replace(hour=11 if index == 1 else 17)
 		_write_json(episode_dir / "bilibili_upload_metadata.json", {
 			"workflow": "worldview-china-podcast-agent",
 			"title": title,
 			"episode_index": index,
 			"scheduled_publish_at": schedule.isoformat(),
+			"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 		})
 		_write_json(episode_dir / "bilibili_upload_draft_report.json", {
 			"status": "SUBMITTED",
@@ -1730,6 +2606,7 @@ def test_series_final_qa_rejects_mixed_order_marker_template(tmp_path: Path) -> 
 			"episode_index": index,
 			"episode_run_dir": str(episode_dir),
 			"scheduled_publish_at": schedule.isoformat(),
+			"schedule_source": "series_daily_11_17_balanced_ordered_slots",
 		})
 	_write_json(run_dir / "04b-series-episodes/series_manifest.json", {
 		"schema_version": "worldview-china-podcast-series.v1",
@@ -1737,6 +2614,8 @@ def test_series_final_qa_rejects_mixed_order_marker_template(tmp_path: Path) -> 
 		"parallel_execution_allowed": False,
 		"episode_title_template": "{series_title}·{episode_order_marker}：{subtitle}",
 		"episode_order_marker_template": "第{episode_index}集",
+		"bilibili_schedule_source": "series_daily_11_17_balanced_ordered_slots",
+		"bilibili_schedule_slots": ["11:00", "17:00"],
 		"shared_cover_frame": str(shared_frame),
 		"episodes": episodes,
 	})
@@ -1878,6 +2757,8 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 			"speaker_names": locked_speaker_names,
 		}],
 	})
+	chunk_audio_path = run_dir / "05-vibevoice-chunks/chunks/chunk_001/audio/final_podcast.wav"
+	_make_silent_wav(chunk_audio_path, duration=1.0)
 	_write_json(run_dir / "audio/audio_manifest.json", {
 		"audio_backend": "vibevoice_chunked_dialogue",
 		"voice_context_policy": "locked_two_speaker_roster",
@@ -1887,12 +2768,17 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 			"chunk_id": "chunk_001",
 			"vibevoice_mode": "dialogue",
 			"speaker_names": locked_speaker_names,
+			"audio": str(chunk_audio_path),
 		}],
 		"turns": [{"speaker": "Speaker 0", "text": "中国的经济韧性很重要"}],
 	})
 	_write_json(run_dir / "audio/dialogue_timeline.json", {
+		"subtitle_cue_policy": {
+			"cue_text_policy": "complete_sentence_or_semantic_clause_no_hard_width_split",
+			"cue_timing_policy": "asr_character_span",
+		},
 		"turns": [{"speaker": "Speaker 0", "text": "中国的经济韧性很重要"}],
-		"cues": [{"text": "中国的经济韧性很重要"}],
+		"cues": [{"text": "中国的经济韧性很重要", "timing_source": "asr_character_span"}],
 	})
 	_write_json(run_dir / "06b-audio-transcript-integrity/audio-transcript-integrity-result.json", {
 		"status": "PASS",
@@ -1911,8 +2797,21 @@ def test_final_qa_accepts_series_episode_title_cover_and_episode_segment_render(
 	(run_dir / "video/final_subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n中国的经济韧性很重要\n", encoding="utf-8")
 	(run_dir / "video/final_subtitles.ass").write_text("[Events]\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中国的经济韧性很重要\n", encoding="utf-8")
 	_write_json(run_dir / "video/subtitle_manifest.json", {
-		"style": {"speaker_labels": False},
-		"cues": [{"display_text": "中国的经济韧性很重要"}],
+		"global_lead_sec": 0.12,
+		"timing_policy": {
+			"status": "PASS",
+			"global_lead_sec": 0.12,
+			"late_start_violation_count": 0,
+			"lead_applied_per_split_cue": True,
+		},
+		"segmentation_policy": {
+			"status": "PASS",
+			"hard_width_fallback_count": 0,
+			"line_violation_count": 0,
+			"dangling_fragment_violation_count": 0,
+		},
+		"style": {"speaker_labels": False, "max_lines": 1},
+		"cues": [{"display_text": "中国的经济韧性很重要", "fits_single_line": True}],
 	})
 	compliance_result = text_compliance.run_review(run_dir, stage="test")
 	assert compliance_result["status"] == "PASS"

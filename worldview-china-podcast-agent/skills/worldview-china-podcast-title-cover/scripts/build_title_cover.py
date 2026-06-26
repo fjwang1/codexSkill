@@ -21,7 +21,34 @@ except ModuleNotFoundError as exc:
 CANVAS = (3840, 2160)
 ARTICLE_COVER_SCRIPT = Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/scripts/compose_editorial_cover.py")
 FORBIDDEN_IDENTITY_LABEL_RE = re.compile(r"(来自|中文配音|搬运|油管|YouTube|频道|栏目|播客|Podcast|CGSP)", re.I)
-WEAK_TITLE_CORE_RE = re.compile(r"(变局之后|新格局|新局势|深度解析|未来走向|影响几何|怎么看|怎么了)$")
+GENERIC_IDENTITY_LABELS = {
+	"世界眼中的中国",
+	"世界看中国",
+	"海外视角",
+	"外网热议",
+	"中国观察",
+	"国际观察",
+	"嘉宾访谈",
+	"专家圆桌",
+}
+FALLBACK_GENERIC_IDENTITY_LABELS = {
+	"中国专家",
+	"中国问题专家",
+	"中东专家",
+}
+REJECTED_GENERIC_IDENTITY_LABELS = {
+	"中东中国问题专家",
+	"中国中东问题专家",
+	"外国专家",
+	"海外专家",
+	"外国学者",
+	"海外学者",
+	"智库专家",
+	"研究员",
+	"学者",
+	"专家",
+}
+WEAK_TITLE_CORE_RE = re.compile(r"(变局之后|新格局|新局势|深度解析|未来走向|影响几何|怎么看|怎么了|足迹|脉络|图景)$")
 DEFAULT_EPISODE_ORDER_MARKER_TEMPLATE = "第{episode_index}集"
 DEFAULT_EPISODE_TITLE_TEMPLATE = "{series_title}·{episode_order_marker}：{subtitle}"
 
@@ -88,9 +115,29 @@ def _validate_identity_label(label: str) -> str:
 	label = _clean_text(label).rstrip(":：")
 	assert label, "Source identity label is empty"
 	assert 2 <= len(label) <= 16, f"Source identity label should be 2-16 chars: {len(label)}"
+	assert label not in GENERIC_IDENTITY_LABELS, "Identity label must name a speaker or concrete role, not the channel/series/topic label"
+	assert label not in REJECTED_GENERIC_IDENTITY_LABELS, "Identity label is too generic or awkward; use a concrete role, or a short fallback label such as 中国问题专家 / 中东专家 when no brighter identity exists"
 	assert not re.match(r"^《[^》]+》$", label), "Use a person or role identity label, not a decorated channel/program name"
 	assert not FORBIDDEN_IDENTITY_LABEL_RE.search(label), "Identity label must describe who is speaking, not say source/channel/podcast/moved-from-YouTube"
 	return label
+
+
+def _identity_label_policy(label: str) -> dict[str, Any]:
+	if label in FALLBACK_GENERIC_IDENTITY_LABELS:
+		return {
+			"status": "PASS",
+			"type": "fallback_generic",
+			"label": label,
+			"allowed_when": "Use only when the source has no famous person, unusually strong title, China-linked role, institution, seniority, geography, lived-experience, or track-record hook that is more clickable and still concise.",
+			"preferred_over": ["中国中东问题专家", "中东中国问题专家", "外国学者", "海外专家", "专家"],
+			"requires_agent_judgment": True,
+		}
+	return {
+		"status": "PASS",
+		"type": "specific_identity",
+		"label": label,
+		"preferred_when": "Use for famous names, strong public roles, China-linked identities, institutions, seniority, geography, lived experience, or track records.",
+	}
 
 
 def _validate_title_core(title_core: str) -> str:
@@ -150,6 +197,14 @@ def _episode_order_marker(episode_index: int, template: str = DEFAULT_EPISODE_OR
 	return marker
 
 
+def _resolved_episode_order_marker(episode_manifest: dict[str, Any], episode_index: int | None, template: str) -> str | None:
+	if episode_index is None:
+		return None
+	if "episode_order_marker" in episode_manifest:
+		return str(episode_manifest.get("episode_order_marker") or "")
+	return _episode_order_marker(episode_index, template)
+
+
 def _build_series_video_title(identity_label: str, title_core: str, episode_index: int, title_template: str, order_marker_template: str) -> str:
 	episode_label = _chinese_episode_label(episode_index)
 	order_marker = _episode_order_marker(episode_index, order_marker_template)
@@ -166,7 +221,8 @@ def _build_series_video_title(identity_label: str, title_core: str, episode_inde
 	)
 	assert identity_label in title, "Series title template must include the shared title"
 	assert title_core in title, "Series title template must include the episode subtitle"
-	assert order_marker in title or str(episode_index) in title or episode_label in title, "Series title template must include an episode order marker"
+	if order_marker:
+		assert order_marker in title or str(episode_index) in title or episode_label in title, "Series title template must include an episode order marker"
 	assert len(title) <= 62, f"Series episode video title is too long: {len(title)} chars"
 	return title
 
@@ -308,11 +364,18 @@ def build_title_cover(
 		assert episode_index > 0, f"episode_index must be positive: {episode_index}"
 	episode_manifest = _read_json_optional(run_dir / "episode_manifest.json")
 	identity_label = _validate_identity_label(source_identity_label)
+	identity_label_policy = _identity_label_policy(identity_label)
+	if identity_label_policy["type"] == "fallback_generic":
+		assert identity_basis and _clean_text(identity_basis), (
+			"Short generic fallback identity labels require identity_basis explaining source support "
+			"and why no brighter concise identity/title is available"
+		)
 	title_core = _validate_title_core(translated_title_core)
 	manifest_video_title = str(episode_manifest.get("video_title") or "").strip()
 	manifest_cover_title = str(episode_manifest.get("cover_title") or "").strip()
 	resolved_episode_title_template = str(episode_manifest.get("episode_title_template") or episode_title_template)
 	resolved_episode_order_marker_template = str(episode_manifest.get("episode_order_marker_template") or episode_order_marker_template)
+	resolved_episode_order_marker = _resolved_episode_order_marker(episode_manifest, episode_index, resolved_episode_order_marker_template)
 	cover_title_text = manifest_cover_title or _build_full_title(identity_label, title_core)
 	video_title = cover_title_text
 	if episode_index is not None:
@@ -346,13 +409,14 @@ def build_title_cover(
 		"source_title_reference_policy": "original_youtube_title_is_reference_not_boundary",
 		"source_identity_label": identity_label,
 		"source_identity_basis": identity_basis,
+		"identity_label_policy": identity_label_policy,
 		"translated_title_core": title_core,
 		"title_text": render_title,
 		"video_title_text": video_title,
 		"series_episode": episode_index is not None,
 		"episode_index": episode_index,
 		"episode_label": _chinese_episode_label(episode_index) if episode_index is not None else None,
-		"episode_order_marker": episode_manifest.get("episode_order_marker") or (_episode_order_marker(episode_index, resolved_episode_order_marker_template) if episode_index is not None else None),
+		"episode_order_marker": resolved_episode_order_marker,
 		"episode_title_template": resolved_episode_title_template if episode_index is not None else None,
 		"episode_order_marker_template": resolved_episode_order_marker_template if episode_index is not None else None,
 		"cover_title_omits_episode_index": episode_index is not None and not cover_include_episode_index,
@@ -376,6 +440,7 @@ def build_title_cover(
 			"requires_specific_eye": True,
 			"allowed_hook_types": ["sharp_claim", "conflict_question", "consequence", "counterintuitive_quote"],
 			"rejects_generic_background_titles": True,
+			"identity_label_policy": identity_label_policy,
 		},
 	}
 	_write_json(title_json, cover_title)
@@ -433,12 +498,13 @@ def build_title_cover(
 		"source_title": source_title,
 		"source_identity_label": identity_label,
 		"source_identity_basis": identity_basis,
+		"identity_label_policy": identity_label_policy,
 		"translated_title_core": title_core,
 		"translated_title": video_title,
 		"cover_title_text": render_title,
 		"series_episode": episode_index is not None,
 		"episode_index": episode_index,
-		"episode_order_marker": episode_manifest.get("episode_order_marker") or (_episode_order_marker(episode_index, resolved_episode_order_marker_template) if episode_index is not None else None),
+		"episode_order_marker": resolved_episode_order_marker,
 		"episode_title_template": resolved_episode_title_template if episode_index is not None else None,
 		"episode_order_marker_template": resolved_episode_order_marker_template if episode_index is not None else None,
 		"cover_title_omits_episode_index": episode_index is not None and not cover_include_episode_index,
@@ -464,6 +530,7 @@ def build_title_cover(
 		f"- source_title: {source_title}",
 		f"- source_identity_label: {identity_label}",
 		f"- source_identity_basis: {identity_basis or ''}",
+		f"- identity_label_policy: {identity_label_policy['type']}",
 		f"- translated_title_core: {title_core}",
 		f"- translated_title: {video_title}",
 		f"- cover_title_text: {render_title}",

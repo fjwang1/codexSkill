@@ -124,7 +124,38 @@ ffmpeg -hide_banner -i <registered.wav> -af volumedetect -f null - 2>&1 | tail -
 ffmpeg -hide_banner -i <registered.wav> -af silencedetect=noise=-45dB:d=1 -f null - 2>&1 | rg 'silence_(start|end)' || true
 ```
 
-Before a long run, generate a 1-2 chunk VibeVoice audition and ask the user to evaluate timbre/language naturalness.
+Before any long/full 05 VibeVoice run, generate a 1-2 chunk VibeVoice preflight audition and require it to pass the raw-level gate. Do not wait until all chunks are generated before discovering that a voice prompt causes low-level VibeVoice output.
+
+Standard preflight command for Worldview China podcast runs:
+
+```bash
+python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/run_vibevoice_preflight_audition.py \
+  --run-dir <run_dir> \
+  --chunk-count 2 \
+  --voice-prompt-policy qwen_chinese_required \
+  --voice-context-policy locked_multi_speaker_roster \
+  --min-source-max-volume -10.0 \
+  --device mps \
+  --no-progress-bar \
+  --force
+```
+
+Series episode mode must run this inside each `episode_XXX` run directory before that episode's full 05 generation. Passing conditions:
+
+```text
+05-vibevoice-preflight-audition/preflight_audition_result.json exists
+status == PASS
+all rows[].max_volume_dbfs >= -10.0
+voice_prompt_manifest_sha256 matches the current 02c voice_prompt_manifest.json
+script_sha256 matches the current podcast_script.md
+```
+
+If preflight fails, fix 02b/02c before full generation:
+
+- Re-check whether the selected 02b clip's `reference_text` overlaps sponsor, subscribe, Spotify, URL, membership, or rolling-caption text; choose another clean clip for the same frozen speaker if needed.
+- Rewrite `target_text` to a short, topic-matched Chinese prompt instead of a generic template.
+- Regenerate 02c and rerun preflight.
+- If the cause is still unclear, run a 2x2 text/voice crosscheck with a known-good script and voice set. If known-good script + current voice fails while current script + known-good voice passes, the current 02c voice prompt is the cause; do not rewrite the podcast script.
 
 ## Downstream Integration
 

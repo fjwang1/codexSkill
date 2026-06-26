@@ -1,0 +1,155 @@
+{
+  "schema_version": "worldview-china-bilibili-risk-registry.v1",
+  "updated_at": "2026-06-26",
+  "review_contract": {
+    "version": "2026-06-26",
+    "purpose": "Keep Worldview China Bilibili-facing text review organized around risk chains, not an ever-growing prompt appendix.",
+    "publishable_scopes": [
+      "03-source-translation active Chinese text",
+      "03b-mainland-publish-safety safe text and edit decisions",
+      "04-podcast-script podcast_script.md and script_turns.json",
+      "video_title.txt",
+      "cover/cover_title.json",
+      "audio/audio_manifest.json turn text and tts_text",
+      "07/video subtitle manifests and final_subtitles.srt/ass",
+      "bilibili_upload_metadata.json",
+      "publish_info.txt"
+    ],
+    "review_method": [
+      "Run deterministic pattern rules for high-recall known violations.",
+      "Run an independent semantic review focused on complete context chains rather than isolated keywords.",
+      "When platform rejection lessons exist, use the rejected timepoints, policy categories, issue excerpts, and repair guidance as additional risk rules for the current run.",
+      "Do not scan lesson files themselves as publishable text; they are evidence and review context.",
+      "A PASS must record reviewed_file_hashes for all reviewed publishable files, so final QA can reject stale reviews after video or subtitle repair."
+    ],
+    "default_repair_policy": [
+      "Prefer upstream text repair before TTS/video generation.",
+      "For already rendered videos, media-level delete and timeline shift is allowed only when the risky chain is clear, contiguous, and fully removed from video, audio, subtitles, subtitle manifest, title/cover/metadata, and reports.",
+      "Do not rely on one-word substitution for platform-returned risk chains."
+    ]
+  },
+  "rule_groups": [
+    {
+      "category": "state_and_territory_terms",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "wrong_chinese_mainland_english_term",
+        "wrong_nanjing_memorial_name",
+        "wrong_xinjiang_autonomous_region_name",
+        "taiwan_hongkong_abbreviation",
+        "taiwan_named_as_country"
+      ],
+      "semantic_fail_condition": "Chinese mainland, Chinese Hong Kong/Taiwan, memorial names, autonomous-region names, or Taiwan-country grouping are not normalized in Bilibili-facing text.",
+      "repair_action": "Normalize terminology at source text, script, subtitles, title, cover, and metadata; do not postpone to upload metadata only."
+    },
+    {
+      "category": "chinese_leader_names_and_political_personalization",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "forbidden_chinese_contemporary_leader_name_zh",
+        "forbidden_chinese_contemporary_leader_name_en",
+        "sensitive_chinese_leader_name_needs_rewrite"
+      ],
+      "semantic_fail_condition": "Bilibili-facing text names current Chinese national leaders, or unnecessarily personalizes sensitive PRC policy criticism around named leaders.",
+      "repair_action": "Use natural generic phrasing such as Chinese leadership, Chinese side, or China-US leaders meeting; verify subtitles and audio_manifest after repair."
+    },
+    {
+      "category": "xinjiang_ethnic_religious_and_geopolitical_chain",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "high_risk_xinjiang_religion_accusation",
+        "bilibili_rejected_xinjiang_geopolitical_dispute_chain",
+        "bilibili_rejected_sensitive_geopolitical_examples",
+        "bilibili_rejected_surveillance_religion_extremism_chain"
+      ],
+      "semantic_fail_condition": "A continuous chain links Xinjiang, ethnic or religious identity, Western/UN pressure, Middle East states, Turkey, post-9/11 narratives, dissident awards, THAAD, Khashoggi, surveillance, policing, extremism, or state-oppression accusations.",
+      "repair_action": "Remove the whole risk chain or bridge back to low-risk social/economic analysis. Do not keep the chain by replacing only individual names."
+    },
+    {
+      "category": "china_middle_east_security_role_chain",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "bilibili_rejected_china_mideast_security_role_chain"
+      ],
+      "semantic_fail_condition": "A continuous discussion frames China as stamping Middle East agreements, challenges China's peace-through-development narrative, questions China's willingness or ability to handle urgent regional security issues, says China's leadership or diplomatic system lacks mediation experience, emphasizes US counter-influence, or discusses overseas bases/security ambitions as a geopolitical dispute chain.",
+      "repair_action": "Treat as a full high-risk geopolitical Q&A chain. Cut or bridge the full context before TTS/subtitles/upload; never patch only a single sentence."
+    },
+    {
+      "category": "online_religious_information_service",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "online_religious_proselytizing_or_conversion",
+        "online_religious_truth_or_mental_relief_claim",
+        "online_religious_doctrine_or_teaching_promotion",
+        "online_religious_commercial_promotion"
+      ],
+      "semantic_fail_condition": "The text presents religious outreach, conversion, doctrine, courses, ritual instruction, religion as truth/superiority, religion as a mental-health or spiritual-crisis remedy, or religious commercial promotion.",
+      "repair_action": "Keep only neutral culture, population, migration, food, history, or community observations; otherwise cut and bridge."
+    },
+    {
+      "category": "ideological_or_upload_safety_phrases",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "high_risk_ideological_confrontation",
+        "high_risk_private_recording_or_no_upload_phrase"
+      ],
+      "semantic_fail_condition": "The text amplifies ideological confrontation or repeats source-speaker private-recording/do-not-upload language that makes publication safety itself explicit.",
+      "repair_action": "Rewrite as neutral context or remove the unsafe phrase; do not preserve the publication-warning wording in subtitles or audio."
+    },
+    {
+      "category": "title_cover_metadata_amplification",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "polarizing_bilibili_title_or_metadata",
+        "bilibili_description_production_note"
+      ],
+      "semantic_fail_condition": "Title, cover, tags, or description turns sensitive religion/ethnicity/geopolitics into a click hook, or describes production mechanics instead of episode content.",
+      "repair_action": "Use a content summary and lower-risk episode hook. Do not mention Chinese dubbing, retained source video, or replacement audio in the Bilibili description."
+    },
+    {
+      "category": "tts_and_display_number_safety",
+      "severity": "fail",
+      "deterministic_rule_ids": [
+        "chinese_display_comma_thousands_number"
+      ],
+      "semantic_fail_condition": "Chinese publishable text contains comma-separated thousands numbers that can destabilize TTS or look unnatural in subtitles.",
+      "repair_action": "Use natural Chinese display forms such as 30万 or 3000, while avoiding blanket conversion of ordinary small numbers."
+    }
+  ],
+  "platform_rejection_cases": [
+    {
+      "case_id": "bilibili-2026-06-26-religion-terrorism-xinjiang-chain",
+      "source": "Worldview China Podcast first episode platform rejection",
+      "reported_timepoints": [
+        "00:32:26-00:32:38"
+      ],
+      "expanded_context": [
+        "00:31:13-00:33:37"
+      ],
+      "platform_policy_categories": [
+        "国家宗教政策",
+        "宗教极端主义",
+        "恐怖主义"
+      ],
+      "risk_chain_summary": "Xinjiang, Middle East countries' positions, Liu Xiaobo, THAAD, post-9/11 media narratives, Khashoggi, Sunni Muslim world leadership, Uyghurs and Turkey formed one sensitive ethnic-religious geopolitical chain.",
+      "repair_rule": "Future similar chains must be fully removed or bridged before TTS/subtitles/upload; do not keep the chain with local keyword substitutions."
+    },
+    {
+      "case_id": "bilibili-2026-06-26-community-law-china-middle-east-security-role-chain",
+      "source": "Worldview China Podcast first episode second platform rejection",
+      "reported_timepoints": [
+        "P1 00:15:19-00:15:45",
+        "P1 00:19:11-00:19:37"
+      ],
+      "expanded_context": [
+        "China's mediator/security-role discussion across the Saudi-Iran deal, peace-through-development framing, urgent regional security issues, local trust in Chinese capability, US counter-influence, and overseas-base ambition."
+      ],
+      "platform_policy_categories": [
+        "法律法规",
+        "社区公约"
+      ],
+      "risk_chain_summary": "The issue was a continuous geopolitical argument chain about China's Middle East security role, not isolated words.",
+      "repair_rule": "Cut or bridge the whole discussion chain. Final QA must reject stale reviews after repair and series QA must require a post-submission audit monitor terminal state."
+    }
+  ]
+}

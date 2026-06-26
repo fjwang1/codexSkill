@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bilibili Audit Monitor"
+  short_description: "Check Bilibili audit status after submit."
+  default_prompt: "Use $worldview-china-bilibili-audit-monitor to check this Worldview China Bilibili submission audit status."

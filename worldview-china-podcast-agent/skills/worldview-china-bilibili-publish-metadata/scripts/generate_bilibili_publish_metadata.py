@@ -264,13 +264,28 @@ def _build_description(run_dir: Path, title: str, source_metadata: dict[str, Any
 def _load_existing_schedule(path: Path, episode_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
 	existing = _read_json_optional(path)
 	episode_manifest = episode_manifest or {}
-	return {
+	result = {
 		"scheduled_publish_at": existing.get("scheduled_publish_at") or episode_manifest.get("scheduled_publish_at"),
 		"scheduled_publish_timezone": existing.get("scheduled_publish_timezone") or episode_manifest.get("scheduled_publish_timezone") or "Asia/Shanghai",
 		"schedule_source": existing.get("schedule_source") or episode_manifest.get("schedule_source"),
 		"series_episode_index": existing.get("series_episode_index") or episode_manifest.get("episode_index"),
 		"series_episode_count": existing.get("series_episode_count") or episode_manifest.get("episode_count"),
 	}
+	for key in (
+		"series_schedule_policy",
+		"series_schedule_slots",
+		"series_schedule_base_date",
+		"series_schedule_slot_index",
+		"series_schedule_slot_time",
+		"series_schedule_slot_episode_count",
+		"series_schedule_position_in_slot",
+	):
+		value = existing.get(key)
+		if value is None:
+			value = episode_manifest.get(key)
+		if value is not None:
+			result[key] = value
+	return result
 
 
 def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:

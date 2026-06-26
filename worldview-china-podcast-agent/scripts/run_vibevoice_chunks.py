@@ -25,6 +25,7 @@ HARD_MAX_CHARS = 420
 DEFAULT_SPLIT_LONG_TURN_MAX_CHARS = 160
 MIN_SPEAKER_TURNS_PER_CHUNK = 0
 INTER_CHUNK_PAUSE_SEC = 0.5
+DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME = -10.0
 DROP_TINY_TTS_TURNS = {
 	"啊",
 	"呃",
@@ -389,6 +390,60 @@ def _speaker_voices_from_manifest(manifest_path: Path) -> dict[str, str] | None:
 	return result
 
 
+def _load_speaker_roster(run_dir: Path) -> dict[str, Any]:
+	path = run_dir / "02a-speaker-census" / "speaker_roster.json"
+	if not path.exists():
+		return {}
+	try:
+		roster = _read_json(path)
+	except json.JSONDecodeError:
+		return {}
+	return roster if isinstance(roster, dict) else {}
+
+
+def _speaker_display_label(speaker: str, roster_info: dict[str, Any]) -> str:
+	identity = str(roster_info.get("identity") or "").strip()
+	if identity:
+		return identity
+	description = str(roster_info.get("description") or "").strip()
+	if description:
+		label = re.split(r"[;；。]", description, maxsplit=1)[0].strip()
+		label = re.sub(r"\s+", " ", label)
+		if label:
+			return label
+	role = str(roster_info.get("role") or "").strip()
+	return role or f"说话人{_speaker_index(speaker)}"
+
+
+def _build_speaker_map(run_dir: Path, speaker_voices: dict[str, str]) -> dict[str, dict[str, Any]]:
+	roster = _load_speaker_roster(run_dir)
+	roster_speakers = roster.get("speakers") if isinstance(roster.get("speakers"), dict) else {}
+	speaker_map: dict[str, dict[str, Any]] = {}
+	for speaker in _sorted_speakers(speaker_voices.keys()):
+		roster_info = roster_speakers.get(speaker) if isinstance(roster_speakers, dict) else {}
+		if not isinstance(roster_info, dict):
+			roster_info = {}
+		speaker_map[speaker] = {
+			"display_role": _speaker_display_label(speaker, roster_info),
+			"style": "保持 02a 冻结源视频说话人的身份、音色和语气，不使用 article 默认主持/分析者角色。",
+			"vibevoice_name": speaker_voices[speaker],
+			"source_roster_role": roster_info.get("role"),
+			"source_roster_identity": roster_info.get("identity"),
+			"source_roster_description": roster_info.get("description"),
+			"voice_slot": roster_info.get("voice_slot", f"voice{_speaker_index(speaker)}"),
+		}
+	return speaker_map
+
+
+def _write_chunk_speaker_map(chunk_dir: Path, run_dir: Path, speaker_map: dict[str, dict[str, Any]]) -> None:
+	_write_json(chunk_dir / "speaker_map.json", {
+		"schema_version": "worldview-china-vibevoice-speaker-map.v1",
+		"source": "02a-speaker-census/speaker_roster.json",
+		"source_run_dir": str(run_dir),
+		"speaker_map": speaker_map,
+	})
+
+
 def _load_speaker_voices(run_dir: Path, voice_prompt_policy: str) -> tuple[dict[str, str], str | None]:
 	assert voice_prompt_policy in VOICE_PROMPT_POLICIES
 	qwen_manifest_path = run_dir / "02c-qwen-vibevoice-prompts" / "voice_prompt_manifest.json"
@@ -419,6 +474,7 @@ def _annotate_chunk_audio_manifest(
 	voice_context_policy: str,
 	generation_runner: str,
 	voice_prompt_manifest: str | None,
+	speaker_map: dict[str, dict[str, Any]] | None = None,
 ) -> None:
 	manifest_path = audio_dir / "audio_manifest.json"
 	if not manifest_path.exists():
@@ -430,9 +486,11 @@ def _annotate_chunk_audio_manifest(
 	manifest["vibevoice_runner"] = generation_runner
 	manifest["voice_prompt_manifest"] = voice_prompt_manifest
 	manifest["voice_lineage_policy"] = "locked_roster" if _is_locked_roster_policy(voice_context_policy) else "non_locked_debug"
-	speaker_map = manifest.get("speaker_map")
-	if isinstance(speaker_map, dict):
-		for speaker, info in speaker_map.items():
+	if speaker_map is not None:
+		manifest["speaker_map"] = speaker_map
+	existing_map = manifest.get("speaker_map")
+	if isinstance(existing_map, dict):
+		for speaker, info in existing_map.items():
 			if isinstance(info, dict):
 				info.pop("default_vibevoice_name", None)
 				if speaker in speaker_voices:
@@ -693,7 +751,12 @@ def run_chunks(
 	python_for_post = RUNTIME_PYTHON if RUNTIME_PYTHON.exists() else Path("python3")
 	script_path = run_dir / "04-podcast-script" / "podcast_script.md"
 	speaker_voices, voice_prompt_manifest = _load_speaker_voices(run_dir, voice_prompt_policy)
+	speaker_map = _build_speaker_map(run_dir, speaker_voices)
 	source_turns = _parse_turns(script_path)
+	for turn in source_turns:
+		info = speaker_map.get(str(turn["speaker"]))
+		if info and info.get("display_role"):
+			turn["display_role"] = str(info["display_role"])
 	tts_safety_normalized_turns = [
 		turn
 		for turn in source_turns
@@ -778,6 +841,7 @@ def run_chunks(
 		"voice_prompt_manifest": voice_prompt_manifest,
 		"voice_prompt_policy": voice_prompt_policy,
 		"voice_context_policy": voice_context_policy,
+		"speaker_map": speaker_map,
 		"vibevoice_runner": generation_runner,
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
@@ -801,6 +865,7 @@ def run_chunks(
 		chunk_dir.mkdir(parents=True, exist_ok=True)
 		audio_dir.mkdir(parents=True, exist_ok=True)
 		_write_chunk_script(chunk_dir / "podcast_script.md", chunk_turns)
+		_write_chunk_speaker_map(chunk_dir, run_dir, speaker_map)
 		state = _chunk_generation_state(final_wav, raw_wav, force, chunk_id in force_chunk_ids)
 		context = {
 			"chunk_id": chunk_id,
@@ -914,6 +979,7 @@ def run_chunks(
 				voice_context_policy,
 				generation_runner,
 				voice_prompt_manifest,
+				speaker_map,
 			)
 			continue
 		chunk_dir = context["chunk_dir"]
@@ -937,6 +1003,7 @@ def run_chunks(
 			voice_context_policy,
 			generation_runner,
 			voice_prompt_manifest,
+			speaker_map,
 		)
 
 	chunk_results: list[dict[str, Any]] = []
@@ -960,6 +1027,7 @@ def run_chunks(
 			"vibevoice_mode": vibevoice_mode,
 			"speaker_names": speaker_names,
 			"voice_context_policy": voice_context_policy,
+			"speaker_map": speaker_map,
 			"vibevoice_runner": generation_runner,
 			"audio": str(final_wav),
 			"duration_sec": round(_duration(final_wav), 3),
@@ -1013,6 +1081,7 @@ def run_chunks(
 		"voice_prompt_manifest": voice_prompt_manifest,
 		"voice_prompt_policy": voice_prompt_policy,
 		"voice_context_policy": voice_context_policy,
+		"speaker_map": speaker_map,
 		"vibevoice_runner": generation_runner,
 		"vibevoice_device": device,
 		"vibevoice_torch_dtype": torch_dtype,
@@ -1109,7 +1178,7 @@ def main() -> int:
 	parser.add_argument("--split-all-chunks", action="store_true")
 	parser.add_argument("--split-long-turn-max-chars", type=int, default=DEFAULT_SPLIT_LONG_TURN_MAX_CHARS)
 	parser.add_argument("--fixed-chunk-plan-json", type=Path)
-	parser.add_argument("--postprocess-min-source-max-volume", type=float, default=-8.0)
+	parser.add_argument("--postprocess-min-source-max-volume", type=float, default=DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME)
 	parser.add_argument("--generation-runner", choices=sorted(GENERATION_RUNNERS), default="resident_batch")
 	parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=DEFAULT_VIBEVOICE_DEVICE, help="Default is mps. Use cpu only as an explicit fallback.")
 	parser.add_argument("--torch-dtype", choices=("auto", "float32", "float16", "bfloat16"), default=DEFAULT_VIBEVOICE_TORCH_DTYPE, help="Default auto resolves to float16 on mps and float32 on cpu in the resident runner.")

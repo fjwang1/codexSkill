@@ -14,6 +14,7 @@ from typing import Any
 
 
 PUNCT_RE = re.compile(r"[\s,，。.!！?？;；:：、'\"“”‘’（）()《》<>\\[\\]{}—…·-]+")
+SUBTITLE_MAX_NORM_CHARS = 30
 
 
 def _sha256(path: Path) -> str:
@@ -183,49 +184,64 @@ def _turn_ranges(script_items: list[dict[str, Any]]) -> dict[int, tuple[int, int
 	return {turn_index: (min(indexes), max(indexes) + 1) for turn_index, indexes in ranges.items()}
 
 
-def _split_text_for_cues(text: str, max_chars: int = 22) -> list[str]:
-	parts = [part.strip() for part in re.split(r"([。！？；，])", text) if part.strip()]
-	phrases: list[str] = []
-	current = ""
-	for part in parts:
-		if part in "。！？；，":
-			current += part
-			continue
-		if current and len(_norm(current + part)) > max_chars:
-			phrases.append(current.strip())
-			current = part
+def _append_punct_units(text: str, terminal_marks: str) -> list[str]:
+	units: list[str] = []
+	buffer = ""
+	for char in text:
+		buffer += char
+		if char in terminal_marks:
+			cleaned = buffer.strip()
+			if cleaned:
+				units.append(cleaned)
+			buffer = ""
+	if buffer.strip():
+		units.append(buffer.strip())
+	return units
+
+
+def _clean_subtitle_unit(text: str) -> str:
+	return re.sub(r"\s+", " ", text).strip()
+
+
+def _split_overlong_sentence(sentence: str, max_chars: int) -> list[str]:
+	clauses = _append_punct_units(sentence, "，,；;：:、")
+	assert len(clauses) > 1, (
+		"Subtitle sentence is too long and has no semantic punctuation boundary; "
+		"rewrite upstream instead of hard-splitting a phrase: "
+		f"{sentence!r}"
+	)
+	units: list[str] = []
+	buffer = ""
+	for clause in clauses:
+		clause = _clean_subtitle_unit(clause)
+		assert len(_norm(clause)) <= max_chars, (
+			"Subtitle semantic clause is too long; rewrite upstream instead of hard-splitting a phrase: "
+			f"{clause!r}"
+		)
+		candidate = buffer + clause if not buffer else buffer + clause
+		if buffer and len(_norm(candidate)) > max_chars:
+			units.append(buffer.strip())
+			buffer = clause
 		else:
-			current += part
-	if current.strip():
-		phrases.append(current.strip())
+			buffer = candidate
+	if buffer.strip():
+		units.append(buffer.strip())
+	return units
+
+
+def _split_text_for_cues(text: str, max_chars: int = SUBTITLE_MAX_NORM_CHARS) -> list[str]:
+	sentences = _append_punct_units(text, "。！？!?；;")
 	chunks: list[str] = []
-	for phrase in phrases:
-		plain_len = len(_norm(phrase))
-		if plain_len <= max_chars:
-			chunks.append(phrase)
+	for sentence in sentences:
+		sentence = _clean_subtitle_unit(sentence)
+		if not _norm(sentence):
 			continue
-		buffer = ""
-		for char in phrase:
-			buffer += char
-			if len(_norm(buffer)) >= max_chars:
-				chunks.append(buffer.strip())
-				buffer = ""
-		if buffer.strip():
-			chunks.append(buffer.strip())
-	merged: list[str] = []
-	for chunk in chunks:
-		if not _norm(chunk):
-			if merged:
-				merged[-1] += chunk
-			continue
-		merged.append(chunk)
-	balanced: list[str] = []
-	for chunk in merged:
-		if balanced and len(_norm(chunk)) < 4:
-			balanced[-1] += chunk
-			continue
-		balanced.append(chunk)
-	return balanced
+		if len(_norm(sentence)) <= max_chars:
+			chunks.append(sentence)
+		else:
+			chunks.extend(_split_overlong_sentence(sentence, max_chars))
+	assert chunks, f"No subtitle cue chunks produced from turn text: {text!r}"
+	return chunks
 
 
 def _cue_ranges_for_turn(turn_start: int, turn_end: int, text: str, chunks: list[str]) -> list[tuple[str, int, int]]:
@@ -245,24 +261,6 @@ def _cue_ranges_for_turn(turn_start: int, turn_end: int, text: str, chunks: list
 		ranges.append((chunk, cursor, end))
 		cursor = end
 	return ranges
-
-
-def _cue_times_for_turn(turn_start_sec: float, turn_end_sec: float, chunks: list[str]) -> list[tuple[float, float]]:
-	duration = max(0.05, turn_end_sec - turn_start_sec)
-	weights = [max(1, len(_norm(chunk))) for chunk in chunks]
-	total_weight = max(1, sum(weights))
-	times: list[tuple[float, float]] = []
-	cursor = turn_start_sec
-	cumulative = 0
-	for index, weight in enumerate(weights):
-		if index == len(weights) - 1:
-			end = turn_end_sec
-		else:
-			cumulative += weight
-			end = turn_start_sec + duration * cumulative / total_weight
-		times.append((cursor, max(cursor + 0.05, end)))
-		cursor = end
-	return times
 
 
 def _bounded_span(start: float, end: float, duration: float, minimum: float) -> tuple[float, float]:
@@ -320,15 +318,14 @@ def build_timeline(project_dir: Path, asr_json: Path, output: Path) -> dict[str,
 			"asr_matched_char_ratio": round(confidence_ratio, 3),
 		})
 		chunks = _split_text_for_cues(str(turn["text"]))
-		# ASR word/character timestamps are useful for turn-level anchors, but generated
-		# Chinese TTS often contains homophone substitutions or ASR compression near
-		# the tail of a long turn. Use proportional cue timing inside each ASR-anchored
-		# turn so subtitles remain readable and monotonic even when a few words are
-		# misrecognized.
-		cue_time_spans = _cue_times_for_turn(start, end, chunks)
-		for chunk, (cue_start, cue_end) in zip(chunks, cue_time_spans, strict=True):
-			cue_start = max(0.0, min(duration, cue_start))
-			cue_end = min(duration, max(cue_start + 0.05, cue_end))
+		cue_char_ranges = _cue_ranges_for_turn(start_idx, end_idx, str(turn["text"]), chunks)
+		for chunk, cue_start_idx, cue_end_idx in cue_char_ranges:
+			cue_char_times = times[cue_start_idx:cue_end_idx]
+			cue_asr_count = sum(1 for item in cue_char_times if item[2] == "asr")
+			cue_confidence_ratio = cue_asr_count / max(1, len(cue_char_times))
+			cue_confidence = "high" if cue_confidence_ratio >= 0.6 else "medium" if cue_confidence_ratio >= 0.3 else "low"
+			cue_start = max(0.0, min(item[0] for item in cue_char_times))
+			cue_end = min(duration, max(item[1] for item in cue_char_times))
 			cue_start, cue_end = _bounded_span(cue_start, cue_end, duration, 0.4)
 			cues.append({
 				"cue_index": cue_index,
@@ -339,7 +336,9 @@ def build_timeline(project_dir: Path, asr_json: Path, output: Path) -> dict[str,
 				"text": chunk,
 				"start_sec": round(cue_start, 3),
 				"end_sec": round(cue_end, 3),
-				"alignment_confidence": confidence,
+				"alignment_confidence": cue_confidence,
+				"asr_matched_char_ratio": round(cue_confidence_ratio, 3),
+				"timing_source": "asr_character_span" if cue_asr_count else "interpolated_character_span",
 			})
 			cue_index += 1
 
@@ -355,6 +354,11 @@ def build_timeline(project_dir: Path, asr_json: Path, output: Path) -> dict[str,
 		"speaker_map": manifest.get("speaker_map") or {},
 		"alignment_text_source": "audio_manifest.turns.tts_text" if any(turn.get("tts_text") for turn in turns_manifest) else "audio_manifest.turns.text",
 		"display_text_source": "audio_manifest.turns.text",
+		"subtitle_cue_policy": {
+			"cue_text_policy": "complete_sentence_or_semantic_clause_no_hard_width_split",
+			"cue_timing_policy": "asr_character_span",
+			"max_norm_chars_per_cue": SUBTITLE_MAX_NORM_CHARS,
+		},
 		"asr_summary": {
 			"asr_text_chars": len(asr_text),
 			"script_text_chars": len(script_text),

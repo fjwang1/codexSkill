@@ -14,7 +14,7 @@ Before rendering or publishing, read `references/wechat-article-style-spec.md`. 
 Prefer an article directory with this shape:
 
 ```text
-wechat/article.md
+wechat/reviewed_article.md
 wechat/article_metadata.json
 cover/main_cover.png
 ```
@@ -29,7 +29,20 @@ wechat_bundle/wechat_bundle_manifest.json
 
 The manifest may include `articles[]` with explicit paths, or `main_article_id` plus `attached_article_ids`; the script resolves standard `articles/A1_*` directories from the run root.
 
-Credentials may come from environment variables:
+Multi-article model:
+
+- A WeChat multi-article draft is represented by one `articles[]` array.
+- The first array item is the main article. It appears as the large top card in WeChat.
+- Every later array item is an attached/sub article. It appears below the main card.
+- For the daily China bundle workflow, the selection skill's highest-scoring article must be placed first as the main article, and the remaining selected articles must follow in descending score order.
+
+Cover upload policy:
+
+- For WeChat API `draft/add`, every article's `thumb_media_id` must be created from a valid `2.35:1` cover image, including attached/sub articles.
+- Prefer `wechat_upload_cover_path`, then `cover_path`, for all articles.
+- Do not use a local square crop such as `thumb_square_500x500.png` as the API cover upload unless no valid 2.35:1 cover exists and the caller explicitly accepts the risk. The square crop is mainly for local preview/archive surfaces.
+
+Credentials may come from environment variables or the skill-local `.env` file:
 
 ```text
 WECHAT_APP_ID
@@ -42,10 +55,12 @@ or:
 WECHAT_ACCESS_TOKEN
 ```
 
+The script loads `<SKILL_DIR>/.env` automatically before reading environment defaults.
+
 The WeChat article author field is always hard-coded as:
 
 ```text
-译见中国
+他山译读
 ```
 
 Do not ask the user for an author name and do not use source publication names as the WeChat author.
@@ -76,11 +91,14 @@ Do not ask the user for an author name and do not use source publication names a
 
 ## What The Script Does
 
-- Extract title, source URL, publication, and cover paths from `wechat/article_metadata.json` when present.
+- Extract title, source publication, and cover paths from `wechat/article_metadata.json` when present.
+- For `--article-dir`, publish `wechat/reviewed_article.md`; do not silently fall back to `wechat/article.md`. If a caller wants a raw Markdown file, it must pass `--article-md` explicitly.
+- Do not prefix WeChat-facing titles with source publication names. Use the metadata `title` or Markdown H1 exactly after Markdown cleanup and 32-character truncation. Source publication metadata is kept for audit/reporting only.
+- Leave WeChat `content_source_url` empty by default. Do not populate the "原文链接/阅读原文" field from `original_url` or `source_url`; only set it when the user explicitly requests a 阅读原文 URL via `--content-source-url`.
 - Support one article or a multi-article WeChat bundle.
 - Prefer reviewed article paths when the caller's bundle manifest points to `wechat/reviewed_article.md`.
 - Convert Markdown to conservative WeChat-friendly inline-style HTML using `references/wechat-article-style-spec.md`.
-- Set the WeChat author field to `译见中国`.
+- Set the WeChat author field to `他山译读`.
 - Discover the current public IP and record it in the report for IP allowlist checks.
 - Strip the first `# title` from the body by default because WeChat has a separate title field.
 - Upload local inline Markdown images through `cgi-bin/media/uploadimg` and replace their URLs.
@@ -146,7 +164,8 @@ The report JSON uses:
   "final_publish_clicked": false,
   "article_dir": "...",
   "title": "...",
-  "author": "译见中国",
+  "author": "他山译读",
+  "content_source_url": "",
   "style_version": "wechat-swiss-grid-v1",
   "public_ip": "...",
   "outputs": {

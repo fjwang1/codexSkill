@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from typing import Any
 OUTPUT_DIRNAME = "04c-bilibili-text-compliance"
 RESULT_NAME = "text-compliance-review-result.json"
 REPORT_NAME = "text-compliance-review-report.md"
+SKILL_DIR = Path(__file__).resolve().parents[1]
+RISK_REGISTRY_PATH = SKILL_DIR / "references/bilibili_risk_registry.json"
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,34 @@ RULES = [
 		pattern=re.compile(r"种族灭绝|压迫(?:穆斯林|维吾尔|维吾尔人|维吾尔族|乌格尔|胡族)|中国政府如何对待穆斯林|政府[^。！？\n]{0,30}秘密压迫|政府对维吾尔人所做的事情"),
 		message="Generated or publishable text contains high-risk Xinjiang / ethnic religion / government oppression accusations.",
 		suggestion="回到 03b 做发布安全删改、弱化或桥接；不要把这类表达送入 TTS、字幕、标题或投稿文案。",
+	),
+	Rule(
+		rule_id="bilibili_rejected_xinjiang_geopolitical_dispute_chain",
+		severity="fail",
+		pattern=re.compile(r"新疆维吾尔自治区[^。！？\n]{0,80}(?:美国|欧洲|设施|政策|联合国|中东国家|站出来|支持|决议)|(?:美国|欧洲|联合国|中东国家)[^。！？\n]{0,100}新疆维吾尔自治区|维吾尔人[^。！？\n]{0,80}(?:突厥人|土耳其|埃尔多安)|西方媒体[^。！？\n]{0,60}(?:他者|抹黑)|九一一后[^。！？\n]{0,40}抹黑"),
+		message="Generated or publishable text contains a Bilibili-rejected Xinjiang / ethnic-religious geopolitical dispute chain.",
+		suggestion="按 03b 做整段 cut 或中性 bridge；不要只替换单个词，也不要把该问答链条送入 TTS、字幕或投稿。",
+	),
+	Rule(
+		rule_id="bilibili_rejected_sensitive_geopolitical_examples",
+		severity="fail",
+		pattern=re.compile(r"刘晓波|诺贝尔和平奖|挪威三文鱼|部署“?萨德”?|萨德[^。！？\n]{0,40}(?:旅游业|抵制)|卡舒吉|逊尼派穆斯林世界领导权"),
+		message="Generated or publishable text contains sensitive geopolitical examples that previously caused Bilibili rejection.",
+		suggestion="回到 03b/04 做最小必要删改；已退回案例应整段移除或桥接，不得仅改字幕。",
+	),
+	Rule(
+		rule_id="bilibili_rejected_surveillance_religion_extremism_chain",
+		severity="fail",
+		pattern=re.compile(r"监控公民|识别极端组织|政治化宗教活动|追踪、观察和管控|全球安全倡议[^。！？\n]{0,80}(?:监控|警务|技术层面)|(?:新疆维吾尔自治区|西藏自治区)[^。！？\n]{0,80}(?:追踪|观察|管控)"),
+		message="Generated or publishable text contains a surveillance / religion-extremism / Xinjiang-Tibet dispute chain that should not enter Bilibili-facing outputs.",
+		suggestion="按 03b 做整段 cut 或中性 bridge；该链条不得进入 04 播客稿、TTS、字幕、标题、封面或投稿文案。",
+	),
+	Rule(
+		rule_id="bilibili_rejected_china_mideast_security_role_chain",
+		severity="fail",
+		pattern=re.compile(r"通过发展实现和平|中国进来给文件盖了章|愿意、或者有能力[^。！？\n]{0,40}紧迫地区议题|哈马斯袭击以色列|年轻女性被伊朗警方致死|中国外交系统|中国领导层[^。！？\n]{0,80}(?:雄心|倡议|经验)|缺少足够的经验|美国的影响力仍然很强|由中国作为谈判者[^。！？\n]{0,40}解决冲突"),
+		message="Generated or publishable text contains a Bilibili second-rejection China / Middle East security-role dispute chain.",
+		suggestion="按二次退回案例做整段 cut 或中性 bridge；不得把中国盖章、发展促和平叙事崩塌、外交系统能力不足、海外基地雄心和美国反制等链条送入 TTS、字幕、标题、封面或投稿。",
 	),
 	Rule(
 		rule_id="high_risk_ideological_confrontation",
@@ -153,6 +184,14 @@ RULES = [
 ]
 
 
+DERIVED_PUBLISH_SAFETY_RULE_IDS = {
+	"bilibili_rejected_xinjiang_geopolitical_dispute_chain",
+	"bilibili_rejected_sensitive_geopolitical_examples",
+	"bilibili_rejected_surveillance_religion_extremism_chain",
+	"bilibili_rejected_china_mideast_security_role_chain",
+}
+
+
 TEXT_CANDIDATES = [
 	"03-source-translation/source_transcript.zh.md",
 	"03-source-translation/source_transcript.zh.json",
@@ -215,6 +254,14 @@ def _read_text(path: Path) -> str:
 	return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _sha256(path: Path) -> str:
+	digest = hashlib.sha256()
+	with path.open("rb") as handle:
+		for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+			digest.update(chunk)
+	return digest.hexdigest()
+
+
 def _iter_publishable_json_strings(value: Any, key: str = "") -> list[str]:
 	if key in SKIP_JSON_TEXT_KEYS:
 		return []
@@ -265,9 +312,99 @@ def _iter_existing_inputs(run_dir: Path) -> list[Path]:
 	return paths
 
 
+def _load_risk_registry() -> dict[str, Any]:
+	entry: dict[str, Any] = {
+		"path": str(RISK_REGISTRY_PATH),
+		"load_status": "missing",
+		"schema_version": None,
+		"sha256": None,
+		"rule_group_count": 0,
+		"platform_rejection_case_count": 0,
+		"deterministic_rule_count": len(RULES),
+		"deterministic_rule_ids_missing_from_registry": [],
+	}
+	if not RISK_REGISTRY_PATH.exists():
+		return entry
+	try:
+		payload = json.loads(RISK_REGISTRY_PATH.read_text(encoding="utf-8"))
+	except Exception as exc:
+		entry["load_status"] = "error"
+		entry["error"] = str(exc)
+		return entry
+	rule_groups = payload.get("rule_groups") if isinstance(payload, dict) else []
+	platform_rejection_cases = payload.get("platform_rejection_cases") if isinstance(payload, dict) else []
+	registry_rule_ids: set[str] = set()
+	if isinstance(rule_groups, list):
+		for group in rule_groups:
+			if not isinstance(group, dict):
+				continue
+			for rule_id in group.get("deterministic_rule_ids") or []:
+				registry_rule_ids.add(str(rule_id))
+	deterministic_rule_ids = {rule.rule_id for rule in RULES}
+	entry.update({
+		"load_status": "loaded",
+		"schema_version": payload.get("schema_version") if isinstance(payload, dict) else None,
+		"sha256": _sha256(RISK_REGISTRY_PATH),
+		"rule_group_count": len(rule_groups) if isinstance(rule_groups, list) else 0,
+		"platform_rejection_case_count": len(platform_rejection_cases) if isinstance(platform_rejection_cases, list) else 0,
+		"review_contract_version": (payload.get("review_contract") or {}).get("version") if isinstance(payload, dict) else None,
+		"deterministic_rule_ids_missing_from_registry": sorted(deterministic_rule_ids - registry_rule_ids),
+	})
+	return entry
+
+
+def _reviewed_file_hashes(paths: list[Path]) -> dict[str, str]:
+	hashes: dict[str, str] = {}
+	for path in paths:
+		hashes[str(path.resolve())] = _sha256(path)
+	return hashes
+
+
+def _load_platform_rejection_lessons(run_dir: Path) -> dict[str, Any]:
+	lesson_paths = [
+		run_dir / "04c-bilibili-text-compliance/platform_rejection_lessons.json",
+		run_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json",
+	]
+	loaded: list[dict[str, Any]] = []
+	for path in lesson_paths:
+		if not path.exists() or not path.is_file():
+			continue
+		entry: dict[str, Any] = {
+			"path": str(path),
+			"mtime": path.stat().st_mtime,
+			"sha256": _sha256(path),
+			"entry_count": None,
+			"load_status": "loaded",
+		}
+		try:
+			payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+			if isinstance(payload, list):
+				entry["entry_count"] = len(payload)
+			elif isinstance(payload, dict):
+				lessons = payload.get("lessons")
+				entry["entry_count"] = len(lessons) if isinstance(lessons, list) else 1
+				entry["status"] = payload.get("status")
+				entry["bvid"] = payload.get("bvid")
+			else:
+				entry["entry_count"] = 1
+		except Exception as exc:
+			entry["load_status"] = "error"
+			entry["error"] = str(exc)
+		loaded.append(entry)
+	return {
+		"present": bool(loaded),
+		"note": "Lesson files are risk context only and are not scanned as publishable text.",
+		"files": loaded,
+	}
+
+
 def _find_rule_hits(path: Path, text: str) -> list[dict[str, Any]]:
 	findings: list[dict[str, Any]] = []
+	source_translation_path = "03-source-translation" in path.parts
+	safe_translation_exists = source_translation_path and (path.parent.parent / "03b-mainland-publish-safety/source_transcript.zh.safe.json").exists()
 	for rule in RULES:
+		if safe_translation_exists and rule.rule_id in DERIVED_PUBLISH_SAFETY_RULE_IDS:
+			continue
 		for match in rule.pattern.finditer(text):
 			findings.append({
 				"rule_id": rule.rule_id,
@@ -279,6 +416,34 @@ def _find_rule_hits(path: Path, text: str) -> list[dict[str, Any]]:
 				"message": rule.message,
 				"suggestion": rule.suggestion,
 			})
+	return findings
+
+
+def _find_registry_integrity_findings(risk_registry: dict[str, Any]) -> list[dict[str, Any]]:
+	findings: list[dict[str, Any]] = []
+	if risk_registry.get("load_status") != "loaded":
+		findings.append({
+			"rule_id": "bilibili_risk_registry_unavailable",
+			"severity": "fail",
+			"file": str(RISK_REGISTRY_PATH),
+			"line": 1,
+			"match": str(risk_registry.get("load_status")),
+			"excerpt": str(risk_registry.get("error") or "risk registry could not be loaded"),
+			"message": "Bilibili risk registry is missing or unreadable, so the audit rule contract is not pinned.",
+			"suggestion": "Restore references/bilibili_risk_registry.json and rerun 04c.",
+		})
+	missing = list(risk_registry.get("deterministic_rule_ids_missing_from_registry") or [])
+	if missing:
+		findings.append({
+			"rule_id": "bilibili_risk_registry_missing_deterministic_rule_ids",
+			"severity": "fail",
+			"file": str(RISK_REGISTRY_PATH),
+			"line": 1,
+			"match": ", ".join(missing),
+			"excerpt": "Deterministic rules are not represented in the structured registry.",
+			"message": "The Bilibili risk registry does not cover all deterministic compliance rules.",
+			"suggestion": "Add the missing rule ids to the proper registry rule group before treating the audit contract as organized.",
+		})
 	return findings
 
 
@@ -294,7 +459,10 @@ def _write_report(path: Path, result: dict[str, Any]) -> None:
 		f"- status: {result['status']}",
 		f"- stage: {result['stage']}",
 		f"- reviewed_files: {len(result['reviewed_files'])}",
+		f"- reviewed_file_hashes: {len(result['reviewed_file_hashes'])}",
+		f"- risk_registry: {result['risk_registry']['load_status']} {result['risk_registry'].get('sha256') or ''}",
 		f"- fail_findings: {result['summary']['fail_findings']}",
+		f"- platform_rejection_lessons_present: {result['platform_rejection_lessons']['present']}",
 		"",
 	]
 	if result["findings"]:
@@ -328,7 +496,10 @@ def run_review(
 	output_dirname: str = OUTPUT_DIRNAME,
 ) -> dict[str, Any]:
 	inputs = _iter_existing_inputs(run_dir)
+	risk_registry = _load_risk_registry()
+	platform_rejection_lessons = _load_platform_rejection_lessons(run_dir)
 	findings: list[dict[str, Any]] = []
+	findings.extend(_find_registry_integrity_findings(risk_registry))
 	for path in inputs:
 		findings.extend(_find_rule_hits(path, _read_publishable_text(path)))
 	fail_findings = [finding for finding in findings if finding["severity"] == "fail"]
@@ -339,6 +510,8 @@ def run_review(
 		"stage": stage,
 		"reviewer": reviewer,
 		"reviewed_files": [str(path) for path in inputs],
+		"reviewed_file_hashes": _reviewed_file_hashes(inputs),
+		"risk_registry": risk_registry,
 		"rules": [
 			{
 				"rule_id": rule.rule_id,
@@ -353,6 +526,7 @@ def run_review(
 			"finding_count": len(findings),
 			"fail_findings": len(fail_findings),
 		},
+		"platform_rejection_lessons": platform_rejection_lessons,
 		"findings": findings,
 	}
 	output_dir = run_dir / output_dirname

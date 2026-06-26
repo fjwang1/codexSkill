@@ -158,6 +158,31 @@ def _parse_txt_script(txt_content: str) -> tuple[list[str], list[str]]:
 	return scripts, speaker_numbers
 
 
+def _remap_scripts_to_local_speakers(
+	scripts: list[str],
+	speaker_numbers: list[str],
+) -> tuple[list[str], list[str], dict[str, str]]:
+	assert len(scripts) == len(speaker_numbers)
+	global_to_local: dict[str, str] = {}
+	local_speaker_numbers: list[str] = []
+	remapped_scripts: list[str] = []
+	for script, speaker_num in zip(scripts, speaker_numbers):
+		if speaker_num not in global_to_local:
+			local_id = str(len(global_to_local))
+			global_to_local[speaker_num] = local_id
+			local_speaker_numbers.append(speaker_num)
+		match = SPEAKER_PATTERN.match(script)
+		assert match, f"Cannot remap non speaker-tagged script line: {script}"
+		remapped_scripts.append(f"Speaker {global_to_local[speaker_num]}: {match.group(2).strip()}")
+	return remapped_scripts, local_speaker_numbers, global_to_local
+
+
+def _write_local_speaker_script(output_dir: Path, txt_path: Path, scripts: list[str]) -> Path:
+	prepared = output_dir / f"{txt_path.stem}__vibevoice_local_speakers.txt"
+	prepared.write_text("\n".join(scripts) + "\n", encoding="utf-8")
+	return prepared
+
+
 def _speaker_numbers(text: str) -> list[str]:
 	numbers: list[str] = []
 	for raw_line in text.splitlines():
@@ -369,28 +394,30 @@ def _run_job(
 		}
 
 	txt_content = prepared_txt_path.read_text(encoding="utf-8")
-	scripts, speaker_numbers = _parse_txt_script(txt_content)
-	assert scripts, f"No valid speaker scripts found in {prepared_txt_path}"
+	original_scripts, speaker_numbers = _parse_txt_script(txt_content)
+	assert original_scripts, f"No valid speaker scripts found in {prepared_txt_path}"
 
 	speaker_name_mapping: dict[str, str] = {}
 	speaker_index_base = _resolve_speaker_index_base(str(speaker_index_base_value), speaker_numbers, resolved_speaker_names)
 	for offset, name in enumerate(resolved_speaker_names, speaker_index_base):
 		speaker_name_mapping[str(offset)] = name
 
-	unique_speaker_numbers: list[str] = []
-	seen: set[str] = set()
-	for speaker_num in speaker_numbers:
-		if speaker_num not in seen:
-			unique_speaker_numbers.append(speaker_num)
-			seen.add(speaker_num)
+	scripts, voice_sample_speaker_numbers, global_to_local = _remap_scripts_to_local_speakers(original_scripts, speaker_numbers)
+	processor_txt_path = prepared_txt_path
+	if any(global_to_local[speaker_num] != speaker_num for speaker_num in global_to_local):
+		processor_txt_path = _write_local_speaker_script(output_dir, prepared_txt_path, scripts)
 	voice_samples: list[str] = []
 	actual_speakers: list[str] = []
-	for speaker_num in unique_speaker_numbers:
+	for speaker_num in voice_sample_speaker_numbers:
 		speaker_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
 		voice_path = voice_mapper.get_voice_path(speaker_name)
 		voice_samples.append(voice_path)
 		actual_speakers.append(speaker_name)
-		print(f"{job_id}: Speaker {speaker_num} ('{speaker_name}') -> Voice: {Path(voice_path).name}", flush=True)
+		print(
+			f"{job_id}: Global Speaker {speaker_num} -> local Speaker {global_to_local[speaker_num]} "
+			f"('{speaker_name}') -> Voice: {Path(voice_path).name}",
+			flush=True,
+		)
 
 	full_script = "\n".join(scripts).replace("’", "'")
 	processor_voice_samples = None if args.no_voice_samples else [voice_samples]
@@ -456,13 +483,18 @@ def _run_job(
 		"status": "pass",
 		"txt_path": str(txt_path),
 		"prepared_txt_path": str(prepared_txt_path),
+		"processor_txt_path": str(processor_txt_path),
 		"output_dir": str(output_dir),
 		"output_wav": str(output_path),
 		"speaker_mode": resolved_mode,
 		"speaker_names": resolved_speaker_names,
+		"speaker_index_base": str(speaker_index_base),
+		"speaker_name_mapping": speaker_name_mapping,
+		"global_to_local_speaker_map": global_to_local,
+		"voice_sample_speaker_numbers": voice_sample_speaker_numbers,
 		"actual_speakers": actual_speakers,
 		"voice_samples": voice_samples,
-		"segment_count": len(scripts),
+		"segment_count": len(original_scripts),
 		"generation_sec": round(generation_sec, 3),
 		"audio_duration_sec": round(audio_duration_sec, 3),
 		"rtf": round(rtf, 3) if rtf is not None else None,

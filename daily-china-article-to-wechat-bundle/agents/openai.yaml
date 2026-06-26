@@ -1,3 +1,4 @@
 interface:
-  display_name: "Daily China Article to Wechat Bundle"
-  short_description: "Help with Daily China Article to Wechat Bundle tasks"
+  display_name: "Daily Global WeChat Bundle"
+  short_description: "Run up to two China-unrelated longform articles through full WeChat draft production"
+  default_prompt: "Use $daily-china-article-to-wechat-bundle to select up to two China-unrelated deep longform articles and run each one through strict full translation, fidelity review, Chinese-reader readability/structure optimization, final copy quality check, cover, formatting, illustrations, and WeChat draft creation."

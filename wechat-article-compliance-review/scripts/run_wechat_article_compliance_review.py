@@ -49,18 +49,11 @@ AUTO_REGEX_REPLACEMENTS = [
 
 RULES = [
 	Rule(
-		"missing_source_note",
+		"visible_source_note_forbidden",
 		"fail",
 		re.compile(r"(?!)"),
-		"Article must retain source publication, original title or original URL.",
-		"Add a compact source note and do not claim translated third-party material as original.",
-	),
-	Rule(
-		"copyright_original_claim_risk",
-		"fail",
-		re.compile(r"原创声明|本文为原创|未经许可不得转载|首发于本公众号"),
-		"Translated/recreated third-party material must not claim original authorship.",
-		"Remove original-claim language; keep source attribution and original URL.",
+		"Article body must not include a visible source note, original-title block, or original URL block.",
+		"Move source publication, original title, original URL, and authorization basis to metadata/reports only.",
 	),
 	Rule(
 		"privacy_personal_data",
@@ -195,14 +188,17 @@ def apply_replacements(text: str) -> tuple[str, list[dict[str, str]]]:
 	return text, changes
 
 
-def has_source_note(text: str, metadata: dict[str, Any]) -> bool:
+def has_visible_source_note(text: str, metadata: dict[str, Any]) -> bool:
 	urls = [metadata.get("original_url"), metadata.get("source_url")]
-	publication = metadata.get("source_publication") or metadata.get("publication")
 	if any(isinstance(url, str) and url and url in text for url in urls):
 		return True
-	if isinstance(publication, str) and publication and publication in text and ("来源" in text or "原题" in text):
-		return True
-	return bool(re.search(r"来源[:：]|原文[:：]|原题[:：]|Original", text))
+	for line in text.splitlines():
+		stripped = line.strip()
+		if re.match(r"^(?:来源|原文|原题|原载|出处|Source|Original)\s*[:：]", stripped):
+			return True
+		if re.match(r"^(?:本文(?:来自|编译自|译自)|编译自|译自|原载于)", stripped):
+			return True
+	return False
 
 
 def line_number(text: str, index: int) -> int:
@@ -219,18 +215,18 @@ def line_excerpt(text: str, index: int) -> str:
 
 def scan_rules(text: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
 	findings: list[dict[str, Any]] = []
-	if not has_source_note(text, metadata):
+	if has_visible_source_note(text, metadata):
 		findings.append({
-			"rule_id": "missing_source_note",
+			"rule_id": "visible_source_note_forbidden",
 			"severity": "fail",
 			"line": 1,
 			"match": "",
 			"excerpt": "",
-			"message": "Article must retain source publication, original title or original URL.",
-			"suggestion": "Add a compact source note and do not claim translated third-party material as original.",
+			"message": "Article body must not include a visible source note, original-title block, or original URL block.",
+			"suggestion": "Move source publication, original title, original URL, and authorization basis to metadata/reports only.",
 		})
 	for rule in RULES:
-		if rule.rule_id == "missing_source_note":
+		if rule.rule_id == "visible_source_note_forbidden":
 			continue
 		for match in rule.pattern.finditer(text):
 			findings.append({

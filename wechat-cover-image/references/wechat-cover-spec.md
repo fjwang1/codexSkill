@@ -19,6 +19,8 @@ Production rule:
 
 Use `2.35:1` / `900x383` as the working output target, keep important content in the center safe square, and have any future publishing skill re-check the live WeChat backend UI before upload.
 
+When available, preserve a 2K+ source/master cover image, preferably at least `2400px` wide, before generating the `900x383` WeChat-ready raster.
+
 ## 译见中国 Palette
 
 Use the following palette as the default color direction for generated no-text cover images:
@@ -32,4 +34,12 @@ Divider gray:      #E8E8E8
 Soft gray:         #F4F4F4
 ```
 
-Use the palette as a color mood inside the existing high-end magazine/editorial cover style. Do not force covers into a rigid Swiss-grid poster, diagram, dashboard, or infographic unless the user explicitly asks for that.
+Use the palette as a color mood inside the default New Yorker-inspired conceptual editorial cover style:
+
+- One strong metaphor.
+- Generous negative space.
+- Quiet, intelligent visual storytelling.
+- Restrained, premium composition.
+- No embedded text.
+
+Do not force covers into a rigid Swiss-grid poster, diagram, dashboard, or infographic unless the user explicitly asks for that.

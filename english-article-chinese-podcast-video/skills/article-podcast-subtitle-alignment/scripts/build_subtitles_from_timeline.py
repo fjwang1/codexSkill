@@ -14,10 +14,13 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 
-GLOBAL_LEAD_SEC = 0.05
+GLOBAL_LEAD_SEC = 0.12
 TAIL_SEC = 0.12
 MIN_CUE_SEC = 0.45
 NEXT_CUE_OVERLAP_SEC = 0.24
+MIN_GLOBAL_LEAD_SEC = 0.08
+MAX_LATE_START_SEC = 0.02
+DANGLING_FRAGMENT_RE = re.compile(r"(?:非|的|如果|除了|因为|但是|所以|包括|比如|当|把|被|与|以及|或者|并且|而且)$")
 SUBTITLE_FONT_PATH = Path("/Volumes/GT34/Downloads/podcast_visual_style_prototypes/fonts/NotoSansCJKsc-Bold.otf")
 SUBTITLE_FONT_FAMILY = "NotoSansCJKsc-Bold"
 SUBTITLE_FONT_FULL_NAME = "Noto Sans CJK SC Bold"
@@ -266,6 +269,46 @@ def _clean_display_text(text: str) -> str:
 	return text
 
 
+def _normalise_sentence_periods(text: str) -> str:
+	text = re.sub(r"(?<!\d)\.(?!\d)", "。", text)
+	return text.replace("．", "。")
+
+
+def _split_by_terminal_sentence_marks(text: str) -> list[str]:
+	text = _normalise_sentence_periods(text)
+	units: list[str] = []
+	buffer = ""
+	for char in text:
+		buffer += char
+		if char in "。！？!?；;":
+			cleaned = _clean_display_text(buffer)
+			if cleaned:
+				units.append(cleaned)
+			buffer = ""
+	if buffer.strip():
+		cleaned = _clean_display_text(buffer)
+		if cleaned:
+			units.append(cleaned)
+	return units
+
+
+def _split_by_semantic_clause_marks(text: str) -> list[str]:
+	clauses: list[str] = []
+	buffer = ""
+	for char in text:
+		buffer += char
+		if char in "，,；;：:、":
+			cleaned = _clean_display_text(buffer)
+			if cleaned:
+				clauses.append(cleaned)
+			buffer = ""
+	if buffer.strip():
+		cleaned = _clean_display_text(buffer)
+		if cleaned:
+			clauses.append(cleaned)
+	return clauses
+
+
 def _subtitle_font() -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 	return ImageFont.truetype(str(SUBTITLE_FONT_PATH), SUBTITLE_FONT_SIZE_PX)
 
@@ -329,6 +372,65 @@ def _split_display_text_to_fit(text: str) -> list[str]:
 	return parts
 
 
+def _semantic_subtitle_units(text: str) -> list[dict[str, Any]]:
+	font = _subtitle_font()
+	draw = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
+	sentences = _split_by_terminal_sentence_marks(text)
+	units: list[dict[str, Any]] = []
+	for sentence_index, sentence in enumerate(sentences, start=1):
+		if _fits_single_line(draw, sentence, font):
+			units.append({
+				"text": sentence,
+				"semantic_unit_type": "sentence",
+				"sentence_index": sentence_index,
+				"sentence_complete": True,
+				"split_reason": "sentence_boundary",
+				"rendered_width_px": _measure_spaced_text(draw, sentence, font),
+			})
+			continue
+		clauses = _split_by_semantic_clause_marks(sentence)
+		assert len(clauses) > 1, (
+			"Overlong subtitle sentence has no semantic punctuation boundary; "
+			"rewrite upstream into shorter complete sentences before subtitle generation: "
+			f"{sentence!r}"
+		)
+		buffer = ""
+		clause_group_index = 1
+		for clause in clauses:
+			assert _fits_single_line(draw, clause, font), (
+				"Subtitle semantic clause still does not fit one line; "
+				"rewrite upstream into shorter complete sentences before subtitle generation: "
+				f"{clause!r}"
+			)
+			candidate = f"{buffer}，{clause}" if buffer else clause
+			if buffer and not _fits_single_line(draw, candidate, font):
+				units.append({
+					"text": buffer,
+					"semantic_unit_type": "semantic_clause",
+					"sentence_index": sentence_index,
+					"sentence_complete": False,
+					"split_reason": "overlong_sentence_semantic_clause",
+					"semantic_clause_group_index": clause_group_index,
+					"rendered_width_px": _measure_spaced_text(draw, buffer, font),
+				})
+				clause_group_index += 1
+				buffer = clause
+			else:
+				buffer = candidate
+		if buffer:
+			units.append({
+				"text": buffer,
+				"semantic_unit_type": "semantic_clause",
+				"sentence_index": sentence_index,
+				"sentence_complete": False,
+				"split_reason": "overlong_sentence_semantic_clause",
+				"semantic_clause_group_index": clause_group_index,
+				"rendered_width_px": _measure_spaced_text(draw, buffer, font),
+			})
+	assert units, f"No semantic subtitle units generated from text: {text!r}"
+	return units
+
+
 def _split_timing(start: float, end: float, parts: list[str]) -> list[tuple[float, float]]:
 	if len(parts) == 1:
 		return [(start, end)]
@@ -348,39 +450,180 @@ def _split_timing(start: float, end: float, parts: list[str]) -> list[tuple[floa
 	return timings
 
 
-def _build_cues(timeline: dict[str, Any], audio_duration: float, lead_sec: float, tail_sec: float, next_cue_overlap_sec: float) -> list[dict[str, Any]]:
+def _source_units_from_timeline(timeline: dict[str, Any]) -> list[dict[str, Any]]:
 	source_cues = sorted(list(timeline.get("cues") or []), key=lambda item: (float(item.get("start_sec") or 0), int(item.get("cue_index") or 0)))
-	assert source_cues, "dialogue_timeline has no cues"
-	raw_starts = [max(0.0, float(cue["start_sec"]) - lead_sec) for cue in source_cues]
-	output: list[dict[str, Any]] = []
-	for index, cue in enumerate(source_cues, start=1):
-		start = raw_starts[index - 1]
-		end = min(audio_duration, float(cue["end_sec"]) + tail_sec)
-		if index < len(source_cues):
-			end = min(end, raw_starts[index] + next_cue_overlap_sec)
-		if end <= start:
-			end = min(audio_duration, start + MIN_CUE_SEC)
-		text = _clean_display_text(str(cue.get("text") or ""))
-		if not text:
-			continue
-		parts = _split_display_text_to_fit(text)
-		for split_index, (part, (part_start, part_end)) in enumerate(zip(parts, _split_timing(start, max(start + 0.05, end), parts)), start=1):
-			output.append({
-				"index": len(output) + 1,
-				"speaker": cue.get("speaker"),
-				"display_role": cue.get("display_role"),
-				"text": part,
-				"display_text": part,
-				"start_sec": part_start,
-				"end_sec": part_end,
+	if source_cues:
+		return [
+			{
+				"source_kind": "cue",
 				"source_turn_id": cue.get("turn_id"),
 				"source_turn_index": cue.get("turn_index"),
 				"source_cue_index": cue.get("cue_index"),
-				"source_cue_split_index": split_index,
-				"source_cue_split_count": len(parts),
+				"speaker": cue.get("speaker"),
+				"display_role": cue.get("display_role"),
+				"text": str(cue.get("text") or ""),
+				"start_sec": float(cue["start_sec"]),
+				"end_sec": float(cue["end_sec"]),
 				"alignment_confidence": cue.get("alignment_confidence"),
+			}
+			for cue in source_cues
+		]
+	turns = sorted(list(timeline.get("turns") or []), key=lambda item: (float(item.get("start_sec") or 0), int(item.get("turn_index") or 0)))
+	if turns:
+		return [
+			{
+				"source_kind": "turn",
+				"source_turn_id": turn.get("turn_id"),
+				"source_turn_index": turn.get("turn_index"),
+				"source_cue_index": None,
+				"speaker": turn.get("speaker"),
+				"display_role": turn.get("display_role"),
+				"text": str(turn.get("text") or ""),
+				"start_sec": float(turn["start_sec"]),
+				"end_sec": float(turn["end_sec"]),
+				"alignment_confidence": turn.get("alignment_confidence"),
+			}
+			for turn in turns
+		]
+	assert source_cues, "dialogue_timeline has no turns or cues"
+	return []
+
+
+def _build_cues(timeline: dict[str, Any], audio_duration: float, lead_sec: float, tail_sec: float, next_cue_overlap_sec: float) -> list[dict[str, Any]]:
+	source_units = _source_units_from_timeline(timeline)
+	planned: list[dict[str, Any]] = []
+	for source_index, source in enumerate(source_units, start=1):
+		source_start = float(source["start_sec"])
+		source_end = min(audio_duration, max(source_start + 0.05, float(source["end_sec"])))
+		text = str(source.get("text") or "")
+		if not _clean_display_text(text):
+			continue
+		semantic_units = _semantic_subtitle_units(text)
+		timings = _split_timing(source_start, source_end, [str(unit["text"]) for unit in semantic_units])
+		for split_index, (unit, (part_source_start, part_source_end)) in enumerate(zip(semantic_units, timings, strict=True), start=1):
+			planned.append({
+				"speaker": source.get("speaker"),
+				"display_role": source.get("display_role"),
+				"text": unit["text"],
+				"display_text": unit["text"],
+				"source_kind": source.get("source_kind"),
+				"source_turn_id": source.get("source_turn_id"),
+				"source_turn_index": source.get("source_turn_index"),
+				"source_cue_index": source.get("source_cue_index"),
+				"source_unit_index": source_index,
+				"source_unit_split_index": split_index,
+				"source_unit_split_count": len(semantic_units),
+				"source_start_sec": round(part_source_start, 3),
+				"source_end_sec": round(part_source_end, 3),
+				"alignment_confidence": source.get("alignment_confidence"),
+				"semantic_unit_type": unit["semantic_unit_type"],
+				"sentence_index": unit["sentence_index"],
+				"sentence_complete": unit["sentence_complete"],
+				"split_reason": unit["split_reason"],
+				"semantic_clause_group_index": unit.get("semantic_clause_group_index"),
+				"rendered_width_px": unit["rendered_width_px"],
+				"fits_single_line": True,
 			})
+	output: list[dict[str, Any]] = []
+	for index, item in enumerate(planned):
+		source_start = float(item["source_start_sec"])
+		source_end = float(item["source_end_sec"])
+		start = max(0.0, source_start - lead_sec)
+		end = min(audio_duration, source_end + tail_sec)
+		if index + 1 < len(planned):
+			next_start = max(0.0, float(planned[index + 1]["source_start_sec"]) - lead_sec)
+			end = min(end, next_start + next_cue_overlap_sec)
+		if end <= start:
+			end = min(audio_duration, start + MIN_CUE_SEC)
+		cue = {
+			"index": len(output) + 1,
+			**item,
+			"start_sec": round(start, 3),
+			"end_sec": round(max(start + 0.01, end), 3),
+			"subtitle_start_lead_sec": round(max(0.0, source_start - start), 3),
+			"subtitle_start_late_by_sec": round(max(0.0, start - source_start), 3),
+		}
+		output.append(cue)
 	return output
+
+
+def _subtitle_policy_summary(cues: list[dict[str, Any]], lead_sec: float) -> dict[str, Any]:
+	assert cues, "No subtitle cues generated"
+	late_values = [float(cue.get("subtitle_start_late_by_sec") or 0.0) for cue in cues]
+	late_violations = [
+		cue for cue in cues
+		if float(cue.get("subtitle_start_late_by_sec") or 0.0) > MAX_LATE_START_SEC
+	]
+	hard_width_fallbacks = [
+		cue for cue in cues
+		if str(cue.get("split_reason") or "") == "hard_width_fallback"
+	]
+	line_violations = [
+		cue for cue in cues
+		if "\n" in str(cue.get("display_text") or "") or cue.get("fits_single_line") is not True
+	]
+	sentence_period_violations = [
+		cue for cue in cues
+		if re.search(r"(?<!\d)[。．.](?!\d)", str(cue.get("display_text") or ""))
+	]
+	dangling_fragment_violations = [
+		cue for cue in cues
+		if DANGLING_FRAGMENT_RE.search(str(cue.get("display_text") or "").strip())
+	]
+	starts = [float(cue["start_sec"]) for cue in cues]
+	monotonic_start_violation_count = sum(
+		1 for previous, current in zip(starts, starts[1:])
+		if current + 0.001 < previous
+	)
+	unit_counts: dict[str, int] = {}
+	for cue in cues:
+		unit_type = str(cue.get("semantic_unit_type") or "unknown")
+		unit_counts[unit_type] = unit_counts.get(unit_type, 0) + 1
+	timing_status = (
+		"PASS"
+		if lead_sec >= MIN_GLOBAL_LEAD_SEC
+		and not late_violations
+		and monotonic_start_violation_count == 0
+		else "FAIL"
+	)
+	segmentation_status = (
+		"PASS"
+		if not hard_width_fallbacks
+		and not line_violations
+		and not sentence_period_violations
+		and not dangling_fragment_violations
+		else "FAIL"
+	)
+	return {
+		"timing_policy": {
+			"status": timing_status,
+			"global_lead_sec": lead_sec,
+			"minimum_required_global_lead_sec": MIN_GLOBAL_LEAD_SEC,
+			"max_allowed_late_start_sec": MAX_LATE_START_SEC,
+			"max_late_start_sec": round(max(late_values) if late_values else 0.0, 3),
+			"late_start_violation_count": len(late_violations),
+			"monotonic_start_violation_count": monotonic_start_violation_count,
+			"systematic_late_subtitles": False,
+			"lead_applied_per_split_cue": True,
+		},
+		"segmentation_policy": {
+			"status": segmentation_status,
+			"unit_policy": "one_visible_line_per_complete_sentence_or_semantic_clause",
+			"semantic_unit_counts": unit_counts,
+			"hard_width_fallback_count": len(hard_width_fallbacks),
+			"line_violation_count": len(line_violations),
+			"sentence_period_violation_count": len(sentence_period_violations),
+			"dangling_fragment_violation_count": len(dangling_fragment_violations),
+			"dangling_fragment_examples": [
+				{
+					"index": cue.get("index"),
+					"text": cue.get("display_text") or cue.get("text"),
+				}
+				for cue in dangling_fragment_violations[:10]
+			],
+			"requires_upstream_rewrite_for_unbreakable_overlong_sentence": True,
+		},
+	}
 
 
 def _write_srt(path: Path, cues: list[dict[str, Any]]) -> None:
@@ -430,6 +673,15 @@ def build_subtitles(project_dir: Path, lead_sec: float, tail_sec: float, next_cu
 	audio_duration = _duration(audio_path)
 	cues = _build_cues(timeline, audio_duration, lead_sec, tail_sec, next_cue_overlap_sec)
 	assert cues, "No subtitle cues generated"
+	policy_summary = _subtitle_policy_summary(cues, lead_sec)
+	assert policy_summary["timing_policy"]["status"] == "PASS", (
+		"Subtitle timing policy failed: "
+		+ json.dumps(policy_summary["timing_policy"], ensure_ascii=False)
+	)
+	assert policy_summary["segmentation_policy"]["status"] == "PASS", (
+		"Subtitle segmentation policy failed: "
+		+ json.dumps(policy_summary["segmentation_policy"], ensure_ascii=False)
+	)
 	publication_check = _subtitle_publication_check(project_dir, cues)
 	srt_path = video_dir / "final_subtitles.srt"
 	ass_path = video_dir / "final_subtitles.ass"
@@ -451,6 +703,8 @@ def build_subtitles(project_dir: Path, lead_sec: float, tail_sec: float, next_cu
 		"source_timeline": "1x",
 		"final_timeline": "1x",
 		"source_publication_check": publication_check,
+		"timing_policy": policy_summary["timing_policy"],
+		"segmentation_policy": policy_summary["segmentation_policy"],
 		"style": {
 			"resolution": "3840x2160",
 			"font_family": SUBTITLE_FONT_FAMILY,
@@ -493,6 +747,10 @@ def build_subtitles(project_dir: Path, lead_sec: float, tail_sec: float, next_cu
 		f"- tail_sec: {tail_sec}",
 		f"- next_cue_overlap_sec: {next_cue_overlap_sec}",
 		f"- source_publication_check: {publication_check}",
+		f"- timing_policy: {policy_summary['timing_policy']['status']}",
+		f"- max_late_start_sec: {policy_summary['timing_policy']['max_late_start_sec']}",
+		f"- segmentation_policy: {policy_summary['segmentation_policy']['status']}",
+		f"- dangling_fragment_violation_count: {policy_summary['segmentation_policy']['dangling_fragment_violation_count']}",
 		"- speaker_labels: false",
 		"- sentence_periods_displayed: false",
 		f"- style: {SUBTITLE_FONT_FULL_NAME}, white text, subtle translucent outline, soft drop shadow, no background box",
@@ -509,6 +767,8 @@ def build_subtitles(project_dir: Path, lead_sec: float, tail_sec: float, next_cu
 		"ass": str(ass_path),
 		"manifest": str(video_dir / "subtitle_manifest.json"),
 		"cue_count": len(cues),
+		"timing_policy": policy_summary["timing_policy"]["status"],
+		"segmentation_policy": policy_summary["segmentation_policy"]["status"],
 	}
 
 

@@ -41,6 +41,7 @@ SPEAKER_MAP = {
 		"default_vibevoice_name": "BowenClean",
 	},
 }
+SPEAKER_MAP_OVERRIDE_FILENAMES = ("speaker_map.json", "audio/speaker_map.json")
 
 DIGITS = "零一二三四五六七八九"
 
@@ -270,7 +271,29 @@ def _extract_body(text: str) -> str:
 	return text[match.end():]
 
 
-def _parse_turns(text: str) -> list[dict[str, Any]]:
+def _load_speaker_map(project_dir: Path) -> tuple[dict[str, dict[str, Any]], str]:
+	for filename in SPEAKER_MAP_OVERRIDE_FILENAMES:
+		path = project_dir / filename
+		if not path.exists():
+			continue
+		payload = _read_json(path)
+		raw_map = payload.get("speaker_map") if isinstance(payload.get("speaker_map"), dict) else payload
+		assert isinstance(raw_map, dict), f"speaker map override must be an object: {path}"
+		speaker_map: dict[str, dict[str, Any]] = {}
+		for speaker, default_info in SPEAKER_MAP.items():
+			override_info = raw_map.get(speaker)
+			if override_info is None:
+				speaker_map[speaker] = dict(default_info)
+				continue
+			assert isinstance(override_info, dict), f"speaker map entry must be an object: {path} {speaker}"
+			merged = dict(default_info)
+			merged.update(override_info)
+			speaker_map[speaker] = merged
+		return speaker_map, str(path)
+	return SPEAKER_MAP, "built_in_article_defaults"
+
+
+def _parse_turns(text: str, speaker_map: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
 	turns: list[dict[str, Any]] = []
 	current_speaker: str | None = None
 	current_lines: list[str] = []
@@ -298,7 +321,7 @@ def _parse_turns(text: str) -> list[dict[str, Any]]:
 		cleaned.append({
 			"turn_index": index,
 			"speaker": turn["speaker"],
-			"display_role": SPEAKER_MAP.get(turn["speaker"], {"display_role": "说话人"})["display_role"],
+			"display_role": speaker_map.get(turn["speaker"], {"display_role": "说话人"})["display_role"],
 			"text": text_value,
 			"char_count": len(re.sub(r"\s+", "", text_value)),
 		})
@@ -341,7 +364,8 @@ def main() -> int:
 	assert project_dir.exists(), f"Project directory not found: {project_dir}"
 	assert script_path.exists(), f"Podcast script not found: {script_path}"
 	text = script_path.read_text(encoding="utf-8")
-	turns = _parse_turns(text)
+	speaker_map, speaker_map_source = _load_speaker_map(project_dir)
+	turns = _parse_turns(text, speaker_map)
 	assert turns, "No Speaker turns found"
 	assert args.min_speaker_turns >= 0, "--min-speaker-turns must be >= 0"
 	speaker_ids = sorted({str(turn["speaker"]) for turn in turns} | {"Speaker 0", "Speaker 1"}, key=lambda value: int(value.split()[1]))
@@ -380,7 +404,8 @@ def main() -> int:
 		"vibevoice_input_mode": "tts_normalized" if not args.disable_tts_normalization else "display_text_unmodified",
 		"tts_normalization_enabled": not args.disable_tts_normalization,
 		"tts_normalization_report": str(normalization_report_path.relative_to(project_dir)) if normalization_report_path.is_relative_to(project_dir) else str(normalization_report_path),
-		"speaker_map": SPEAKER_MAP,
+		"speaker_map": speaker_map,
+		"speaker_map_source": speaker_map_source,
 		"turn_count": len(turns),
 		"speaker_counts": speaker_counts,
 		"min_speaker_turns": args.min_speaker_turns,
@@ -402,6 +427,7 @@ def main() -> int:
 		"manifest": str(manifest_path),
 		"turn_count": len(turns),
 		"speaker_counts": speaker_counts,
+		"speaker_map_source": speaker_map_source,
 		"final_audio": str(final_audio) if final_audio.exists() else None,
 	}, ensure_ascii=False, indent=2))
 	return 0

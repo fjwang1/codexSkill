@@ -205,14 +205,6 @@ const extraction = await tab.playwright.evaluate(extractArticleFromDom);
 
 Check `access_limited`, `markdown_length`, and `body_preview` before accepting the result.
 
-## Copyright And Access Boundary
-
-This skill may capture page material for downstream processing, but downstream agents must respect content rights.
-
-- User-owned, authorized, internal, public-domain, or permissively licensed content can be returned in full.
-- For third-party copyrighted publisher articles, do not present the full extracted text to the user as the final answer unless the user has provided the text or confirms they have rights to transform it.
-- If downstream work asks for full translation of a third-party copyrighted article, hand off the capture package but require the next skill to enforce the translation boundary.
-
 ## Handoff
 
 When the user asks for a Chinese Markdown document, pass the capture package to `page-to-chinese-markdown`.

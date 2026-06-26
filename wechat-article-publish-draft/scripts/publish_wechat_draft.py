@@ -28,29 +28,75 @@ from typing import Any
 API_BASE = "https://api.weixin.qq.com"
 REPORT_SCHEMA_VERSION = "wechat-article-publish-draft.v1"
 FORBIDDEN_ENDPOINT = "/cgi-bin/freepublish/submit"
-DEFAULT_AUTHOR = "译见中国"
+DEFAULT_AUTHOR = "他山译读"
 STYLE_SPEC_VERSION = "wechat-swiss-grid-v1"
 
 STYLE = {
-	"container": "max-width:100%;font-family:Arial,'Helvetica Neue',Helvetica,'PingFang SC','Microsoft YaHei',sans-serif;font-size:16px;line-height:1.78;color:#1A1A1A;letter-spacing:0;text-align:left;background:#FFFFFF;",
-	"h1": "font-size:28px;line-height:1.24;margin:32px 0 16px;font-weight:900;color:#1A1A1A;text-align:left;",
-	"h2_wrap": "margin:44px 0 18px;padding:14px 0 0;border-top:3px solid #D9251D;",
-	"h2": "font-size:22px;line-height:1.32;margin:0;font-weight:900;color:#1A1A1A;text-align:left;",
-	"h3": "font-size:17px;line-height:1.48;margin:30px 0 12px;padding:0 0 0 10px;border-left:3px solid #D9251D;font-weight:900;color:#1A1A1A;text-align:left;",
-	"paragraph": "margin:0 0 18px;line-height:1.78;font-size:16px;color:#1A1A1A;text-align:left;",
-	"lead": "margin:18px 0 26px;line-height:1.72;font-size:18px;color:#1A1A1A;font-weight:700;text-align:left;",
-	"source": "margin:0 0 32px;padding:14px 0 14px 16px;background:#FFFFFF;border-left:3px solid #D9251D;color:#666666;font-size:12px;line-height:1.7;text-align:left;",
-	"quote": "margin:28px 0;padding:16px 0 16px 18px;border-left:4px solid #D9251D;background:#FFFFFF;color:#1A1A1A;font-size:18px;line-height:1.65;font-weight:700;text-align:left;",
-	"ul": "padding-left:22px;margin:0 0 18px;line-height:1.78;font-size:16px;color:#1A1A1A;",
-	"ol": "padding-left:22px;margin:0 0 18px;line-height:1.78;font-size:16px;color:#1A1A1A;",
+	"container": "max-width:100%;font-family:Arial,'Helvetica Neue',Helvetica,'PingFang SC','Microsoft YaHei',sans-serif;font-size:16px;line-height:1.78;color:#1A1A1A;letter-spacing:0;text-align:left;background:#fff;",
+	"h1": "font-size:28px;line-height:1.24;margin:32px 0 16px;font-weight:900;",
+	"h2_wrap": "margin:44px 0 18px;padding-top:14px;border-top:3px solid #D9251D;",
+	"h2": "font-size:22px;line-height:1.32;margin:0;font-weight:900;",
+	"h3": "font-size:17px;line-height:1.48;margin:30px 0 12px;padding-left:10px;border-left:3px solid #D9251D;font-weight:900;",
+	"paragraph": "margin:0 0 18px;",
+	"lead": "margin:18px 0 26px;line-height:1.72;font-size:18px;font-weight:700;",
+	"source": "margin:0 0 32px;padding:14px 0 14px 16px;border-left:3px solid #D9251D;color:#666;font-size:12px;line-height:1.7;",
+	"quote": "margin:28px 0;padding:16px 0 16px 18px;border-left:4px solid #D9251D;font-size:18px;line-height:1.65;font-weight:700;",
+	"ul": "padding-left:22px;margin:0 0 18px;",
+	"ol": "padding-left:22px;margin:0 0 18px;",
 	"li": "margin:6px 0;",
 	"hr": "border:none;border-top:1px solid #E8E8E8;margin:32px 0;",
-	"image_wrap": "margin:28px 0;text-align:left;",
-	"image": "display:block;width:100%;max-width:100%;height:auto;margin:0;border-radius:0;",
-	"caption": "margin:8px 0 0;color:#666666;font-size:12px;line-height:1.55;text-align:left;",
-	"code": "font-family:Consolas,'Courier New',monospace;background:#F4F4F4;border-radius:0;padding:1px 4px;font-size:14px;color:#1A1A1A;",
-	"pre": "white-space:pre-wrap;background:#F4F4F4;padding:16px;border-radius:0;font-size:14px;line-height:1.65;color:#1A1A1A;overflow-wrap:break-word;border-left:3px solid #D9251D;",
+	"image_wrap": "margin:28px 0;",
+	"image": "display:block;width:100%;max-width:100%;height:auto;margin:0;",
+	"caption": "margin:8px 0 0;color:#666;font-size:12px;line-height:1.55;",
+	"code": "font-family:Consolas,'Courier New',monospace;background:#F4F4F4;padding:1px 4px;font-size:14px;",
+	"pre": "white-space:pre-wrap;background:#F4F4F4;padding:16px;font-size:14px;line-height:1.65;overflow-wrap:break-word;border-left:3px solid #D9251D;",
 }
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+LOCAL_ENV_PATH = SKILL_DIR / ".env"
+
+PUBLICATION_NAME_MAP = {
+	"the economist": "经济学人",
+	"economist": "经济学人",
+	"financial times": "金融时报",
+	"ft": "金融时报",
+	"foreign policy": "外交政策",
+	"foreign affairs": "外交事务",
+	"the diplomat": "外交学者",
+	"diplomat": "外交学者",
+	"bloomberg": "彭博社",
+	"bloomberg news": "彭博社",
+	"bloomberg businessweek": "彭博商业周刊",
+	"the new york times": "纽约时报",
+	"new york times": "纽约时报",
+	"nytimes": "纽约时报",
+	"nyt": "纽约时报",
+	"new york daily news": "纽约每日新闻",
+	"the wall street journal": "华尔街日报",
+	"wall street journal": "华尔街日报",
+	"wsj": "华尔街日报",
+	"the washington post": "华盛顿邮报",
+	"washington post": "华盛顿邮报",
+	"the guardian": "卫报",
+	"guardian": "卫报",
+	"reuters": "路透社",
+	"associated press": "美联社",
+	"ap": "美联社",
+	"nikkei asia": "日经亚洲",
+	"nikkei": "日本经济新闻",
+	"the new yorker": "纽约客",
+	"new yorker": "纽约客",
+	"wired": "连线",
+	"rest of world": "Rest of World",
+	"south china morning post": "南华早报",
+	"scmp": "南华早报",
+	"los angeles times": "洛杉矶时报",
+	"politico": "政客",
+	"bbc": "英国广播公司",
+	"cnn": "美国有线电视新闻网",
+}
+
+TITLE_SOURCE_PREFIX_RE = re.compile(r"^(?:《([^》]+)》|([^:：\n]{2,32}))\s*[:：]\s*(.+)$")
 
 
 class DraftError(RuntimeError):
@@ -127,10 +173,11 @@ class DraftResult:
 
 
 def parse_args() -> argparse.Namespace:
+	load_local_env()
 	parser = argparse.ArgumentParser(description="Create a WeChat public-account draft from Markdown.")
 	source = parser.add_mutually_exclusive_group(required=True)
 	source.add_argument("--bundle-manifest", type=Path, help="wechat_bundle_manifest.json for a multi-article WeChat draft.")
-	source.add_argument("--article-dir", type=Path, help="Directory containing wechat/article.md and cover/main_cover.png.")
+	source.add_argument("--article-dir", type=Path, help="Directory containing wechat/reviewed_article.md and cover/main_cover.png.")
 	source.add_argument("--article-md", type=Path, help="Markdown file to publish as a draft.")
 	parser.add_argument("--metadata", type=Path, help="Article metadata JSON. Defaults to <article-dir>/wechat/article_metadata.json.")
 	parser.add_argument("--cover", type=Path, help="Cover image. Defaults to metadata cover_path or <article-dir>/cover/main_cover.png.")
@@ -153,11 +200,25 @@ def parse_args() -> argparse.Namespace:
 	return args
 
 
+def load_local_env() -> None:
+	if not LOCAL_ENV_PATH.exists():
+		return
+	for raw_line in LOCAL_ENV_PATH.read_text(encoding="utf-8").splitlines():
+		line = raw_line.strip()
+		if not line or line.startswith("#") or "=" not in line:
+			continue
+		key, value = line.split("=", 1)
+		key = key.strip()
+		value = value.strip().strip("\"'")
+		if key in {"WECHAT_ACCESS_TOKEN", "WECHAT_APP_ID", "WECHAT_APP_SECRET"} and value:
+			os.environ.setdefault(key, value)
+
+
 def resolve_inputs(args: argparse.Namespace) -> tuple[Path | None, Path, Path | None, Path, Path]:
 	article_dir: Path | None
 	if args.article_dir:
 		article_dir = args.article_dir.expanduser().resolve()
-		article_md = article_dir / "wechat" / "article.md"
+		article_md = article_dir / "wechat" / "reviewed_article.md"
 	else:
 		article_md = args.article_md.expanduser().resolve()
 		article_dir = infer_article_dir(article_md)
@@ -242,7 +303,7 @@ def resolve_bundle_article_ref(bundle_manifest: Path, item: Any, index: int) -> 
 
 	article_md = first_existing_path(item, ["wechat_article_path", "article_markdown", "article_path", "markdown_path"], bundle_manifest.parent)
 	if article_md is None and article_dir is not None:
-		article_md = article_dir / "wechat" / "article.md"
+		article_md = article_dir / "wechat" / "reviewed_article.md"
 	if article_md is None:
 		raise DraftError(f"Missing article Markdown path for bundle article {article_id or index}.")
 
@@ -251,19 +312,26 @@ def resolve_bundle_article_ref(bundle_manifest: Path, item: Any, index: int) -> 
 		metadata_path = article_dir / "wechat" / "article_metadata.json"
 
 	metadata = load_json(metadata_path) if metadata_path and metadata_path.exists() else {}
-	if role == "main":
-		cover_path = first_existing_path(item, ["cover_path", "thumb_path", "thumbnail_path"], bundle_manifest.parent)
-	else:
-		cover_path = first_existing_path(item, ["thumb_path", "thumbnail_path", "cover_path"], bundle_manifest.parent)
+	cover_path = first_existing_path(
+		item,
+		["wechat_upload_cover_path", "cover_path", "thumb_path", "thumbnail_path"],
+		bundle_manifest.parent,
+	)
 	if cover_path is None:
-		metadata_key = "cover_path" if role == "main" else "thumb_path"
-		if isinstance(metadata.get(metadata_key), str):
-			cover_path = Path(metadata[metadata_key]).expanduser().resolve()
-	if cover_path is None and role != "main" and isinstance(metadata.get("cover_path"), str):
-		cover_path = Path(metadata["cover_path"]).expanduser().resolve()
+		for metadata_key in ("wechat_upload_cover_path", "cover_path", "thumb_path", "thumbnail_path"):
+			if isinstance(metadata.get(metadata_key), str):
+				cover_path = Path(metadata[metadata_key]).expanduser().resolve()
+				break
 	if cover_path is None and article_dir is not None:
-		preferred = article_dir / "cover" / ("main_cover.png" if role == "main" else "thumb_square_500x500.png")
-		cover_path = preferred if preferred.exists() else article_dir / "cover" / "main_cover.png"
+		for candidate in (
+			article_dir / "cover" / "main_cover.jpg",
+			article_dir / "cover" / "main_cover.png",
+			article_dir / "cover" / "thumb_square_500x500.jpg",
+			article_dir / "cover" / "thumb_square_500x500.png",
+		):
+			if candidate.exists():
+				cover_path = candidate
+				break
 	if cover_path is None:
 		raise DraftError(f"Missing cover/thumb path for bundle article {article_id or index}.")
 
@@ -374,8 +442,9 @@ def choose_author(args: argparse.Namespace, metadata: dict[str, Any]) -> str:
 
 
 def choose_source_url(args: argparse.Namespace, metadata: dict[str, Any]) -> str:
-	source = args.content_source_url or metadata.get("original_url") or metadata.get("source_url") or ""
-	return str(source).strip()[:1024]
+	if args.content_source_url is None:
+		return ""
+	return str(args.content_source_url).strip()[:1024]
 
 
 def choose_title(args: argparse.Namespace, metadata: dict[str, Any], markdown: str) -> str:
@@ -386,6 +455,45 @@ def choose_title(args: argparse.Namespace, metadata: dict[str, Any], markdown: s
 	if not title:
 		raise DraftError("Title is empty after Markdown cleanup.")
 	return title[:32]
+
+
+def apply_source_title_prefix(title: str, metadata: dict[str, Any]) -> str:
+	publication = chinese_publication_name(metadata)
+	if not publication:
+		return title
+	match = TITLE_SOURCE_PREFIX_RE.match(title)
+	body = title
+	if match:
+		prefix = (match.group(1) or match.group(2) or "").strip()
+		if normalize_publication_name(prefix) == publication:
+			body = match.group(3).strip()
+	if not body:
+		return title
+	return f"{publication}：{body}"
+
+
+def chinese_publication_name(metadata: dict[str, Any]) -> str | None:
+	for key in ("source_publication_zh", "publication_zh", "publication_cn"):
+		value = metadata.get(key)
+		if isinstance(value, str) and value.strip():
+			return value.strip().strip("《》")
+	for key in ("source_publication", "publication", "publisher", "source"):
+		value = metadata.get(key)
+		if isinstance(value, str) and value.strip():
+			return normalize_publication_name(value)
+	return None
+
+
+def normalize_publication_name(publication: str) -> str | None:
+	cleaned = re.sub(r"\s+", " ", publication.strip().strip("《》"))
+	if not cleaned:
+		return None
+	key = cleaned.lower()
+	if key in PUBLICATION_NAME_MAP:
+		return PUBLICATION_NAME_MAP[key]
+	if not re.search(r"[A-Za-z]", cleaned):
+		return cleaned
+	return None
 
 
 def markdown_to_wechat_html(markdown: str) -> str:
@@ -553,6 +661,21 @@ def find_markdown_image_paths(markdown: str, base_dir: Path) -> list[tuple[str, 
 			path = (base_dir / path).resolve()
 		images.append((raw, path))
 	return images
+
+
+def markdown_local_images_to_file_urls(markdown: str, base_dir: Path) -> str:
+	def repl(match: re.Match[str]) -> str:
+		alt = match.group(1)
+		raw = match.group(2).strip()
+		parsed = urllib.parse.urlparse(raw)
+		if parsed.scheme in {"http", "https", "file"}:
+			return match.group(0)
+		path = Path(urllib.parse.unquote(raw))
+		if not path.is_absolute():
+			path = (base_dir / path).resolve()
+		return f"![{alt}]({path.as_uri()})"
+
+	return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", repl, markdown)
 
 
 def replace_markdown_image_url(markdown: str, original: str, uploaded_url: str) -> str:
@@ -791,7 +914,13 @@ def discover_public_ip(timeout: float) -> tuple[str | None, str | None]:
 	return None, "Could not discover public IP; check API IP allowlist manually before live calls."
 
 
-def write_outputs(output_dir: Path, result: DraftResult, html_content: str, payload: dict[str, Any]) -> None:
+def write_outputs(
+	output_dir: Path,
+	result: DraftResult,
+	html_content: str,
+	payload: dict[str, Any],
+	preview_html_content: str | None = None,
+) -> None:
 	output_dir.mkdir(parents=True, exist_ok=True)
 	html_path = output_dir / "wechat_article.html"
 	preview_path = output_dir / "wechat_article.preview.html"
@@ -799,7 +928,10 @@ def write_outputs(output_dir: Path, result: DraftResult, html_content: str, payl
 	report_json_path = output_dir / "wechat_draft_report.json"
 	report_md_path = output_dir / "wechat_draft_report.md"
 	html_path.write_text(html_content, encoding="utf-8")
-	preview_path.write_text(render_preview_html(result.title or "WeChat Article Preview", html_content), encoding="utf-8")
+	preview_path.write_text(
+		render_preview_html(result.title or "WeChat Article Preview", preview_html_content or html_content),
+		encoding="utf-8",
+	)
 	payload_path.write_text(json.dumps(redacted_payload(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 	result.outputs = {
 		"html": str(html_path),
@@ -929,6 +1061,7 @@ def run_bundle(args: argparse.Namespace) -> int:
 	output_dir = args.output_dir.expanduser().resolve() if args.output_dir else default_bundle_output_dir(bundle_manifest)
 	payload: dict[str, Any] = {}
 	combined_html = ""
+	combined_preview_html = ""
 	result: DraftResult | None = None
 	try:
 		manifest = load_json(bundle_manifest)
@@ -945,6 +1078,7 @@ def run_bundle(args: argparse.Namespace) -> int:
 		article_reports: list[dict[str, Any]] = []
 		all_inline_images: list[UploadedImage] = []
 		html_parts: list[str] = []
+		preview_html_parts: list[str] = []
 		first_title = ""
 		first_digest = ""
 		first_source_url = ""
@@ -977,11 +1111,14 @@ def run_bundle(args: argparse.Namespace) -> int:
 				cover_media_id = f"DRY_RUN_COVER_MEDIA_ID_{index + 1}"
 				cover_url = None
 			html_content = markdown_to_wechat_html(body_markdown)
+			preview_markdown = body_markdown if args.live else markdown_local_images_to_file_urls(body_markdown, article_md.parent)
+			preview_html_content = markdown_to_wechat_html(preview_markdown)
 			item = build_article_item(title, author, digest, html_content, source_url, cover_media_id)
 			payload_articles.append(item)
 			warnings.extend(validate_payload({"articles": [item]}, cover_path))
 			all_inline_images.extend(uploaded_images)
 			html_parts.append(f"<!-- {ref['candidate_id']} {title} -->\n{html_content}")
+			preview_html_parts.append(f"<!-- {ref['candidate_id']} {title} -->\n{preview_html_content}")
 			article_report = {
 				"candidate_id": ref["candidate_id"],
 				"wechat_role": ref["wechat_role"],
@@ -1008,6 +1145,7 @@ def run_bundle(args: argparse.Namespace) -> int:
 		payload = {"articles": payload_articles}
 		payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
 		combined_html = "\n<hr/>\n".join(html_parts)
+		combined_preview_html = "\n<hr/>\n".join(preview_html_parts)
 		api_response = None
 		draft_media_id = None
 		status = "DRY_RUN_OK"
@@ -1044,7 +1182,7 @@ def run_bundle(args: argparse.Namespace) -> int:
 			warnings=warnings,
 			api_response=redact_response(api_response) if api_response else None,
 		)
-		write_outputs(output_dir, result, combined_html, payload)
+		write_outputs(output_dir, result, combined_html, payload, preview_html_content=combined_preview_html)
 		print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
 		return 0
 	except DraftError as exc:
@@ -1071,7 +1209,7 @@ def run_bundle(args: argparse.Namespace) -> int:
 		else:
 			result.status = status
 			result.blockers.append(blocker)
-		write_outputs(output_dir, result, combined_html, payload)
+		write_outputs(output_dir, result, combined_html, payload, preview_html_content=combined_preview_html or None)
 		print(json.dumps(result.to_json(), ensure_ascii=False, indent=2), file=sys.stderr)
 		return 2
 
@@ -1084,6 +1222,7 @@ def main() -> int:
 	output_dir: Path | None = None
 	payload: dict[str, Any] = {}
 	html_content = ""
+	preview_html_content = ""
 	result: DraftResult | None = None
 	try:
 		article_dir, article_md, metadata_path, cover_path, output_dir = resolve_inputs(args)
@@ -1111,6 +1250,8 @@ def main() -> int:
 		cover_url: str | None = None
 		access_token: str | None = None
 		html_content = markdown_to_wechat_html(body_markdown)
+		preview_markdown = body_markdown if args.live else markdown_local_images_to_file_urls(body_markdown, article_md.parent)
+		preview_html_content = markdown_to_wechat_html(preview_markdown)
 		payload = build_payload(title, author, digest, html_content, source_url, cover_media_id)
 		warnings.extend(validate_payload(payload, cover_path))
 
@@ -1139,6 +1280,8 @@ def main() -> int:
 			cover_media_id, cover_url, _cover_response = upload_cover(cover_path, access_token, args.timeout)
 
 		html_content = markdown_to_wechat_html(body_markdown)
+		preview_markdown = body_markdown if args.live else markdown_local_images_to_file_urls(body_markdown, article_md.parent)
+		preview_html_content = markdown_to_wechat_html(preview_markdown)
 		payload = build_payload(title, author, digest, html_content, source_url, cover_media_id)
 		payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -1163,7 +1306,7 @@ def main() -> int:
 		result.inline_images = inline_images
 		result.warnings = warnings
 		result.api_response = redact_response(api_response) if api_response else None
-		write_outputs(output_dir, result, html_content, payload)
+		write_outputs(output_dir, result, html_content, payload, preview_html_content=preview_html_content)
 		print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
 		return 0
 	except DraftError as exc:
@@ -1192,7 +1335,7 @@ def main() -> int:
 		else:
 			result.status = status
 			result.blockers.append(blocker)
-		write_outputs(output_dir, result, html_content, payload)
+		write_outputs(output_dir, result, html_content, payload, preview_html_content=preview_html_content or None)
 		print(json.dumps(result.to_json(), ensure_ascii=False, indent=2), file=sys.stderr)
 		return 2
 

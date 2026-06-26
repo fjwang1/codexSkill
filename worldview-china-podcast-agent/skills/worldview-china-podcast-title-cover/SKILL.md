@@ -22,6 +22,7 @@ The title should communicate both:
 
 - The video is sourced from an outside/foreign-facing conversation.
 - The claim is interesting enough to click.
+- The prefix itself is a viewer-facing identity hook, not a filing label.
 
 Use the original YouTube title as a reference signal for `translated_title_core`, not as a cage. If the original title is weak, vague, or translation-flavored, abandon its surface form and write the strongest truthful Chinese hook supported by the transcript: a sharp claim, conflict question, consequence, counterintuitive statement, or a source-speaker quote whose wording is allowed to be punchy out of its full context. The identity label may come from the YouTube title, description, visible speaker, transcript, or reliable local metadata.
 
@@ -30,9 +31,17 @@ Rules:
 - `video_title.txt` must contain the full Chinese title in `<source_identity_label>：<translated_title_core>` form.
 - Prefer a famous person's Chinese name when the speaker is genuinely famous and clearly identified, e.g. `马斯克：`, `特朗普：`, `黄仁勋：`.
 - If there is no famous person, use a concise role/nationality identity that gives the viewer context, e.g. `美国议员：`, `俄罗斯教授：`, `美国鉴证大V：`, `华尔街分析师：`, `美国智库学者：`, `上海美国商会前会长：`.
+- The identity prefix must be attractive enough to carry the first half of the title. Prefer a concrete lived-experience, institutional, seniority, geography, time, or track-record hook over a bland taxonomy. For example, write `旅居中东20年学者：` rather than `中国中东问题专家：`; write `上海美国商会前会长：` rather than `美国商界人士：`.
+- Identity selection is priority based, not a blanket ban on generic labels:
+  1. Famous clearly identified person: use the person's Chinese name.
+  2. Strong public title or China-linked role: use the real title if it is concise and clickable, e.g. `上海美国商会前会长：`, `白宫前中国顾问：`, `大西洋理事会学者：`, `旅居中东20年学者：`.
+  3. Weak, obscure, or overlong real title: use a short truthful fallback label that viewers understand quickly, e.g. `中国问题专家：`, `中东专家：`, `中国专家：`.
+  4. Never use empty labels such as `专家：`, `学者：`, `外国学者：`, `海外专家：`, or awkward hybrid labels such as `中国中东问题专家：` / `中东中国问题专家：`.
+- If using a short generic fallback such as `中国问题专家` or `中东专家`, `identity_basis` must explain that the source supports this domain label and that no brighter concise title is available or worth using.
 - Do not use lazy source labels such as `来自...`, `中文配音版`, `油管搬运`, `外网播客`, `《频道名》：`, `《播客名》：`, `CGSP：`, or `Podcast：`.
+- Do not use internal column/topic labels as the identity prefix, including `世界眼中的中国`, `世界看中国`, `海外视角`, `外网热议`, `中国观察`, `国际观察`, `嘉宾访谈`, or `专家圆桌`. Those are account/series tags, not viewer-facing title information.
 - Do not invent a famous name or role. If identity is uncertain, use a conservative generic role that is supported by metadata or transcript.
-- The title core must point out the “eye” of the episode. Do not write generic background titles such as `变局之后，美国、中国和新中东` because the viewer still cannot tell what happened between those actors.
+- The title core must point out the “eye” of the episode. Do not write generic background titles such as `变局之后，美国、中国和新中东`, `中东停火与中国经济足迹`, `中国在中东的新格局`, or `中国角色的脉络` because the viewer still cannot tell what happened between those actors.
 - Good title cores may be a little overstated if the source conversation supports them in substance or as an in-context quote, but they must not fabricate facts or invert the speaker's meaning.
 - `cover/cover_title.json.title_text` must equal `video_title.txt`.
 - The cover title must be the same Chinese title used as the video title.
@@ -100,7 +109,10 @@ The script does not use an LLM and does not choose the identity label itself.
 1. Read the original YouTube title from `source.info.json`; fall back to `metadata.json` or `source_metadata.json`.
 2. Decide `source_identity_label`:
    - Famous clearly identified speaker: use the person's Chinese name.
-   - Non-famous but credentialed speaker: use `nationality/region + role`, or the strongest concrete public role.
+   - Non-famous but credentialed speaker: first look for an attractive public role or lived-experience hook supported by evidence: years in the relevant region, former office, named institution, seniority, founder/host/editor role, China-linked office, or a distinctive professional vantage point.
+   - When several truthful labels are available, choose the one a Bilibili viewer would understand fastest and be most likely to click. Strong specificity beats taxonomy: `上海美国商会前会长` > `美国商界人士`; `旅居中东20年学者` > `中国中东问题专家`.
+   - If the truthful specific title is too long, obscure, institution-heavy, or not meaningfully more clickable, deliberately simplify to a short domain label such as `中国问题专家`, `中东专家`, `经济学家`, or `前外交官`.
+   - Avoid awkward hybrid labels and empty labels: `中国中东问题专家`, `中东中国问题专家`, `外国学者`, `海外专家`, `专家`, `学者`.
    - If multiple speakers, use the person whose viewpoint/title claim drives the video; if unclear, use the guest's role rather than the host/channel.
    - Record the evidence in `--identity-basis`.
 3. Write `translated_title_core` as a platform-native hook:
@@ -169,6 +181,8 @@ if --episode-index is used, cover_title.json.video_title_text equals video_title
 cover_title.json.source_title records the original YouTube title
 cover_title.json.title_source equals podcast_source_identity_plus_platform_native_hook or the legacy youtube_original_title_translated_with_source_identity
 cover_title.json.source_identity_label equals the prefix before `：` in video_title.txt
+cover_title.json.identity_label_policy.status == PASS
+if cover_title.json.identity_label_policy.type == fallback_generic, source_identity_basis explains why the short generic fallback is justified
 cover_title.json.translated_title_core equals the title after `：` in video_title.txt, or the episode subtitle for series episode titles
 cover_title.json.attractive_title_policy.status == PASS
 cover/background_raw.png and cover/background.png exist

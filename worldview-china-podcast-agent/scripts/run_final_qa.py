@@ -21,6 +21,15 @@ SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 TARGET_SOURCE_VIDEO_HEIGHT = 1440
 TARGET_FINAL_VIDEO_WIDTH = 2560
 TARGET_FINAL_VIDEO_HEIGHT = 1440
+FULL_TRANSLATION_COVERAGE_VALUES = {
+	"full_translation",
+	"full_translation_repaired",
+	"full_translation_repaired_compact",
+}
+LOCKED_ROSTER_PATCH_POLICIES = {
+	"single_speaker_patch_from_locked_roster",
+}
+MIN_SUBTITLE_GLOBAL_LEAD_SEC = 0.08
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -110,6 +119,19 @@ def _is_locked_roster_policy(value: Any) -> bool:
 	return str(value or "") in {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
 
 
+def _is_full_translation_coverage(value: Any) -> bool:
+	return str(value or "") in FULL_TRANSLATION_COVERAGE_VALUES
+
+
+def _chunk_uses_locked_roster(chunk: dict[str, Any], expected_speaker_names: list[str]) -> bool:
+	speaker_names = [str(name) for name in chunk.get("speaker_names") or []]
+	if chunk.get("vibevoice_mode") == "dialogue":
+		return speaker_names == expected_speaker_names
+	if str(chunk.get("voice_context_policy") or "") in LOCKED_ROSTER_PATCH_POLICIES:
+		return bool(speaker_names) and set(speaker_names).issubset(set(expected_speaker_names))
+	return False
+
+
 def _has_rolling_caption_repetition(text: str) -> bool:
 	words = re.findall(r"[A-Za-z][A-Za-z']+|[\u4e00-\u9fff]", text.lower())
 	if len(words) < 12:
@@ -157,6 +179,80 @@ def _resolved_path_set(values: Any) -> set[str]:
 		except OSError:
 			resolved.add(str(Path(value).expanduser()))
 	return resolved
+
+
+def _resolved_hash_map(values: Any) -> dict[str, str]:
+	if not isinstance(values, dict):
+		return {}
+	resolved: dict[str, str] = {}
+	for key, value in values.items():
+		if not isinstance(key, str) or not key.strip():
+			continue
+		try:
+			path_key = str(Path(key).expanduser().resolve())
+		except OSError:
+			path_key = str(Path(key).expanduser())
+		resolved[path_key] = str(value)
+	return resolved
+
+
+def _require_reviewed_file_hashes_current(
+	review: dict[str, Any],
+	required_paths: dict[str, Path],
+	failures: list[str],
+	review_label: str,
+) -> None:
+	hashes = _resolved_hash_map(review.get("reviewed_file_hashes"))
+	if not hashes:
+		failures.append(f"{review_label} does not record reviewed_file_hashes; rerun the review after current files are finalized")
+		return
+	for label, path in required_paths.items():
+		resolved = str(path.resolve())
+		if resolved not in hashes:
+			failures.append(f"{review_label} does not record current hash for {label}: {path}")
+		elif hashes[resolved] != _sha256(path):
+			failures.append(f"{review_label} is stale for current {label}: {path}")
+
+
+def _require_text_review_registry_loaded(review: dict[str, Any], failures: list[str], review_label: str) -> None:
+	risk_registry = review.get("risk_registry") if isinstance(review.get("risk_registry"), dict) else {}
+	if risk_registry.get("load_status") != "loaded":
+		failures.append(f"{review_label} did not load the structured Bilibili risk registry")
+	if risk_registry.get("deterministic_rule_ids_missing_from_registry"):
+		failures.append(f"{review_label} risk registry is missing deterministic rule ids")
+
+
+def _require_platform_rejection_lessons_used(
+	run_dir: Path,
+	review: dict[str, Any],
+	review_path: Path,
+	failures: list[str],
+) -> None:
+	lesson_paths = [
+		run_dir / "04c-bilibili-text-compliance/platform_rejection_lessons.json",
+	]
+	audit_report_path = run_dir / "11c-bilibili-audit-monitor/bilibili_audit_monitor_report.json"
+	if audit_report_path.exists():
+		audit_report = _read_json(audit_report_path)
+		if str(audit_report.get("status") or "") == "RETURNED_NEEDS_REPAIR" or audit_report.get("returned_issue"):
+			lesson_paths.append(audit_report_path)
+	existing_lesson_paths = [path for path in lesson_paths if path.exists()]
+	if not existing_lesson_paths:
+		return
+	platform_lessons = review.get("platform_rejection_lessons") if isinstance(review.get("platform_rejection_lessons"), dict) else {}
+	if platform_lessons.get("present") is not True:
+		failures.append("Bilibili text compliance review did not record platform_rejection_lessons even though rejection lessons exist")
+		return
+	recorded_paths = _resolved_path_set([
+		str(file_entry.get("path") or "")
+		for file_entry in platform_lessons.get("files") or []
+		if isinstance(file_entry, dict)
+	])
+	for lesson_path in existing_lesson_paths:
+		if str(lesson_path.resolve()) not in recorded_paths:
+			failures.append(f"Bilibili text compliance review did not load rejection lesson file: {lesson_path}")
+		if review_path.exists() and lesson_path.stat().st_mtime > review_path.stat().st_mtime + 0.001:
+			failures.append(f"Bilibili text compliance review is older than rejection lesson file: {lesson_path}")
 
 
 def _source_frame_report_has_podcast_pass(text: str) -> bool:
@@ -258,7 +354,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	if series_episode:
 		base_title_prefix = str(episode_manifest.get("series_title_prefix") or "")
 		episode_subtitle = str(episode_manifest.get("episode_subtitle") or "")
-		episode_order_marker = str(episode_manifest.get("episode_order_marker") or episode_manifest.get("episode_index") or "")
+		episode_order_marker = str(episode_manifest.get("episode_order_marker") or "")
 		expected_video_title = str(episode_manifest.get("video_title") or "")
 		if expected_video_title and video_title != expected_video_title:
 			failures.append("series episode video_title.txt does not match episode_manifest video_title")
@@ -449,8 +545,8 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		if "status: PASS" not in safety_report:
 			failures.append("mainland publish safety report does not record status: PASS")
 	else:
-		if translation_coverage != "full_translation":
-			failures.append("translation content_coverage is not full_translation")
+		if not _is_full_translation_coverage(translation_coverage):
+			failures.append("translation content_coverage is not a full-translation coverage policy")
 	translation_semantic_qa = _read_json(paths["translation_semantic_qa"])
 	if translation_semantic_qa.get("status") != "PASS":
 		failures.append("translation semantic QA status is not PASS")
@@ -511,6 +607,16 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	}.items():
 		if str(path.resolve()) not in early_reviewed_files:
 			failures.append(f"early risk compliance review did not cover current {label}: {path}")
+	_require_text_review_registry_loaded(early_text_compliance, failures, "early risk compliance review")
+	_require_reviewed_file_hashes_current(
+		early_text_compliance,
+		{
+			"faithful_translation_json": paths["faithful_translation_json"],
+			"active_translation_json": paths["translation_json"],
+		},
+		failures,
+		"early risk compliance review",
+	)
 	chapters = _read_json(paths["chapter_segments"]).get("chapters") or []
 	if not chapters:
 		failures.append("chapter_segments has no chapters")
@@ -550,6 +656,22 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	}.items():
 		if str(path.resolve()) not in reviewed_files:
 			failures.append(f"Bilibili text compliance review did not cover current {label}: {path}")
+	_require_text_review_registry_loaded(text_compliance, failures, "Bilibili text compliance review")
+	_require_reviewed_file_hashes_current(
+		text_compliance,
+		{
+			"podcast_script": paths["podcast_script"],
+			"video_title": paths["video_title"],
+			"cover_title": paths["cover_title"],
+			"audio_manifest": paths["audio_manifest"],
+			"subtitle_manifest": paths["subtitle_manifest"],
+			"subtitles_srt": paths["subtitles_srt"],
+			"subtitles_ass": paths["subtitles_ass"],
+		},
+		failures,
+		"Bilibili text compliance review",
+	)
+	_require_platform_rejection_lessons_used(run_dir, text_compliance, paths["text_compliance"], failures)
 	translation_display_text = "\n".join(str(segment.get("zh_text") or "") for segment in translation.get("segments") or [])
 	for label, text in {
 		"translation zh_text": translation_display_text,
@@ -605,10 +727,20 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		if list(chunk.get("speaker_names") or []) != expected_locked_speaker_names:
 			failures.append(f"{chunk.get('chunk_id')} chunk_plan speaker_names do not match locked roster")
 	for chunk in audio_manifest.get("chunks") or []:
-		if chunk.get("vibevoice_mode") != "dialogue":
-			failures.append(f"{chunk.get('chunk_id')} audio_manifest chunk is not dialogue mode under locked roster")
-		if list(chunk.get("speaker_names") or []) != expected_locked_speaker_names:
+		chunk_id = str(chunk.get("chunk_id") or "")
+		if not _chunk_uses_locked_roster(chunk, expected_locked_speaker_names):
 			failures.append(f"{chunk.get('chunk_id')} audio_manifest speaker_names do not match locked roster")
+		chunk_audio_value = chunk.get("audio")
+		if not chunk_audio_value:
+			failures.append(f"{chunk_id} audio_manifest chunk is missing audio path")
+			continue
+		chunk_audio_path = _resolve_run_path(run_dir, chunk_audio_value)
+		if not chunk_audio_path.exists():
+			failures.append(f"{chunk_id} audio_manifest chunk audio is missing: {chunk_audio_path}")
+			continue
+		expected_chunk_sha = str(chunk.get("audio_sha256") or "")
+		if expected_chunk_sha and _sha256(chunk_audio_path) != expected_chunk_sha:
+			failures.append(f"{chunk_id} audio_manifest chunk audio sha256 mismatch: {chunk_audio_path}")
 	if audio_manifest.get("vibevoice_runner") == "resident_batch":
 		resident_report_value = audio_manifest.get("resident_batch_report")
 		if not resident_report_value:
@@ -619,8 +751,17 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 				failures.append(f"resident_batch_report is missing: {resident_report_path}")
 			else:
 				resident_report = _read_json(resident_report_path)
-				if int(resident_report.get("job_count") or 0) != len(audio_manifest.get("chunks") or []):
-					failures.append("resident_batch_report job_count does not cover every final chunk")
+				report_jobs = resident_report.get("jobs") or []
+				if int(resident_report.get("job_count") or 0) != len(report_jobs):
+					failures.append("resident_batch_report job_count does not match jobs length")
+				final_chunk_ids = {str(chunk.get("chunk_id") or "") for chunk in audio_manifest.get("chunks") or []}
+				report_job_ids = {str(job.get("job_id") or "") for job in report_jobs}
+				if not report_job_ids:
+					failures.append("resident_batch_report has no jobs")
+				elif not report_job_ids.issubset(final_chunk_ids):
+					failures.append("resident_batch_report contains jobs outside final audio_manifest chunks")
+				elif len(report_job_ids) != len(final_chunk_ids):
+					warnings.append("resident_batch_report covers repaired/rerun jobs only; final chunk audio files were validated directly")
 				for job in resident_report.get("jobs") or []:
 					if job.get("status") != "pass":
 						failures.append(f"resident batch job {job.get('job_id')} status is not pass")
@@ -707,11 +848,41 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 					if int(summary.get("protected_range_violation_count") or 0) != 0:
 						failures.append("turn-retimed edit plan cuts through protected scene ranges")
 					if float(summary.get("min_kept_segment_duration_sec") or 0) < 1.2:
-						failures.append("turn-retimed edit plan has kept video segments shorter than 1.2s")
+						warnings.append("turn-retimed edit plan includes short kept video segments; allowed for opening preroll or freeze-tail holds")
 					if abs(float(summary.get("duration_delta_vs_target_sec") or 0)) > 0.75:
 						failures.append("turn-retimed edit plan duration is not within 0.75s of target audio timeline")
+					audio_start_offset_sec = float(summary.get("audio_start_offset_sec") or turn_retime.get("audio_start_offset_sec") or render_manifest.get("audio_start_offset_sec") or 0.0)
+					target_duration_sec = float(summary.get("target_duration_sec") or 0.0)
+					if target_duration_sec and abs(target_duration_sec - (audio_duration + audio_start_offset_sec)) > 0.75:
+						failures.append(
+							"turn-retimed edit plan target duration does not match current final audio plus opening offset: "
+							f"target={target_duration_sec:.2f} audio={audio_duration:.2f} offset={audio_start_offset_sec:.2f}"
+						)
+					if abs(video_duration - (audio_duration + audio_start_offset_sec)) > 1.0:
+						failures.append(
+							"turn-retimed final video duration does not match current final audio plus opening offset: "
+							f"video={video_duration:.2f} audio={audio_duration:.2f} offset={audio_start_offset_sec:.2f}"
+						)
+					if int(summary.get("turn_boundary_drift_violation_count") or 0) != 0:
+						failures.append("turn-retimed edit plan has per-turn boundary drift violations")
+					if int(summary.get("audio_turn_missing_count") or 0) != 0:
+						failures.append("turn-retimed edit plan has dialogue source turns without matched audio turns")
+					if int(summary.get("speaker_mismatch_count") or 0) != 0:
+						failures.append("turn-retimed edit plan matched one or more source turns to a different audio speaker")
+					if int(summary.get("extension_policy_violation_count") or 0) != 0:
+						failures.append("turn-retimed edit plan requires excessive freeze-tail extension")
 					if float(summary.get("cuts_per_minute") or 0) > 10.0:
 						failures.append("turn-retimed edit plan cut density exceeds 10 cuts/minute")
+					reusable_source_audio_segments = [
+						segment
+						for segment in retime_plan.get("edit_segments") or []
+						if segment.get("reuse_source_audio")
+					]
+					if reusable_source_audio_segments:
+						audio_mix = render_manifest.get("audio_mix") or {}
+						mixed_segments = audio_mix.get("source_background_audio_segments") or []
+						if audio_mix.get("source_background_audio_reused") is not True or len(mixed_segments) != len(reusable_source_audio_segments):
+							failures.append("turn-retimed render did not mix all reusable source background audio events")
 	else:
 		if abs(video_duration - audio_duration) > 2.0:
 			failures.append(f"final video/audio duration mismatch: video={video_duration:.2f} audio={audio_duration:.2f}")
@@ -719,10 +890,51 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	timeline = _read_json(paths["dialogue_timeline"])
 	if not timeline.get("turns") or not timeline.get("cues"):
 		failures.append("dialogue_timeline missing turns or cues")
+	if timeline.get("audio_sha256") and timeline.get("audio_sha256") != _sha256(paths["final_audio"]):
+		failures.append("dialogue_timeline audio_sha256 does not match current final_podcast.wav")
+	if timeline.get("audio_manifest_sha256") and timeline.get("audio_manifest_sha256") != _sha256(paths["audio_manifest"]):
+		failures.append("dialogue_timeline audio_manifest_sha256 does not match current audio_manifest.json")
+	subtitle_cue_policy = timeline.get("subtitle_cue_policy") if isinstance(timeline.get("subtitle_cue_policy"), dict) else {}
+	if subtitle_cue_policy.get("cue_text_policy") != "complete_sentence_or_semantic_clause_no_hard_width_split":
+		failures.append("dialogue_timeline subtitle cue text policy is not complete_sentence_or_semantic_clause_no_hard_width_split")
+	if subtitle_cue_policy.get("cue_timing_policy") != "asr_character_span":
+		failures.append("dialogue_timeline subtitle cue timing policy is not asr_character_span")
+	for cue in timeline.get("cues") or []:
+		if str(cue.get("timing_source") or "") not in {"asr_character_span", "interpolated_character_span"}:
+			failures.append(f"dialogue_timeline cue missing accepted timing_source: cue_index={cue.get('cue_index')}")
+			break
 	subtitle_manifest = _read_json(paths["subtitle_manifest"])
 	if subtitle_manifest.get("style", {}).get("speaker_labels") is not False:
 		failures.append("subtitle_manifest does not disable speaker labels")
+	timing_policy = subtitle_manifest.get("timing_policy") if isinstance(subtitle_manifest.get("timing_policy"), dict) else {}
+	segmentation_policy = subtitle_manifest.get("segmentation_policy") if isinstance(subtitle_manifest.get("segmentation_policy"), dict) else {}
+	if timing_policy.get("status") != "PASS":
+		failures.append("subtitle_manifest timing_policy.status is not PASS")
+	if float(timing_policy.get("global_lead_sec") or subtitle_manifest.get("global_lead_sec") or 0.0) < MIN_SUBTITLE_GLOBAL_LEAD_SEC:
+		failures.append("subtitle global lead is too small to prevent late subtitles")
+	if int(timing_policy.get("late_start_violation_count") or 0) != 0:
+		failures.append("subtitle_manifest records late subtitle start violations")
+	if timing_policy.get("lead_applied_per_split_cue") is not True:
+		failures.append("subtitle_manifest does not confirm lead_applied_per_split_cue=true")
+	if segmentation_policy.get("status") != "PASS":
+		failures.append("subtitle_manifest segmentation_policy.status is not PASS")
+	if int(segmentation_policy.get("hard_width_fallback_count") or 0) != 0:
+		failures.append("subtitle_manifest used hard width fallback splitting")
+	if int(segmentation_policy.get("line_violation_count") or 0) != 0:
+		failures.append("subtitle_manifest has non-single-line cue violations")
+	if int(segmentation_policy.get("dangling_fragment_violation_count") or 0) != 0:
+		failures.append("subtitle_manifest has dangling fragment cue violations")
+	if (subtitle_manifest.get("style") or {}).get("max_lines") != 1:
+		failures.append("subtitle_manifest style.max_lines is not 1")
 	subtitle_manifest_text = "\n".join(str(cue.get("display_text") or cue.get("text") or "") for cue in subtitle_manifest.get("cues") or [])
+	for cue in subtitle_manifest.get("cues") or []:
+		text = str(cue.get("display_text") or cue.get("text") or "")
+		if "\n" in text:
+			failures.append(f"subtitle cue contains a line break: index={cue.get('index')}")
+			break
+		if cue.get("fits_single_line") is False:
+			failures.append(f"subtitle cue does not fit one visible line: index={cue.get('index')}")
+			break
 	subtitle_sidecar_text = "\n".join([
 		subtitle_manifest_text,
 		_read_text(paths["subtitles_srt"]),

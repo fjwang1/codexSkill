@@ -16,7 +16,11 @@ OUTPUT_DIRNAME = "06d-voice-consistency-qa"
 RESULT_NAME = "voice-consistency-qa-result.json"
 REPORT_NAME = "voice-consistency-qa-report.md"
 SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
-LOCKED_POLICIES = {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
+LOCKED_POLICIES = {
+	"locked_multi_speaker_roster",
+	"locked_two_speaker_roster",
+	"single_speaker_patch_from_locked_roster",
+}
 FORBIDDEN_DEFAULT_VOICES = {"Xinran", "Bowen", "BowenClean"}
 
 
@@ -97,6 +101,106 @@ def _expected_voice_names(run_dir: Path) -> tuple[dict[str, str], dict[str, Path
 	return voices, references, manifest_path, failures
 
 
+def _speaker_roster(run_dir: Path) -> dict[str, Any]:
+	path = run_dir / "02a-speaker-census" / "speaker_roster.json"
+	if not path.exists():
+		return {}
+	try:
+		roster = _read_json(path)
+	except json.JSONDecodeError:
+		return {}
+	return roster if isinstance(roster, dict) else {}
+
+
+def _gender_hint(value: Any) -> str | None:
+	text = str(value or "").lower()
+	if re.search(r"\bfemale\b|\bwoman\b|\bwomen\b|女", text):
+		return "female"
+	if re.search(r"\bmale\b|\bman\b|\bmen\b|男", text):
+		return "male"
+	return None
+
+
+def _speaker_roster_gender_hints(roster: dict[str, Any]) -> dict[str, str]:
+	speakers = roster.get("speakers")
+	if not isinstance(speakers, dict):
+		return {}
+	result: dict[str, str] = {}
+	for speaker, info in speakers.items():
+		if not isinstance(info, dict):
+			continue
+		hint = _gender_hint(" ".join(str(info.get(key) or "") for key in ("identity", "description", "role")))
+		if hint:
+			result[str(speaker)] = hint
+	return result
+
+
+def _speaker_map_lineage_findings(
+	path: Path,
+	key_path: str,
+	speaker_map: dict[str, Any],
+	expected_voices: dict[str, str],
+	roster_gender_hints: dict[str, str],
+) -> list[dict[str, Any]]:
+	findings: list[dict[str, Any]] = []
+	for speaker in _sorted_speakers(speaker_map.keys()):
+		info = speaker_map.get(speaker)
+		if not isinstance(info, dict):
+			continue
+		vibevoice_name = str(info.get("vibevoice_name") or "")
+		if vibevoice_name and expected_voices.get(speaker) and vibevoice_name != expected_voices[speaker]:
+			findings.append({
+				"file": str(path),
+				"path": f"{key_path}.{speaker}.vibevoice_name",
+				"message": f"speaker_map vibevoice_name {vibevoice_name} does not match locked roster {expected_voices[speaker]}",
+			})
+		expected_gender = roster_gender_hints.get(speaker)
+		role_gender = _gender_hint(" ".join(str(info.get(key) or "") for key in ("display_role", "style")))
+		if expected_gender and role_gender and expected_gender != role_gender:
+			findings.append({
+				"file": str(path),
+				"path": f"{key_path}.{speaker}.display_role",
+				"message": (
+					f"speaker_map role gender hint {role_gender} conflicts with 02a roster "
+					f"gender hint {expected_gender} for {speaker}"
+				),
+			})
+	return findings
+
+
+def _resident_report_lineage_findings(
+	path: Path,
+	payload: dict[str, Any],
+	expected_voices: dict[str, str],
+) -> list[dict[str, Any]]:
+	if "resident_batch_report" not in path.name:
+		return []
+	findings: list[dict[str, Any]] = []
+	for index, job in enumerate(payload.get("jobs") or [], start=1):
+		if not isinstance(job, dict) or job.get("status") not in {None, "pass", "skipped_existing"}:
+			continue
+		job_path = f"jobs[{index - 1}]"
+		voice_sample_speakers = [str(value) for value in (job.get("voice_sample_speaker_numbers") or [])]
+		actual_speakers = [str(value) for value in (job.get("actual_speakers") or [])]
+		if job.get("status") == "pass" and (not voice_sample_speakers or not actual_speakers):
+			findings.append({
+				"file": str(path),
+				"path": job_path,
+				"message": "resident report is missing voice_sample_speaker_numbers/actual_speakers proof for locked roster mapping",
+			})
+			continue
+		for sample_index, speaker in enumerate(voice_sample_speakers):
+			expected_name = expected_voices.get(f"Speaker {speaker}") or expected_voices.get(speaker)
+			actual_name = actual_speakers[sample_index] if sample_index < len(actual_speakers) else ""
+			if expected_name and actual_name and actual_name != expected_name:
+				findings.append({
+					"file": str(path),
+					"path": f"{job_path}.actual_speakers[{sample_index}]",
+					"message": f"resident voice sample for {speaker} used {actual_name}, expected {expected_name}",
+				})
+	return findings
+
+
 def _lineage_input_paths(run_dir: Path) -> list[Path]:
 	paths = [
 		run_dir / "audio/audio_manifest.json",
@@ -132,7 +236,12 @@ def _expected_voice_list(expected_voices: dict[str, str]) -> list[str]:
 	return [expected_voices[speaker] for speaker in _sorted_speakers(expected_voices.keys())]
 
 
-def _check_payload_lineage(path: Path, payload: dict[str, Any], expected_voices: dict[str, str]) -> list[dict[str, Any]]:
+def _check_payload_lineage(
+	path: Path,
+	payload: dict[str, Any],
+	expected_voices: dict[str, str],
+	roster_gender_hints: dict[str, str],
+) -> list[dict[str, Any]]:
 	findings: list[dict[str, Any]] = []
 	expected_list = _expected_voice_list(expected_voices)
 	expected_set = set(expected_list)
@@ -145,11 +254,11 @@ def _check_payload_lineage(path: Path, payload: dict[str, Any], expected_voices:
 			})
 		if key_path.endswith("speaker_names") and isinstance(value, list) and value:
 			names = [str(item) for item in value]
-			if names != expected_list:
+			if names != expected_list and not set(names).issubset(expected_set):
 				findings.append({
 					"file": str(path),
 					"path": key_path,
-					"message": f"speaker_names {names} do not exactly match locked roster {expected_list}",
+					"message": f"speaker_names {names} are not drawn from locked roster {expected_list}",
 				})
 		if key_path.endswith("speaker_voices") and isinstance(value, dict):
 			flat = {speaker: str(voice) for speaker, voice in value.items() if isinstance(voice, str)}
@@ -171,15 +280,19 @@ def _check_payload_lineage(path: Path, payload: dict[str, Any], expected_voices:
 				"path": key_path,
 				"message": f"forbidden default VibeVoice voice appears in lineage: {value}",
 			})
+		if key_path.endswith("speaker_map") and isinstance(value, dict):
+			findings.extend(_speaker_map_lineage_findings(path, key_path, value, expected_voices, roster_gender_hints))
 	if "audio/audio_manifest.json" in str(path) or "chunk_plan.json" in str(path) or "chunk_manifest.json" in str(path):
 		if payload.get("voice_context_policy") and str(payload.get("voice_context_policy")) not in LOCKED_POLICIES:
 			findings.append({"file": str(path), "path": "voice_context_policy", "message": "top-level voice_context_policy is not locked"})
+	findings.extend(_resident_report_lineage_findings(path, payload, expected_voices))
 	return findings
 
 
 def run_lineage_qa(run_dir: Path, expected_voices: dict[str, str]) -> dict[str, Any]:
 	findings: list[dict[str, Any]] = []
 	reviewed: list[str] = []
+	roster_gender_hints = _speaker_roster_gender_hints(_speaker_roster(run_dir))
 	if not expected_voices:
 		findings.append({"file": str(run_dir), "path": "voice_prompt_manifest", "message": "no expected locked voices found"})
 	for path in _lineage_input_paths(run_dir):
@@ -189,7 +302,7 @@ def run_lineage_qa(run_dir: Path, expected_voices: dict[str, str]) -> dict[str, 
 		except json.JSONDecodeError as exc:
 			findings.append({"file": str(path), "path": "$", "message": f"invalid json: {exc}"})
 			continue
-		findings.extend(_check_payload_lineage(path, payload, expected_voices))
+		findings.extend(_check_payload_lineage(path, payload, expected_voices, roster_gender_hints))
 	required = [
 		run_dir / "audio/audio_manifest.json",
 		run_dir / "05-vibevoice-chunks/chunk_plan.json",
@@ -363,6 +476,23 @@ def _select_samples(
 	return sorted(samples.values(), key=lambda item: (float(item["start_sec"]), item["sample_id"]))
 
 
+def _classify_acoustic_sample(
+	expected_speaker: str,
+	best_speaker: str,
+	assigned_score: float,
+	margin: float,
+	min_similarity_margin: float,
+	min_assigned_similarity: float,
+) -> tuple[str, str]:
+	if best_speaker != expected_speaker:
+		return "FAIL", "voice_identity_mismatch"
+	if assigned_score < min_assigned_similarity:
+		return "REVIEW", "low_assigned_similarity"
+	if margin < min_similarity_margin:
+		return "REVIEW", "low_similarity_margin"
+	return "PASS", "passed_thresholds"
+
+
 def run_acoustic_qa(
 	run_dir: Path,
 	expected_voices: dict[str, str],
@@ -420,16 +550,18 @@ def run_acoustic_qa(
 		assigned_score = similarities.get(speaker, -1.0)
 		second_score = ranked[1][1] if len(ranked) > 1 else -1.0
 		margin = assigned_score - max(score for candidate, score in similarities.items() if candidate != speaker)
-		status = "PASS"
-		if best_speaker != speaker:
-			status = "FAIL"
-		elif assigned_score < min_assigned_similarity:
-			status = "REVIEW"
-		elif margin < min_similarity_margin:
-			status = "REVIEW"
+		status, status_reason = _classify_acoustic_sample(
+			speaker,
+			best_speaker,
+			assigned_score,
+			margin,
+			min_similarity_margin,
+			min_assigned_similarity,
+		)
 		result = {
 			**sample,
 			"status": status,
+			"status_reason": status_reason,
 			"rms": round(rms, 6),
 			"assigned_similarity": round(assigned_score, 6),
 			"best_speaker": best_speaker,
@@ -441,11 +573,12 @@ def run_acoustic_qa(
 		if status == "FAIL":
 			failures.append({**result, "message": "sample is acoustically closer to a different speaker"})
 		elif status == "REVIEW":
-			warnings.append(f"{sample['sample_id']} has low voice similarity confidence")
+			warnings.append(f"{sample['sample_id']} has low voice similarity confidence: {status_reason}")
 	status = "PASS" if not failures else "FAIL"
 	return {
 		"status": status,
 		"sample_count": len(results),
+		"identity_mismatch_count": sum(1 for item in results if item.get("status_reason") == "voice_identity_mismatch"),
 		"reference_metrics": reference_metrics,
 		"samples": results,
 		"failures": failures,

@@ -28,7 +28,7 @@ Rules:
 - Set `category` to `知识`.
 - Set `creation_declaration` to `含AI生成内容`.
 - Preserve existing schedule fields from an existing `bilibili_upload_metadata.json` when present.
-- For series episode runs, preserve the schedule seed written by `04b-series-episodes`, where episode 1 uses the user-provided publish time and episode N adds N-1 hours. Record `episode_index`, `episode_count`, `episode_subtitle`, `series_title_prefix`, and `cover_title_text` from `episode_manifest.json` / `cover_title.json`.
+- For series episode runs, preserve the schedule seed written by `04b-series-episodes`. The schedule source must remain `series_daily_11_17_balanced_ordered_slots`: ordered episodes are distributed across daily `11:00` and `17:00` slots, with odd-count remainders assigned to the earlier slot. Preserve `series_schedule_policy`, `series_schedule_slots`, slot index/position fields, and record `episode_index`, `episode_count`, `episode_subtitle`, `series_title_prefix`, and `cover_title_text` from `episode_manifest.json` / `cover_title.json`.
 
 ## Inputs
 
@@ -137,7 +137,8 @@ metadata.description is exactly one public-facing content summary sentence and c
 if episode_manifest.json exists, metadata.title equals the ordered episode title in video_title.txt
 if episode_manifest.json exists, metadata.episode_index and metadata.episode_count match episode_manifest.json
 if episode_manifest.json exists, metadata.cover_title_text equals cover/cover_title.json.title_text
-if scheduled_publish_at exists, metadata preserves scheduled_publish_at, scheduled_publish_timezone, and schedule_source from the preexisting metadata seed
+if scheduled_publish_at exists, metadata preserves scheduled_publish_at, scheduled_publish_timezone, schedule_source, and any series_schedule_* fields from the preexisting metadata seed or episode_manifest.json
+if episode_manifest.json exists and scheduled_publish_at exists, metadata.schedule_source == series_daily_11_17_balanced_ordered_slots
 metadata.description does not include title/source/channel/url/tag/chapter blocks such as 观点身份, 核心议题, 身份依据, 原视频标题, 来源频道, 原链接, 标签, or 章节
 ```
 

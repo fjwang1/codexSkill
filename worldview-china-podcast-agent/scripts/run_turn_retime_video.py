@@ -21,8 +21,13 @@ DEFAULT_SCENE_THRESHOLD = 0.30
 DEFAULT_SCENE_PROTECT_SEC = 0.5
 DEFAULT_TURN_EDGE_PROTECT_SEC = 0.8
 DEFAULT_MIN_TRIM_SEC = 0.8
+DEFAULT_MIN_EXTEND_SEC = 0.05
+DEFAULT_MAX_TURN_EXTENSION_SEC = 12.0
+DEFAULT_MAX_TURN_EXTENSION_RATIO = 0.30
+DEFAULT_MAX_TURN_BOUNDARY_DRIFT_SEC = 0.75
 DEFAULT_MIN_KEPT_SEGMENT_SEC = 1.2
 DEFAULT_MAX_CUTS_PER_MINUTE = 10.0
+REUSABLE_SOURCE_AUDIO_EVENT_TYPES = {"music", "applause", "intro", "outro", "sound", "sfx", "laughter"}
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -132,6 +137,10 @@ def _range_overlaps_any(candidate: tuple[float, float], ranges: list[tuple[float
 
 def _path_for_concat(path: Path) -> str:
 	return str(path.resolve()).replace("'", "'\\''")
+
+
+def _ffmpeg_filter_path(path: Path) -> str:
+	return str(path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
 def _measure_frame_motion(frame_paths: list[Path]) -> list[dict[str, float]]:
@@ -280,6 +289,78 @@ def _coerce_turn_index(item: dict[str, Any], index: int) -> int:
 	return int(value)
 
 
+def _non_dialogue_event_type(text: str) -> str | None:
+	value = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+	if not value:
+		return None
+	match = re.fullmatch(r"\[(music|applause|silence|intro|outro|sound|sfx|laughter|noise|preroll)\]", value)
+	if not match:
+		return None
+	label = match.group(1)
+	if label == "noise":
+		return "background_audio_unknown"
+	return label
+
+
+def _is_non_dialogue_text(text: str) -> bool:
+	return _non_dialogue_event_type(text) is not None
+
+
+def _normalize_source_turn_ranges(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	ordered = sorted(turns, key=lambda item: (float(item["source_start_sec"]), float(item["source_end_sec"])))
+	if not ordered:
+		return []
+	normalized: list[dict[str, Any]] = []
+	first_start = float(ordered[0]["source_start_sec"])
+	if first_start > 0.1:
+		normalized.append({
+			"turn_id": "source_preroll_0000",
+			"turn_index": 0,
+			"speaker": None,
+			"source_start_sec": 0.0,
+			"source_end_sec": first_start,
+			"source_text": "[preroll]",
+			"trim_candidates": [],
+			"silence_ranges": [],
+			"filler_ranges": [],
+			"non_dialogue": True,
+			"source_audio_event_type": "preroll",
+			"reuse_source_audio": False,
+			"synthetic": True,
+		})
+	for raw_turn in ordered:
+		turn = dict(raw_turn)
+		if normalized:
+			previous = normalized[-1]
+			previous_end = float(previous["source_end_sec"])
+			start = float(turn["source_start_sec"])
+			has_seen_dialogue = any(not item.get("non_dialogue") for item in normalized)
+			if start > previous_end + 0.1 and not has_seen_dialogue:
+				normalized.append({
+					"turn_id": f"source_initial_gap_before_{turn['turn_id']}",
+					"turn_index": int(turn["turn_index"]) - 1,
+					"speaker": None,
+					"source_start_sec": previous_end,
+					"source_end_sec": start,
+					"source_text": "[silence]",
+					"trim_candidates": [],
+					"silence_ranges": [],
+					"filler_ranges": [],
+					"non_dialogue": True,
+					"source_audio_event_type": "silence",
+					"reuse_source_audio": False,
+					"synthetic": True,
+				})
+			elif start < previous_end:
+				if previous.get("speaker") != turn.get("speaker"):
+					previous["source_end_sec"] = max(float(previous["source_start_sec"]), start)
+				else:
+					turn["source_start_sec"] = previous_end
+		if float(turn["source_end_sec"]) > float(turn["source_start_sec"]):
+			normalized.append(turn)
+	return normalized
+
+
 def _load_source_turns(path: Path, source_time_offset_sec: float = 0.0) -> list[dict[str, Any]]:
 	data = _read_json(path)
 	if isinstance(data, dict):
@@ -292,8 +373,8 @@ def _load_source_turns(path: Path, source_time_offset_sec: float = 0.0) -> list[
 	for index, item in enumerate(raw, start=1):
 		if not isinstance(item, dict):
 			continue
-		start_value = item.get("source_start", item.get("start", item.get("start_sec")))
-		end_value = item.get("source_end", item.get("end", item.get("end_sec")))
+		start_value = item.get("source_start", item.get("source_start_sec", item.get("start", item.get("start_sec"))))
+		end_value = item.get("source_end", item.get("source_end_sec", item.get("end", item.get("end_sec"))))
 		if start_value is None or end_value is None:
 			continue
 		start = _parse_time(start_value) - source_time_offset_sec
@@ -303,19 +384,29 @@ def _load_source_turns(path: Path, source_time_offset_sec: float = 0.0) -> list[
 		speaker = str(item.get("speaker") or item.get("speaker_id") or "").strip()
 		if speaker in {"0", "1"}:
 			speaker = f"Speaker {speaker}"
+		source_text = str(item.get("source_text") or item.get("text") or item.get("zh_text") or "")
+		event_type = str(item.get("source_audio_event_type") or item.get("event_type") or "").strip() or _non_dialogue_event_type(source_text)
+		reuse_source_audio_value = item.get("reuse_source_audio")
+		if reuse_source_audio_value is None:
+			reuse_source_audio = bool(event_type in REUSABLE_SOURCE_AUDIO_EVENT_TYPES)
+		else:
+			reuse_source_audio = bool(reuse_source_audio_value)
 		turn = {
 			"turn_id": _coerce_turn_id(item, index),
 			"turn_index": _coerce_turn_index(item, index),
 			"speaker": speaker,
 			"source_start_sec": max(0.0, start),
 			"source_end_sec": max(0.0, end),
-			"source_text": str(item.get("source_text") or item.get("text") or item.get("zh_text") or ""),
+			"source_text": source_text,
 			"trim_candidates": item.get("trim_candidates") or [],
 			"silence_ranges": item.get("silence_ranges") or [],
 			"filler_ranges": item.get("filler_ranges") or item.get("low_value_ranges") or [],
 		}
+		turn["non_dialogue"] = bool(item.get("non_dialogue")) or event_type is not None
+		turn["source_audio_event_type"] = event_type
+		turn["reuse_source_audio"] = reuse_source_audio
 		turns.append(turn)
-	return turns
+	return _normalize_source_turn_ranges(turns)
 
 
 def _load_audio_turns(path: Path) -> dict[str, dict[str, Any]]:
@@ -347,6 +438,62 @@ def _load_audio_turns(path: Path) -> dict[str, dict[str, Any]]:
 		by_id[turn_id] = audio_turn
 		by_index[str(turn_index)] = audio_turn
 	return {**{f"index:{key}": value for key, value in by_index.items()}, **by_id}
+
+
+def _load_audio_turn_groups(path: Path) -> list[dict[str, Any]]:
+	data = _read_json(path)
+	raw = data.get("turns") if isinstance(data, dict) else data if isinstance(data, list) else []
+	turns: list[dict[str, Any]] = []
+	for index, item in enumerate(raw or [], start=1):
+		if not isinstance(item, dict):
+			continue
+		start_value = item.get("audio_start", item.get("start_sec", item.get("start")))
+		end_value = item.get("audio_end", item.get("end_sec", item.get("end")))
+		if start_value is None or end_value is None:
+			continue
+		start = _parse_time(start_value)
+		end = _parse_time(end_value)
+		if end <= start:
+			continue
+		turns.append({
+			"turn_id": _coerce_turn_id(item, index),
+			"turn_index": _coerce_turn_index(item, index),
+			"speaker": str(item.get("speaker") or "").strip(),
+			"audio_start_sec": start,
+			"audio_end_sec": end,
+			"alignment_confidence": item.get("alignment_confidence") or item.get("match_confidence"),
+		})
+	turns.sort(key=lambda item: (float(item["audio_start_sec"]), float(item["audio_end_sec"])))
+	groups: list[dict[str, Any]] = []
+	for turn in turns:
+		if groups and groups[-1].get("speaker") == turn.get("speaker"):
+			group = groups[-1]
+			group["audio_end_sec"] = max(float(group["audio_end_sec"]), float(turn["audio_end_sec"]))
+			group["turn_ids"].append(turn["turn_id"])
+			group["turn_indices"].append(turn["turn_index"])
+			continue
+		groups.append({
+			"turn_id": f"audio_group_{len(groups) + 1:04d}",
+			"turn_index": len(groups) + 1,
+			"speaker": turn.get("speaker"),
+			"audio_start_sec": float(turn["audio_start_sec"]),
+			"audio_end_sec": float(turn["audio_end_sec"]),
+			"alignment_confidence": turn.get("alignment_confidence"),
+			"turn_ids": [turn["turn_id"]],
+			"turn_indices": [turn["turn_index"]],
+		})
+	for index, group in enumerate(groups[:-1]):
+		next_start = float(groups[index + 1]["audio_start_sec"])
+		if next_start > float(group["audio_end_sec"]):
+			group["visual_audio_end_sec"] = next_start
+			group["following_silence_held_by_current_speaker_sec"] = round(next_start - float(group["audio_end_sec"]), 3)
+		else:
+			group["visual_audio_end_sec"] = group["audio_end_sec"]
+			group["following_silence_held_by_current_speaker_sec"] = 0.0
+	if groups:
+		groups[-1]["visual_audio_end_sec"] = groups[-1]["audio_end_sec"]
+		groups[-1]["following_silence_held_by_current_speaker_sec"] = 0.0
+	return groups
 
 
 def _coerce_range_list(raw: Any, parent_start: float, parent_end: float) -> list[tuple[float, float]]:
@@ -491,19 +638,27 @@ def _plan_turn(
 	protected_ranges: list[tuple[float, float]],
 	turn_edge_protect_sec: float,
 	min_trim_sec: float,
+	min_extend_sec: float,
+	max_turn_extension_sec: float,
+	max_turn_extension_ratio: float,
 	min_kept_segment_sec: float,
 ) -> dict[str, Any]:
 	turn_start = float(turn["source_start_sec"])
 	turn_end = float(turn["source_end_sec"])
 	source_duration = turn_end - turn_start
+	source_speaker = str(turn.get("speaker") or "").strip()
+	non_dialogue = bool(turn.get("non_dialogue"))
 	if audio_turn is None:
 		target_duration = source_duration
 		audio_start = None
 		audio_end = None
+		audio_speaker = None
 	else:
 		audio_start = float(audio_turn["audio_start_sec"])
-		audio_end = float(audio_turn["audio_end_sec"])
+		audio_end = float(audio_turn.get("visual_audio_end_sec", audio_turn["audio_end_sec"]))
 		target_duration = max(0.0, audio_end - audio_start)
+		audio_speaker = str(audio_turn.get("speaker") or "").strip()
+	speaker_match = bool(non_dialogue or (audio_turn is not None and (not source_speaker or not audio_speaker or source_speaker == audio_speaker)))
 	trim_needed = max(0.0, source_duration - target_duration)
 	cuts: list[tuple[float, float]] = []
 	cut_reasons: list[dict[str, Any]] = []
@@ -541,42 +696,136 @@ def _plan_turn(
 					})
 					if trim_needed - _range_duration(cuts) < min_trim_sec:
 						break
-				if trim_needed - _range_duration(cuts) < min_trim_sec:
-					break
+					if trim_needed - _range_duration(cuts) < min_trim_sec:
+						break
 	kept = _kept_segments_after_cuts((turn_start, turn_end), cuts)
 	kept_duration = _range_duration(kept)
-	duration_delta = kept_duration - target_duration
+	extension_needed = max(0.0, target_duration - kept_duration)
+	extension_limit = max(max_turn_extension_sec, target_duration * max_turn_extension_ratio)
+	extension_segments: list[dict[str, Any]] = []
+	if audio_turn is not None and extension_needed >= min_extend_sec:
+		hold_frame = max(turn_start, turn_end - min(0.05, max(0.001, source_duration / 2.0)))
+		extension_segments.append({
+			"start_sec": round(hold_frame, 3),
+			"end_sec": round(hold_frame, 3),
+			"duration_sec": round(extension_needed, 3),
+			"reason": "extend_short_source_turn_to_audio_boundary",
+			"source_mode": "freeze_tail",
+		})
+	output_duration = kept_duration + _range_duration([
+		(0.0, float(item["duration_sec"]))
+		for item in extension_segments
+	])
+	duration_delta = output_duration - target_duration
 	protected_violations = [
 		_round_range(max(cut[0], protected[0]), min(cut[1], protected[1]))
 		for cut in cuts
 		for protected in protected_ranges
 		if _intersect_range(cut, protected) is not None
 	]
-	if audio_turn is None:
+	if (audio_turn is None and not non_dialogue) or not speaker_match:
 		confidence = "low"
 	elif abs(duration_delta) <= 0.5 and not protected_violations:
-		confidence = "high" if _range_duration(cuts) == 0 else "medium"
+		confidence = "high" if _range_duration(cuts) == 0 and not extension_segments else "medium"
 	else:
 		confidence = "low"
 	return {
 		"turn_id": turn["turn_id"],
 		"turn_index": turn["turn_index"],
 		"speaker": turn.get("speaker"),
+		"audio_speaker": audio_speaker,
+		"speaker_match": speaker_match,
+		"audio_turn_missing": audio_turn is None and not non_dialogue,
+		"non_dialogue": non_dialogue,
+		"source_audio_event_type": turn.get("source_audio_event_type"),
+		"reuse_source_audio": bool(turn.get("reuse_source_audio")),
+		"synthetic": bool(turn.get("synthetic")),
 		"source_start_sec": round(turn_start, 3),
 		"source_end_sec": round(turn_end, 3),
 		"target_audio_start_sec": round(audio_start, 3) if audio_start is not None else None,
 		"target_audio_end_sec": round(audio_end, 3) if audio_end is not None else None,
+		"audio_turn_ids": list(audio_turn.get("turn_ids") or [audio_turn["turn_id"]]) if audio_turn is not None else [],
+		"audio_turn_indices": list(audio_turn.get("turn_indices") or [audio_turn["turn_index"]]) if audio_turn is not None else [],
+		"following_silence_held_by_current_speaker_sec": round(float(audio_turn.get("following_silence_held_by_current_speaker_sec") or 0.0), 3) if audio_turn is not None else 0.0,
 		"source_duration_sec": round(source_duration, 3),
 		"target_duration_sec": round(target_duration, 3),
 		"trim_needed_sec": round(trim_needed, 3),
 		"trimmed_duration_sec": round(_range_duration(cuts), 3),
 		"kept_duration_sec": round(kept_duration, 3),
+		"extended_duration_sec": round(_range_duration([(0.0, float(item["duration_sec"])) for item in extension_segments]), 3),
+		"extension_policy_limit_sec": round(extension_limit, 3),
+		"output_duration_sec": round(output_duration, 3),
 		"duration_delta_vs_target_sec": round(duration_delta, 3),
 		"kept_source_ranges": [_round_range(start, end) for start, end in kept],
 		"trimmed_source_ranges": cut_reasons,
+		"extension_segments": extension_segments,
+		"extension_exceeds_policy": bool(extension_needed > extension_limit),
 		"protected_range_violations": protected_violations,
 		"confidence": confidence,
 	}
+
+
+def _rebalance_turn_plans_to_target(turn_plans: list[dict[str, Any]], tolerance_sec: float = 0.75) -> list[dict[str, Any]]:
+	target_duration = sum(float(turn["target_duration_sec"]) for turn in turn_plans)
+	current_duration = sum(float(turn.get("output_duration_sec", turn["kept_duration_sec"])) for turn in turn_plans)
+	restore_needed = target_duration - current_duration
+	if restore_needed <= tolerance_sec:
+		return turn_plans
+	if any(turn.get("extension_segments") for turn in turn_plans):
+		return turn_plans
+
+	cut_refs: list[tuple[float, float, int, int]] = []
+	for turn_index, turn in enumerate(turn_plans):
+		for cut_index, cut in enumerate(turn.get("trimmed_source_ranges") or []):
+			duration = float(cut["duration_sec"])
+			if duration <= 0:
+				continue
+			score = float(cut.get("score") or 0.0)
+			cut_refs.append((score, -duration, turn_index, cut_index))
+
+	for _score, _negative_duration, turn_index, cut_index in sorted(cut_refs):
+		if restore_needed <= tolerance_sec:
+			break
+		turn = turn_plans[turn_index]
+		cuts = [dict(cut) for cut in (turn.get("trimmed_source_ranges") or [])]
+		if cut_index >= len(cuts):
+			continue
+		cut = cuts[cut_index]
+		cut_start = float(cut["start_sec"])
+		cut_end = float(cut["end_sec"])
+		cut_duration = max(0.0, cut_end - cut_start)
+		if cut_duration <= 0:
+			continue
+		restore = min(cut_duration, restore_needed)
+		if cut_duration - restore <= 0.05:
+			cuts.pop(cut_index)
+			restore = cut_duration
+		else:
+			cut_start += restore
+			cut["start_sec"] = round(cut_start, 3)
+			cut["duration_sec"] = round(cut_end - cut_start, 3)
+			cut["global_rebalance_restored_sec"] = round(restore, 3)
+			cuts[cut_index] = cut
+		turn_start = float(turn["source_start_sec"])
+		turn_end = float(turn["source_end_sec"])
+		cut_ranges = [(float(item["start_sec"]), float(item["end_sec"])) for item in cuts]
+		kept = _kept_segments_after_cuts((turn_start, turn_end), cut_ranges)
+		kept_duration = _range_duration(kept)
+		turn["trimmed_source_ranges"] = [
+			{**item, **_round_range(float(item["start_sec"]), float(item["end_sec"]))}
+			for item in cuts
+		]
+		turn["kept_source_ranges"] = [_round_range(start, end) for start, end in kept]
+		turn["trimmed_duration_sec"] = round(_range_duration(cut_ranges), 3)
+		turn["kept_duration_sec"] = round(kept_duration, 3)
+		turn["output_duration_sec"] = round(kept_duration, 3)
+		turn["duration_delta_vs_target_sec"] = round(kept_duration - float(turn["target_duration_sec"]), 3)
+		if turn.get("confidence") != "low":
+			turn["confidence"] = "medium"
+		turn["global_rebalance_restored_sec"] = round(float(turn.get("global_rebalance_restored_sec") or 0.0) + restore, 3)
+		restore_needed -= restore
+
+	return turn_plans
 
 
 def build_retime_plan(
@@ -588,16 +837,32 @@ def build_retime_plan(
 	source_time_offset_sec: float = 0.0,
 	turn_edge_protect_sec: float = DEFAULT_TURN_EDGE_PROTECT_SEC,
 	min_trim_sec: float = DEFAULT_MIN_TRIM_SEC,
+	min_extend_sec: float = DEFAULT_MIN_EXTEND_SEC,
+	max_turn_extension_sec: float = DEFAULT_MAX_TURN_EXTENSION_SEC,
+	max_turn_extension_ratio: float = DEFAULT_MAX_TURN_EXTENSION_RATIO,
+	max_turn_boundary_drift_sec: float = DEFAULT_MAX_TURN_BOUNDARY_DRIFT_SEC,
 	min_kept_segment_sec: float = DEFAULT_MIN_KEPT_SEGMENT_SEC,
 	max_cuts_per_minute: float = DEFAULT_MAX_CUTS_PER_MINUTE,
 ) -> dict[str, Any]:
 	source_turns = _load_source_turns(source_turn_map, source_time_offset_sec=source_time_offset_sec)
 	audio_turns = _load_audio_turns(turn_audio_timeline)
+	audio_groups = _load_audio_turn_groups(turn_audio_timeline)
 	visual_activity = _read_json(visual_activity_path)
 	protected_ranges = _ranges_from_dicts(visual_activity.get("protected_ranges") or [])
 	turn_plans = []
+	audio_group_cursor = 0
 	for source_turn in source_turns:
-		audio_turn = audio_turns.get(str(source_turn["turn_id"])) or audio_turns.get(f"index:{source_turn['turn_index']}")
+		audio_turn = None
+		if not source_turn.get("non_dialogue"):
+			source_speaker = str(source_turn.get("speaker") or "").strip()
+			for group_index in range(audio_group_cursor, len(audio_groups)):
+				candidate = audio_groups[group_index]
+				if not source_speaker or not candidate.get("speaker") or candidate.get("speaker") == source_speaker:
+					audio_turn = candidate
+					audio_group_cursor = group_index + 1
+					break
+			if audio_turn is None:
+				audio_turn = audio_turns.get(str(source_turn["turn_id"])) or audio_turns.get(f"index:{source_turn['turn_index']}")
 		turn_plans.append(
 			_plan_turn(
 				source_turn,
@@ -606,9 +871,13 @@ def build_retime_plan(
 				protected_ranges,
 				turn_edge_protect_sec,
 				min_trim_sec,
+				min_extend_sec,
+				max_turn_extension_sec,
+				max_turn_extension_ratio,
 				min_kept_segment_sec,
 			)
 		)
+	turn_plans = _rebalance_turn_plans_to_target(turn_plans)
 	edit_segments = []
 	cursor = 0.0
 	for turn in turn_plans:
@@ -624,6 +893,29 @@ def build_retime_plan(
 				"target_start_sec": round(cursor, 3),
 				"target_end_sec": round(cursor + duration, 3),
 				"duration_sec": duration,
+				"source_mode": "video_range",
+				"non_dialogue": bool(turn.get("non_dialogue")),
+				"source_audio_event_type": turn.get("source_audio_event_type"),
+				"reuse_source_audio": bool(turn.get("reuse_source_audio")),
+			})
+			cursor += duration
+		for extension in turn.get("extension_segments") or []:
+			duration = float(extension["duration_sec"])
+			edit_segments.append({
+				"segment_index": len(edit_segments) + 1,
+				"turn_id": turn["turn_id"],
+				"turn_index": turn["turn_index"],
+				"speaker": turn.get("speaker"),
+				"source_start_sec": extension["start_sec"],
+				"source_end_sec": extension["end_sec"],
+				"target_start_sec": round(cursor, 3),
+				"target_end_sec": round(cursor + duration, 3),
+				"duration_sec": duration,
+				"source_mode": extension.get("source_mode") or "freeze_tail",
+				"non_dialogue": bool(turn.get("non_dialogue")),
+				"source_audio_event_type": turn.get("source_audio_event_type"),
+				"reuse_source_audio": False,
+				"reason": extension.get("reason"),
 			})
 			cursor += duration
 	trimmed_ranges = [
@@ -631,23 +923,79 @@ def build_retime_plan(
 		for turn in turn_plans
 		for item in turn["trimmed_source_ranges"]
 	]
+	extended_duration = sum(float(turn.get("extended_duration_sec") or 0.0) for turn in turn_plans)
 	protected_violations = [
 		item
 		for turn in turn_plans
 		for item in turn["protected_range_violations"]
 	]
 	target_duration = sum(float(turn["target_duration_sec"]) for turn in turn_plans)
-	min_kept = min((float(segment["duration_sec"]) for segment in edit_segments), default=0.0)
+	min_kept = min((
+		float(segment["duration_sec"])
+		for segment in edit_segments
+		if segment.get("source_mode") == "video_range"
+	), default=0.0)
 	final_duration = cursor
 	cuts_per_minute = len(trimmed_ranges) / max(0.001, final_duration / 60.0)
+	turn_boundary_drift_violations = [
+		{
+			"turn_id": turn["turn_id"],
+			"turn_index": turn["turn_index"],
+			"speaker": turn.get("speaker"),
+			"duration_delta_vs_target_sec": turn.get("duration_delta_vs_target_sec"),
+		}
+		for turn in turn_plans
+		if abs(float(turn.get("duration_delta_vs_target_sec") or 0.0)) > max_turn_boundary_drift_sec
+	]
+	audio_turn_missing = [
+		{"turn_id": turn["turn_id"], "turn_index": turn["turn_index"], "speaker": turn.get("speaker")}
+		for turn in turn_plans
+		if turn.get("audio_turn_missing")
+	]
+	speaker_mismatches = [
+		{
+			"turn_id": turn["turn_id"],
+			"turn_index": turn["turn_index"],
+			"source_speaker": turn.get("speaker"),
+			"audio_speaker": turn.get("audio_speaker"),
+		}
+		for turn in turn_plans
+		if not turn.get("speaker_match")
+	]
+	extension_policy_violations = [
+		{
+			"turn_id": turn["turn_id"],
+			"turn_index": turn["turn_index"],
+			"speaker": turn.get("speaker"),
+			"extended_duration_sec": turn.get("extended_duration_sec"),
+		}
+		for turn in turn_plans
+		if turn.get("extension_exceeds_policy")
+	]
+	audio_start_offset_sec = 0.0
+	for turn in turn_plans:
+		if not turn.get("non_dialogue"):
+			break
+		audio_start_offset_sec += float(turn.get("output_duration_sec") or turn.get("kept_duration_sec") or 0.0)
 	status = "pass"
 	warnings = []
 	if protected_violations:
 		status = "fail"
-	if min_kept and min_kept < min_kept_segment_sec - 0.001:
+	if abs(final_duration - target_duration) > max_turn_boundary_drift_sec:
 		status = "fail"
-	if abs(final_duration - target_duration) > 0.75:
-		warnings.append("retimed video duration is not within 0.75s of target audio timeline")
+		warnings.append("retimed video duration is not within boundary drift tolerance of target audio timeline")
+	if turn_boundary_drift_violations:
+		status = "fail"
+		warnings.append("one or more turn boundaries drift beyond tolerance")
+	if audio_turn_missing:
+		status = "fail"
+		warnings.append("one or more dialogue source turns did not match an audio turn")
+	if speaker_mismatches:
+		status = "fail"
+		warnings.append("one or more source turns matched a different audio speaker")
+	if extension_policy_violations:
+		status = "fail"
+		warnings.append("one or more short source turns require excessive freeze extension")
 	if cuts_per_minute > max_cuts_per_minute:
 		warnings.append("cut density exceeds recommended maximum")
 	plan = {
@@ -668,9 +1016,17 @@ def build_retime_plan(
 		"policy": {
 			"turn_edge_protect_sec": turn_edge_protect_sec,
 			"min_trim_sec": min_trim_sec,
+			"min_extend_sec": min_extend_sec,
+			"max_turn_extension_sec": max_turn_extension_sec,
+			"max_turn_extension_ratio": max_turn_extension_ratio,
+			"max_turn_boundary_drift_sec": max_turn_boundary_drift_sec,
 			"min_kept_segment_sec": min_kept_segment_sec,
 			"max_cuts_per_minute": max_cuts_per_minute,
-			"strategy": "trim source silence/filler/low-motion middle ranges before fallback middle trims",
+			"audio_turn_grouping": "consecutive_same_speaker_audio_turns_are_grouped_for_one_source_turn",
+			"switch_alignment": "hold_current_speaker_visual_until_next_audio_speaker_starts",
+			"short_source_turn_policy": "freeze_tail_until_target_audio_turn_boundary",
+			"opening_non_dialogue_policy": "preserve_initial_preroll_and_explicit_music_or_silence_before_first_dialogue",
+			"strategy": "trim long source turns and extend short source turns so every turn boundary matches the Chinese audio timeline",
 		},
 		"summary": {
 			"turn_count": len(turn_plans),
@@ -680,13 +1036,23 @@ def build_retime_plan(
 			"estimated_video_duration_sec": round(final_duration, 3),
 			"duration_delta_vs_target_sec": round(final_duration - target_duration, 3),
 			"trimmed_duration_sec": round(_range_duration(trimmed_ranges), 3),
+			"extended_duration_sec": round(extended_duration, 3),
+			"audio_start_offset_sec": round(audio_start_offset_sec, 3),
 			"min_kept_segment_duration_sec": round(min_kept, 3),
 			"cuts_per_minute": round(cuts_per_minute, 3),
 			"protected_range_violation_count": len(protected_violations),
+			"turn_boundary_drift_violation_count": len(turn_boundary_drift_violations),
+			"audio_turn_missing_count": len(audio_turn_missing),
+			"speaker_mismatch_count": len(speaker_mismatches),
+			"extension_policy_violation_count": len(extension_policy_violations),
 		},
 		"turns": turn_plans,
 		"edit_segments": edit_segments,
 		"protected_range_violations": protected_violations,
+		"turn_boundary_drift_violations": turn_boundary_drift_violations,
+		"audio_turn_missing": audio_turn_missing,
+		"speaker_mismatches": speaker_mismatches,
+		"extension_policy_violations": extension_policy_violations,
 	}
 	_write_json(output_path, plan)
 	return plan
@@ -698,11 +1064,48 @@ def render_retimed_video(plan_path: Path, output_video: Path, video_encoder: str
 	assert source_video.exists(), f"Missing source video: {source_video}"
 	output_video.parent.mkdir(parents=True, exist_ok=True)
 	concat_path = output_video.with_suffix(".ffconcat")
+	freeze_dir = output_video.with_suffix(".freeze_segments")
+	if freeze_dir.exists():
+		shutil.rmtree(freeze_dir)
+	freeze_dir.mkdir(parents=True, exist_ok=True)
+	freeze_segment_count = 0
 	with concat_path.open("w", encoding="utf-8") as handle:
 		handle.write("ffconcat version 1.0\n")
 		for segment in plan.get("edit_segments") or []:
+			source_mode = str(segment.get("source_mode") or "video_range")
 			start = float(segment["source_start_sec"])
 			end = float(segment["source_end_sec"])
+			duration = float(segment.get("duration_sec") or max(0.0, end - start))
+			if source_mode == "freeze_tail":
+				if duration <= 0:
+					continue
+				freeze_segment_count += 1
+				freeze_video = freeze_dir / f"freeze_{freeze_segment_count:04d}.mp4"
+				frame_expr = f"select='gte(t,{max(0.0, start):.3f})',setpts=PTS-STARTPTS"
+				_run([
+					"ffmpeg",
+					"-hide_banner",
+					"-loglevel",
+					"error",
+					"-y",
+					"-i",
+					str(source_video),
+					"-vf",
+					f"{frame_expr},trim=end_frame=1,loop=loop=-1:size=1:start=0,trim=duration={duration:.3f},fps=30,format=yuv420p",
+					"-an",
+					*(
+						["-c:v", "h264_videotoolbox", "-b:v", "12000k", "-pix_fmt", "yuv420p", "-tag:v", "avc1"]
+						if video_encoder == "h264_videotoolbox"
+						else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-tag:v", "avc1"]
+					),
+					"-t",
+					f"{duration:.3f}",
+					"-movflags",
+					"+faststart",
+					str(freeze_video),
+				])
+				handle.write(f"file '{_path_for_concat(freeze_video)}'\n")
+				continue
 			if end <= start:
 				continue
 			handle.write(f"file '{_path_for_concat(source_video)}'\n")
@@ -747,6 +1150,8 @@ def render_retimed_video(plan_path: Path, output_video: Path, video_encoder: str
 		"retimed_video_sha256": _sha256(output_video),
 		"duration_sec": round(duration, 3),
 		"edit_segment_count": len(plan.get("edit_segments") or []),
+		"freeze_segment_count": freeze_segment_count,
+		"freeze_segments_dir": str(freeze_dir),
 	}
 
 
@@ -767,6 +1172,10 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--scene-protect-sec", type=float, default=DEFAULT_SCENE_PROTECT_SEC)
 	parser.add_argument("--turn-edge-protect-sec", type=float, default=DEFAULT_TURN_EDGE_PROTECT_SEC)
 	parser.add_argument("--min-trim-sec", type=float, default=DEFAULT_MIN_TRIM_SEC)
+	parser.add_argument("--min-extend-sec", type=float, default=DEFAULT_MIN_EXTEND_SEC)
+	parser.add_argument("--max-turn-extension-sec", type=float, default=DEFAULT_MAX_TURN_EXTENSION_SEC)
+	parser.add_argument("--max-turn-extension-ratio", type=float, default=DEFAULT_MAX_TURN_EXTENSION_RATIO)
+	parser.add_argument("--max-turn-boundary-drift-sec", type=float, default=DEFAULT_MAX_TURN_BOUNDARY_DRIFT_SEC)
 	parser.add_argument("--min-kept-segment-sec", type=float, default=DEFAULT_MIN_KEPT_SEGMENT_SEC)
 	parser.add_argument("--max-cuts-per-minute", type=float, default=DEFAULT_MAX_CUTS_PER_MINUTE)
 	parser.add_argument("--max-duration-sec", type=float)
@@ -807,6 +1216,10 @@ def main() -> None:
 		source_time_offset_sec=args.source_time_offset_sec,
 		turn_edge_protect_sec=args.turn_edge_protect_sec,
 		min_trim_sec=args.min_trim_sec,
+		min_extend_sec=args.min_extend_sec,
+		max_turn_extension_sec=args.max_turn_extension_sec,
+		max_turn_extension_ratio=args.max_turn_extension_ratio,
+		max_turn_boundary_drift_sec=args.max_turn_boundary_drift_sec,
 		min_kept_segment_sec=args.min_kept_segment_sec,
 		max_cuts_per_minute=args.max_cuts_per_minute,
 	)

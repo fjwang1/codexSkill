@@ -49,6 +49,7 @@ SUBTITLE_FONT_FAMILY = "NotoSansCJKsc-Bold"
 SUBTITLE_FONT_FULL_NAME = "Noto Sans CJK SC Bold"
 SUBTITLE_FONT_LICENSE_NOTE = "SIL Open Font License 1.1"
 VISUAL_SYNC_MODES = {"disabled_v1", "turn_retimed_basic_v1"}
+SOURCE_BACKGROUND_AUDIO_GAIN = 0.65
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -199,6 +200,160 @@ def _ffconcat_path(path: Path) -> str:
 	return str(path).replace("'", "'\\''")
 
 
+def _source_background_audio_segments(plan: dict[str, Any] | None, audio_start_offset_sec: float = 0.0) -> list[dict[str, Any]]:
+	if not plan:
+		return []
+	segments: list[dict[str, Any]] = []
+	for item in plan.get("edit_segments") or []:
+		if not item.get("reuse_source_audio"):
+			continue
+		if item.get("source_mode") != "video_range":
+			continue
+		duration = float(item.get("duration_sec") or 0.0)
+		if duration <= 0.05:
+			continue
+		target_start = float(item.get("target_start_sec") or 0.0)
+		target_end = float(item.get("target_end_sec") or target_start + duration)
+		# Never mix source background across the VibeVoice dialogue start.
+		if target_end > audio_start_offset_sec + 0.05:
+			continue
+		segments.append({
+			"segment_index": int(item.get("segment_index") or len(segments) + 1),
+			"source_start_sec": float(item["source_start_sec"]),
+			"source_end_sec": float(item["source_end_sec"]),
+			"target_start_sec": target_start,
+			"target_end_sec": target_end,
+			"duration_sec": duration,
+			"event_type": item.get("source_audio_event_type"),
+			"gain": SOURCE_BACKGROUND_AUDIO_GAIN,
+		})
+	return segments
+
+
+def _offset_source_background_audio_segments(segments: list[dict[str, Any]], source_audio_time_offset_sec: float) -> list[dict[str, Any]]:
+	if abs(source_audio_time_offset_sec) <= 0.001:
+		return segments
+	adjusted: list[dict[str, Any]] = []
+	for segment in segments:
+		item = dict(segment)
+		item["source_start_sec"] = round(float(item["source_start_sec"]) + source_audio_time_offset_sec, 3)
+		item["source_end_sec"] = round(float(item["source_end_sec"]) + source_audio_time_offset_sec, 3)
+		item["source_audio_time_offset_sec"] = round(source_audio_time_offset_sec, 3)
+		adjusted.append(item)
+	return adjusted
+
+
+def _resolve_source_audio_for_background_mix(
+	run_dir: Path,
+	source_video: Path,
+	episode_manifest: dict[str, Any],
+	source_is_preclipped_episode: bool,
+	semantic_source_start_sec: float | None,
+) -> tuple[Path | None, float, str]:
+	if source_is_preclipped_episode:
+		parent_run_dir_value = str(episode_manifest.get("parent_run_dir") or "").strip()
+		if parent_run_dir_value:
+			parent_run_dir = Path(parent_run_dir_value).expanduser()
+			parent_source_audio = parent_run_dir / "02-source-capture/youtube-media/source.wav"
+			if parent_source_audio.exists():
+				return parent_source_audio.resolve(), float(semantic_source_start_sec or 0.0), "parent_source_wav_for_preclipped_episode"
+	local_source_audio = run_dir / "02-source-capture/youtube-media/source.wav"
+	if local_source_audio.exists():
+		return local_source_audio.resolve(), 0.0, "local_source_wav"
+	probe = _probe(source_video)
+	if any(stream.get("codec_type") == "audio" for stream in probe.get("streams") or []):
+		return source_video.resolve(), 0.0, "source_video_audio_stream"
+	return None, 0.0, "no_source_audio_available"
+
+
+def _timeline_matches_audio(timeline_path: Path, audio_path: Path, audio_duration: float, tolerance_sec: float = 0.75) -> bool:
+	if not timeline_path.exists():
+		return False
+	try:
+		data = _read_json(timeline_path)
+	except Exception:
+		return False
+	if not isinstance(data, dict):
+		return False
+	expected_sha = str(data.get("audio_sha256") or "")
+	if expected_sha and expected_sha != _sha256(audio_path):
+		return False
+	duration_value = data.get("duration_sec")
+	if duration_value is not None:
+		try:
+			if abs(float(duration_value) - audio_duration) > tolerance_sec:
+				return False
+		except (TypeError, ValueError):
+			return False
+	turns = data.get("turns") or []
+	if turns:
+		try:
+			last_end = max(float(turn.get("end_sec") or 0.0) for turn in turns if isinstance(turn, dict))
+		except (TypeError, ValueError):
+			return False
+		if abs(last_end - audio_duration) > max(1.0, tolerance_sec):
+			return False
+	return True
+
+
+def _select_turn_audio_timeline(run_dir: Path, explicit_timeline: Path | None, audio_path: Path, audio_duration: float) -> tuple[Path, str]:
+	if explicit_timeline is not None:
+		path = explicit_timeline.resolve()
+		assert path.exists(), f"Missing explicit turn audio timeline: {path}"
+		assert _timeline_matches_audio(path, audio_path, audio_duration), (
+			"Explicit turn audio timeline is stale or does not match current final_podcast.wav: "
+			f"{path}"
+		)
+		return path, "explicit_current"
+	candidates = [
+		(run_dir / "06c-audio-timeline-alignment/turn_audio_timeline.json", "06c_turn_audio_timeline_current"),
+		(run_dir / "audio/dialogue_timeline.json", "audio_dialogue_timeline_current_fallback"),
+	]
+	for path, reason in candidates:
+		if _timeline_matches_audio(path, audio_path, audio_duration):
+			return path.resolve(), reason
+	existing = [str(path) for path, _reason in candidates if path.exists()]
+	raise AssertionError(
+		"No current turn audio timeline matches audio/final_podcast.wav. "
+		f"Checked: {existing}. Regenerate 06c from the current final audio before turn-retimed rendering."
+	)
+
+
+def _audio_filter_for_mix(audio_start_offset_sec: float, source_background_segments: list[dict[str, Any]], source_audio_input_index: int = 2) -> tuple[str, str, dict[str, Any]]:
+	delay_ms = max(0, round(audio_start_offset_sec * 1000))
+	filter_parts = [f"[1:a]{'adelay=' + str(delay_ms) + ':all=1,' if delay_ms else ''}apad[cn]"]
+	mix_inputs = ["[cn]"]
+	for index, segment in enumerate(source_background_segments, start=1):
+		source_start = max(0.0, float(segment["source_start_sec"]))
+		source_end = max(source_start, float(segment["source_end_sec"]))
+		target_start = max(0.0, float(segment["target_start_sec"]))
+		duration = max(0.0, min(float(segment["duration_sec"]), source_end - source_start))
+		if duration <= 0.05:
+			continue
+		delay = round(target_start * 1000)
+		label = f"bg{index}"
+		filter_parts.append(
+			f"[{source_audio_input_index}:a]atrim=start={source_start:.3f}:end={source_start + duration:.3f},"
+			f"asetpts=PTS-STARTPTS,volume={float(segment.get('gain') or SOURCE_BACKGROUND_AUDIO_GAIN):.3f},"
+			f"adelay={delay}:all=1,apad[{label}]"
+		)
+		mix_inputs.append(f"[{label}]")
+	if len(mix_inputs) == 1:
+		return ";".join(filter_parts), "[cn]", {
+			"mode": "vibevoice_only_delayed",
+			"source_background_audio_reused": False,
+			"source_background_audio_segments": [],
+		}
+	out_label = "[aout]"
+	filter_parts.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=longest:dropout_transition=0{out_label}")
+	return ";".join(filter_parts), out_label, {
+		"mode": "vibevoice_plus_source_background_events",
+		"source_background_audio_reused": True,
+		"source_background_audio_gain": SOURCE_BACKGROUND_AUDIO_GAIN,
+		"source_background_audio_segments": source_background_segments,
+	}
+
+
 def _font(size: int) -> Any:
 	from PIL import ImageFont
 
@@ -320,7 +475,7 @@ def _render_subtitle_images(overlay_dir: Path, cues: list[dict[str, Any]]) -> tu
 	return blank, layouts
 
 
-def _render_subtitle_overlay_video(work_dir: Path, subtitle_manifest: Path, target_duration: float) -> tuple[Path, list[dict[str, Any]]]:
+def _render_subtitle_overlay_video(work_dir: Path, subtitle_manifest: Path, target_duration: float, time_offset_sec: float = 0.0) -> tuple[Path, list[dict[str, Any]]]:
 	manifest = _read_json(subtitle_manifest)
 	cues = list(manifest.get("cues") or [])
 	assert cues, f"Subtitle manifest has no cues: {subtitle_manifest}"
@@ -330,8 +485,8 @@ def _render_subtitle_overlay_video(work_dir: Path, subtitle_manifest: Path, targ
 	concat_path = work_dir / "subtitle_overlay_concat.ffconcat"
 	boundaries = {0.0, target_duration}
 	for cue in cues:
-		start = max(0.0, min(target_duration, float(cue["start_sec"])))
-		end = max(0.0, min(target_duration, float(cue["end_sec"])))
+		start = max(0.0, min(target_duration, float(cue["start_sec"]) + time_offset_sec))
+		end = max(0.0, min(target_duration, float(cue["end_sec"]) + time_offset_sec))
 		if end > start:
 			boundaries.add(start)
 			boundaries.add(end)
@@ -346,7 +501,7 @@ def _render_subtitle_overlay_video(work_dir: Path, subtitle_manifest: Path, targ
 			active = [
 				cue
 				for cue in cues
-				if float(cue["start_sec"]) <= start + 0.001 and float(cue["end_sec"]) > start + 0.001
+				if float(cue["start_sec"]) + time_offset_sec <= start + 0.001 and float(cue["end_sec"]) + time_offset_sec > start + 0.001
 			]
 			if active:
 				cue = max(active, key=lambda item: (float(item["start_sec"]), int(item.get("index") or item.get("cue_index") or 0)))
@@ -415,46 +570,90 @@ def _extract_review_video_segment(source: Path, output: Path, start_sec: float, 
 	return output
 
 
-def _compose_video_copy(video_input: Path, audio_input: Path, output: Path, target_duration: float, allow_trim_audio: bool) -> None:
+def _compose_video_copy(
+	video_input: Path,
+	audio_input: Path,
+	output: Path,
+	target_duration: float,
+	allow_trim_audio: bool,
+	audio_start_offset_sec: float = 0.0,
+	source_audio_input: Path | None = None,
+	source_background_segments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
 	audio_duration = _duration(audio_input)
-	if audio_duration > target_duration + 0.3 and not allow_trim_audio:
+	if audio_duration + audio_start_offset_sec > target_duration + 0.3 and not allow_trim_audio:
 		raise AssertionError(
-			f"Chinese audio is longer than target video: audio={audio_duration:.3f}s video={target_duration:.3f}s. "
+			f"Chinese audio is longer than target video: audio={audio_duration:.3f}s offset={audio_start_offset_sec:.3f}s video={target_duration:.3f}s. "
 			"Fix upstream audio duration or pass --allow-trim-audio only for review samples."
 		)
 	output.parent.mkdir(parents=True, exist_ok=True)
 	tmp = output.with_suffix(output.suffix + ".tmp.mp4")
 	if tmp.exists():
 		tmp.unlink()
-	af = "apad"
-	_run([
-		"ffmpeg",
-		"-hide_banner",
-		"-loglevel",
-		"error",
-		"-y",
-		"-i",
-		str(video_input),
-		"-i",
-		str(audio_input),
-		"-map",
-		"0:v:0",
-		"-map",
-		"1:a:0",
-		"-c:v",
-		"copy",
-		"-c:a",
-		"aac",
-		"-b:a",
-		"192k",
-		"-af",
-		af,
-		"-t",
-		f"{target_duration:.3f}",
-		"-movflags",
-		"+faststart",
-		str(tmp),
-	])
+	source_background_segments = source_background_segments or []
+	if source_audio_input is not None and source_background_segments:
+		audio_filter, audio_label, mix_manifest = _audio_filter_for_mix(audio_start_offset_sec, source_background_segments, source_audio_input_index=2)
+		cmd = [
+			"ffmpeg",
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-y",
+			"-i",
+			str(video_input),
+			"-i",
+			str(audio_input),
+			"-i",
+			str(source_audio_input),
+			"-filter_complex",
+			audio_filter,
+			"-map",
+			"0:v:0",
+			"-map",
+			audio_label,
+			"-c:v",
+			"copy",
+			"-c:a",
+			"aac",
+			"-b:a",
+			"192k",
+			"-t",
+			f"{target_duration:.3f}",
+			"-movflags",
+			"+faststart",
+			str(tmp),
+		]
+	else:
+		audio_filter, audio_label, mix_manifest = _audio_filter_for_mix(audio_start_offset_sec, [], source_audio_input_index=2)
+		cmd = [
+			"ffmpeg",
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-y",
+			"-i",
+			str(video_input),
+			"-i",
+			str(audio_input),
+			"-filter_complex",
+			audio_filter,
+			"-map",
+			"0:v:0",
+			"-map",
+			audio_label,
+			"-c:v",
+			"copy",
+			"-c:a",
+			"aac",
+			"-b:a",
+			"192k",
+			"-t",
+			f"{target_duration:.3f}",
+			"-movflags",
+			"+faststart",
+			str(tmp),
+		]
+	_run(cmd)
 	probe = _probe(tmp)
 	_first_stream(probe, "video")
 	_first_stream(probe, "audio")
@@ -465,6 +664,7 @@ def _compose_video_copy(video_input: Path, audio_input: Path, output: Path, targ
 	if output.exists():
 		output.unlink()
 	tmp.replace(output)
+	return mix_manifest
 
 
 def _compose_video_burned_subtitles(
@@ -477,11 +677,15 @@ def _compose_video_burned_subtitles(
 	allow_trim_audio: bool,
 	video_encoder: str,
 	video_bitrate: str,
+	audio_start_offset_sec: float = 0.0,
+	subtitle_time_offset_sec: float = 0.0,
+	source_audio_input: Path | None = None,
+	source_background_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
 	audio_duration = _duration(audio_input)
-	if audio_duration > target_duration + 0.3 and not allow_trim_audio:
+	if audio_duration + audio_start_offset_sec > target_duration + 0.3 and not allow_trim_audio:
 		raise AssertionError(
-			f"Chinese audio is longer than target video: audio={audio_duration:.3f}s video={target_duration:.3f}s. "
+			f"Chinese audio is longer than target video: audio={audio_duration:.3f}s offset={audio_start_offset_sec:.3f}s video={target_duration:.3f}s. "
 			"Fix upstream audio duration or pass --allow-trim-audio only for review samples."
 		)
 	output.parent.mkdir(parents=True, exist_ok=True)
@@ -489,8 +693,20 @@ def _compose_video_burned_subtitles(
 	if tmp.exists():
 		tmp.unlink()
 	resolved_encoder, encoder_args = _video_encoder_args(video_encoder, video_bitrate)
-	overlay_video, layouts = _render_subtitle_overlay_video(work_dir, subtitle_manifest, target_duration)
-	_run([
+	overlay_video, layouts = _render_subtitle_overlay_video(work_dir, subtitle_manifest, target_duration, time_offset_sec=subtitle_time_offset_sec)
+	source_background_segments = source_background_segments or []
+	audio_source_input_index = 3 if source_audio_input is not None and source_background_segments else 2
+	audio_filter, audio_label, mix_manifest = _audio_filter_for_mix(
+		audio_start_offset_sec,
+		source_background_segments if source_audio_input is not None else [],
+		source_audio_input_index=audio_source_input_index,
+	)
+	filter_complex = (
+		f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS}[base];"
+		f"[base][2:v]overlay={SUBTITLE_OVERLAY_X}:{SUBTITLE_OVERLAY_Y}:format=auto:shortest=1,format=yuv420p[vout];"
+		f"{audio_filter}"
+	)
+	cmd = [
 		"ffmpeg",
 		"-hide_banner",
 		"-loglevel",
@@ -502,26 +718,28 @@ def _compose_video_burned_subtitles(
 		str(audio_input),
 		"-i",
 		str(overlay_video),
+	]
+	if source_audio_input is not None and source_background_segments:
+		cmd.extend(["-i", str(source_audio_input)])
+	cmd.extend([
 		"-filter_complex",
-		f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS}[base];"
-		f"[base][2:v]overlay={SUBTITLE_OVERLAY_X}:{SUBTITLE_OVERLAY_Y}:format=auto:shortest=1,format=yuv420p[vout]",
+		filter_complex,
 		"-map",
 		"[vout]",
 		"-map",
-		"1:a:0",
+		audio_label,
 		*encoder_args,
 		"-c:a",
 		"aac",
 		"-b:a",
 		"192k",
-		"-af",
-		"apad",
 		"-t",
 		f"{target_duration:.3f}",
 		"-movflags",
 		"+faststart",
 		str(tmp),
 	])
+	_run(cmd)
 	probe = _probe(tmp)
 	_first_stream(probe, "video")
 	_first_stream(probe, "audio")
@@ -535,6 +753,9 @@ def _compose_video_burned_subtitles(
 	return {
 		"method": "pillow_overlay_video_ffmpeg_overlay",
 		"subtitle_manifest": str(subtitle_manifest),
+		"subtitle_time_offset_sec": round(subtitle_time_offset_sec, 3),
+		"audio_start_offset_sec": round(audio_start_offset_sec, 3),
+		"audio_mix": mix_manifest,
 		"overlay_video": str(overlay_video),
 		"cue_count": len(layouts),
 		"subtitle_layout_rule": {
@@ -671,16 +892,24 @@ def run_revoice(
 		video_copy_policy = "source_video_stream_copy_trimmed_to_audio_duration" if trim_to_audio_duration else "source_video_stream_copy"
 
 	turn_retime_result: dict[str, Any] | None = None
+	audio_start_offset_sec = 0.0
+	subtitle_time_offset_sec = 0.0
+	source_background_segments: list[dict[str, Any]] = []
+	source_audio_for_mix: Path | None = None
+	source_audio_time_offset_sec = 0.0
+	source_audio_for_mix_reason = "not_needed"
 	if visual_sync_mode == "turn_retimed_basic_v1":
 		retime = _load_turn_retime_module()
 		default_source_turn_map = run_dir / "02b-source-voice-prompts/source_speaker_timeline.normalized.json"
 		if not default_source_turn_map.exists():
 			default_source_turn_map = run_dir / "03-source-translation/source_transcript.zh.json"
-		default_turn_audio_timeline = run_dir / "06c-audio-timeline-alignment/turn_audio_timeline.json"
-		if not default_turn_audio_timeline.exists():
-			default_turn_audio_timeline = run_dir / "audio/dialogue_timeline.json"
 		retime_source_turn_map = (source_turn_map or default_source_turn_map).resolve()
-		retime_turn_audio_timeline = (turn_audio_timeline or default_turn_audio_timeline).resolve()
+		retime_turn_audio_timeline, retime_turn_audio_timeline_selection = _select_turn_audio_timeline(
+			run_dir,
+			turn_audio_timeline,
+			audio_path,
+			audio_duration,
+		)
 		retime_time_offset = (
 			source_time_offset_sec
 			if source_time_offset_sec is not None
@@ -711,23 +940,51 @@ def run_revoice(
 			raise AssertionError(f"turn_retimed_basic_v1 plan did not pass: {plan.get('status')} {plan.get('warnings')}")
 		render_result = retime.render_retimed_video(retime_plan_path, retimed_video)
 		video_input = retimed_video
-		target_duration = audio_duration
+		audio_start_offset_sec = float((plan.get("summary") or {}).get("audio_start_offset_sec") or 0.0)
+		subtitle_time_offset_sec = audio_start_offset_sec
+		source_background_segments = _source_background_audio_segments(plan, audio_start_offset_sec=audio_start_offset_sec)
+		source_audio_for_mix, source_audio_time_offset_sec, source_audio_for_mix_reason = _resolve_source_audio_for_background_mix(
+			run_dir,
+			source,
+			episode_manifest,
+			source_is_preclipped_episode,
+			semantic_source_start_sec,
+		)
+		source_background_segments = _offset_source_background_audio_segments(source_background_segments, source_audio_time_offset_sec)
+		plan_target_duration = float((plan.get("summary") or {}).get("target_duration_sec") or 0.0)
+		expected_target_duration = audio_duration + audio_start_offset_sec
+		if abs(plan_target_duration - expected_target_duration) > 0.75:
+			raise AssertionError(
+				"turn_retimed_basic_v1 target duration does not match the current final audio. "
+				f"plan_target={plan_target_duration:.3f}s audio={audio_duration:.3f}s "
+				f"audio_start_offset={audio_start_offset_sec:.3f}s expected={expected_target_duration:.3f}s. "
+				"Regenerate the turn audio timeline from the current final_podcast.wav before rendering."
+			)
+		target_duration = plan_target_duration
 		match_audio_duration = True
 		video_copy_policy = "source_video_turn_retimed_basic_reencoded_to_audio_duration"
 		turn_retime_result = {
 			"visual_sync_mode": visual_sync_mode,
 			"source_turn_map": str(retime_source_turn_map),
 			"turn_audio_timeline": str(retime_turn_audio_timeline),
+			"turn_audio_timeline_selection": retime_turn_audio_timeline_selection,
 			"source_time_offset_sec": retime_time_offset,
 			"visual_activity": str(visual_activity_path),
 			"retime_edit_plan": str(retime_plan_path),
 			"retime_plan_summary": plan.get("summary") or {},
 			"retimed_video": str(retimed_video),
 			"retimed_video_render": render_result,
+			"audio_start_offset_sec": audio_start_offset_sec,
+			"subtitle_time_offset_sec": subtitle_time_offset_sec,
+			"source_audio_for_mix": str(source_audio_for_mix) if source_audio_for_mix is not None else None,
+			"source_audio_for_mix_reason": source_audio_for_mix_reason,
+			"source_audio_time_offset_sec": source_audio_time_offset_sec,
+			"source_background_audio_segments": source_background_segments,
 		}
 
 	final_video = output_dir / "final_video.mp4"
 	burned_subtitle_render: dict[str, Any] | None = None
+	audio_mix_manifest: dict[str, Any] | None = None
 	if force or not final_video.exists():
 		if burn_subtitles:
 			subtitle_manifest_path = (subtitle_manifest or run_dir / "video/subtitle_manifest.json").resolve()
@@ -741,14 +998,28 @@ def run_revoice(
 				allow_trim_audio or review_sample,
 				video_encoder,
 				video_bitrate,
+				audio_start_offset_sec=audio_start_offset_sec,
+				subtitle_time_offset_sec=subtitle_time_offset_sec,
+				source_audio_input=source_audio_for_mix,
+				source_background_segments=source_background_segments,
 			)
+			audio_mix_manifest = burned_subtitle_render.get("audio_mix") if burned_subtitle_render else None
 			video_copy_policy = (
 				"source_video_turn_retimed_basic_reencoded_with_burned_ass_subtitles"
 				if visual_sync_mode == "turn_retimed_basic_v1"
 				else "source_video_reencoded_with_burned_ass_subtitles"
 			)
 		else:
-			_compose_video_copy(video_input, audio_path, final_video, target_duration, allow_trim_audio or review_sample)
+			audio_mix_manifest = _compose_video_copy(
+				video_input,
+				audio_path,
+				final_video,
+				target_duration,
+				allow_trim_audio or review_sample,
+				audio_start_offset_sec=audio_start_offset_sec,
+				source_audio_input=source_audio_for_mix,
+				source_background_segments=source_background_segments,
+			)
 
 	final_duration = _duration(final_video)
 	source_probe = _probe(source)
@@ -810,6 +1081,7 @@ def run_revoice(
 		"subtitle_mode": "burned_ass" if burn_subtitles else "sidecar_not_burned",
 		"subtitle_delivery_policy": "burned_subtitles_default" if burn_subtitles else "sidecar_user_requested_no_burn_subtitles",
 		"burned_subtitle_render": burned_subtitle_render,
+		"audio_mix": audio_mix_manifest,
 		"source_video": str(source),
 		"source_video_sha256": _sha256(source),
 		"source_duration_sec": round(source_duration, 3),
@@ -820,6 +1092,8 @@ def run_revoice(
 		"audio": str(audio_path),
 		"audio_sha256": _sha256(audio_path),
 		"audio_duration_sec": round(audio_duration, 3),
+		"audio_start_offset_sec": round(audio_start_offset_sec, 3),
+		"subtitle_time_offset_sec": round(subtitle_time_offset_sec, 3),
 		"target_duration_sec": round(target_duration, 3),
 		"final_video": str(final_video),
 		"final_video_sha256": _sha256(final_video),

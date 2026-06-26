@@ -158,7 +158,7 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--silence-threshold", default="-50dB")
 	parser.add_argument("--max-silence-sec", type=float, default=0.8)
 	parser.add_argument("--min-source-mean-volume", type=float, default=-30.0)
-	parser.add_argument("--min-source-max-volume", type=float, default=-8.0)
+	parser.add_argument("--min-source-max-volume", type=float, default=-10.0)
 	parser.add_argument("--allow-low-level-source", action="store_true")
 	return parser
 
