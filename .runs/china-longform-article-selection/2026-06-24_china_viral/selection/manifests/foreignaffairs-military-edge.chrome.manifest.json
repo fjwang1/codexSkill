@@ -1,0 +1,125 @@
+{
+  "success": false,
+  "input_url": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+  "resolved_url": null,
+  "capture_method": "archive.is-homepage-search-via-chrome",
+  "started_at": "2026-06-25T05:36:16.439Z",
+  "finished_at": "2026-06-25T05:38:06.321Z",
+  "output_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/captures/foreignaffairs-military-edge.chrome.txt",
+  "manifest_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/manifests/foreignaffairs-military-edge.chrome.manifest.json",
+  "title": null,
+  "metadata": {},
+  "access_limited": false,
+  "source_markdown_length": 0,
+  "body_preview": "",
+  "selected_snapshot_url": null,
+  "error": "No archive home mirror yielded searchable snapshot results",
+  "flow_manifest": {
+    "original_url": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+    "method": "archive.is-homepage-search-via-chrome",
+    "started_at": "2026-06-25T05:36:22.555Z",
+    "search_page": {
+      "body_preview": "archive.today\n网页存档\n\t\n搜索示例\nwww.foreignaffairs.com 搜索所有来自此域名的网页存档\n*.foreignaffairs.com 搜索所有来自此域名及其子域名的网页存档\nhttps://www.foreignaffairs.com/china/mirage-chinas-military-edge 根据精确网址查询存档\nhttps://www.foreignaffairs.com/china/mirage-chinas-military-edge* 查询以此网址开头的网页\n没有结果\nYou may want to\narchive this url\nsearch this url in Archive.Org\nsearch this url in WebCite\nsearch this url in Megalodon",
+      "links": [
+        {
+          "href": "https://archive.today/",
+          "text": "archive.today网页存档"
+        },
+        {
+          "href": "https://archive.is/www.foreignaffairs.com",
+          "text": "www.foreignaffairs.com"
+        },
+        {
+          "href": "https://archive.is/*.foreignaffairs.com",
+          "text": "*.foreignaffairs.com"
+        },
+        {
+          "href": "https://archive.is/https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+          "text": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge"
+        },
+        {
+          "href": "https://archive.is/https://www.foreignaffairs.com/china/mirage-chinas-military-edge*",
+          "text": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge*"
+        },
+        {
+          "href": "https://d8rhssf87qfy80.archive.is/?url=https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+          "text": "archive this url"
+        },
+        {
+          "href": "http://web.archive.org/web/*/https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+          "text": "search this url in Archive.Org"
+        },
+        {
+          "href": "http://www.webcitation.org/query?url=https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+          "text": "search this url in WebCite"
+        },
+        {
+          "href": "http://megalodon.jp/?url=https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+          "text": "search this url in Megalodon"
+        }
+      ],
+      "title": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+      "url": "https://archive.is/https://www.foreignaffairs.com/china/mirage-chinas-military-edge"
+    },
+    "home_attempts": [
+      {
+        "home_url": "https://archive.is/",
+        "search_url": "https://archive.is/https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+        "title": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+        "access_limited": false,
+        "body_preview": "archive.today\n网页存档\n\t\n搜索示例\nwww.foreignaffairs.com 搜索所有来自此域名的网页存档\n*.foreignaffairs.com 搜索所有来自此域名及其子域名的网页存档\nhttps://www.foreignaffairs.com/china/mirage-chinas-military-edge 根据精确网址查询存档\nhttps://www.foreignaffairs.com/china/mirage-chinas-military-edge* 查询以此网址开头的网页\n没有结果\nYou may want to\narchive this url\nsearch this url in Archive.Org\nsearch this url in WebCite\nsearch this url in Megalodon",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: No archive snapshot links found on archive search results page\n    at runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:72:11)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async Module.captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_5.mjs:19:15"
+      },
+      {
+        "home_url": "https://archive.today/",
+        "search_url": null,
+        "title": "archive.ph",
+        "access_limited": false,
+        "body_preview": "无法访问此网站\n\narchive.ph 意外终止了连接。\n\n请试试以下办法：\n\n检查网络连接\n检查代理服务器和防火墙\nERR_CONNECTION_CLOSED\n重新加载\n详情",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: Missing unique archive search input. Inputs seen: []\n    at locateUniqueArchiveSearchInput (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:231:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async fillArchiveSearchForm (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:170:22)\n    at async runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:54:4)\n    at async Module.captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_5.mjs:19:15"
+      },
+      {
+        "home_url": "https://archive.ph/",
+        "search_url": null,
+        "title": "archive.ph",
+        "access_limited": false,
+        "body_preview": "无法访问此网站\n\narchive.ph 意外终止了连接。\n\n请试试以下办法：\n\n检查网络连接\n检查代理服务器和防火墙\nERR_CONNECTION_CLOSED\n重新加载\n详情",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: Missing unique archive search input. Inputs seen: []\n    at locateUniqueArchiveSearchInput (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:231:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async fillArchiveSearchForm (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:170:22)\n    at async runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:54:4)\n    at async Module.captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_5.mjs:19:15"
+      },
+      {
+        "home_url": "https://archive.md/",
+        "search_url": null,
+        "title": "archive.md",
+        "access_limited": false,
+        "body_preview": "无法访问此网站\n\narchive.md 意外终止了连接。\n\n请试试以下办法：\n\n检查网络连接\n检查代理服务器和防火墙\nERR_CONNECTION_CLOSED\n重新加载\n详情",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: Missing unique archive search input. Inputs seen: []\n    at locateUniqueArchiveSearchInput (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:231:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async fillArchiveSearchForm (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:170:22)\n    at async runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:54:4)\n    at async Module.captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_5.mjs:19:15"
+      }
+    ],
+    "snapshot_attempts": [],
+    "success": false,
+    "selected_snapshot_url": null,
+    "error": "No archive home mirror yielded searchable snapshot results",
+    "finished_at": "2026-06-25T05:38:06.285Z",
+    "prior_direct_manifest": {
+      "success": false,
+      "original_url": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge",
+      "method": "chrome-extension-direct",
+      "started_at": "2026-06-25T05:36:16.440Z",
+      "resolved_url": "https://www.foreignaffairs.com/china/mirage-chinas-military-edge-dennis-blair",
+      "title": "The Mirage of China’s Military Edge",
+      "access_limited": false,
+      "markdown_length": 413,
+      "body_preview": "Skip to content Current Issue Archive Books Podcast Foreign Affairs Newsletters Log In Subscribe Menu New Issue Out July/August 2026 Read Now The Mirage of China’s Military Edge Panic Is Misguided—and Counterproductive Dennis Blair July/August 2026 Published on June 23, 2026 Matt Murphy Listen Share & Download Print Save If China were to seize control of Taiwan by force, it would be a disaster, not only for Taiwan but also for the United States. A nearly $1 trillion economy would leave the free-market system and be incorporated into China’s state-directed, mercantilist one. A vibrant democracy nurtured and defended by the United States for many years would be snuffed out. American power and influence would be gravely diminished in East Asia, and China would become the region’s dominant power. Other governments there would be pressured to accommodate China’s political, economic, and even territorial demands. Beijing would certainly insist that they kick out U.S. forces. China’s global a",
+      "error": null,
+      "finished_at": "2026-06-25T05:36:22.555Z"
+    }
+  }
+}

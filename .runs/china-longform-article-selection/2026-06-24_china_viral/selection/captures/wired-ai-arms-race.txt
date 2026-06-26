@@ -1,0 +1,279 @@
+URL Page Capture
+Input URL: https://www.wired.com/story/ai-arms-race-china-us-cooperation/
+Resolved URL: https://www.wired.com/story/ai-arms-race-china-us-cooperation/
+Capture method: http-fetch
+Title: I Met With China’s Top AI Experts. They’re Freaking Out, Too
+Byline: Will Knight
+Published at: 2026-06-24T18:45:00.000Z
+Site: WIRED
+Captured at: 2026-06-25T05:20:58.609Z
+Content text length: 10783
+
+===== CONTENT TEXT =====
+
+I Met With China’s Top AI Experts. They’re Freaking Out, Too | WIRED
+
+We're Tracking Amazon Prime Day Live
+
+Shop Now
+
+SECURITY
+
+POLITICS
+
+THE BIG STORY
+
+BUSINESS
+
+SCIENCE
+
+CULTURE
+
+REVIEWS
+
+PRIME DAY
+
+Newsletters
+
+Security
+
+Politics
+
+The Big Story
+
+Business
+
+Science
+
+Culture
+
+Reviews
+
+Prime Day
+
+More
+
+The Big Interview Magazine Events WIRED Insider WIRED Consulting
+
+Newsletters
+
+Podcasts
+
+Video
+
+Livestreams
+
+Merch
+
+Search
+
+Will Knight
+
+Business
+Jun 24, 2026 2:45 PM
+
+I Met With China’s Top AI Experts. They’re Freaking Out, Too
+
+The AI arms race between China and the US has researchers on both sides worried about a “Chernobyl moment.”
+
+Photo-Illustration: WIRED Staff; Getty Images
+
+Save this story
+
+Save this story
+
+Just over a week ago, I attended a major artificial intelligence conference in Zhongguancun, Beijing’s bustling high-tech district.
+
+It was packed with fascinating sessions touching on everything from recursive self-improvement—the idea that models can tweak their own code and advance indefinitely—to humanoid robots. And it featured a few legends of computing, including Whitfield Diffie, co-inventor of public-key cryptography, and Andrew Barto, who won the Turing Award with Rich Sutton for his pioneering work on reinforcement learning.
+
+But I left with one takeaway above all else: The US and China should put their fierce AI rivalry to the side.
+
+Frontier AI’s cybersecurity and systemic risks are too serious to ignore, and increasingly capable agentic models could soon cause chaos unless the world’s AI superpowers can work together. “AI is a global technology with global benefits, global harms, and a consistent tendency for new capabilities to eventually proliferate,” Stephen Casper , a computer scientist at MIT who spoke at the conference via video, told me afterward.
+
+Until now, the US has largely viewed China’s AI advances as an economic and national security threat. Washington has imposed tight restrictions on chips and chipmaking equipment to stymie the country’s development of powerful AI. Most recently, the US government ordered Anthropic to prevent foreign nationals from accessing its most powerful models, Mythos and Fable 5, over national security concerns . In response, Anthropic revoked access for everyone. One company that was of particular concern, WIRED previously revealed, was a South Korean telecom giant with alleged ties to China .
+
+But the conference, organized by the Beijing Academy of Artificial Intelligence, reinforced the idea that both the US and China stand to lose if AI is developed too quickly and recklessly. As AI becomes more powerful, more agentic, and more intertwined with everyday life, the risks that it could be used to conduct cyberattacks or fail in catastrophic ways will only grow. Because the world’s two dominant AI powers are responsible for the most advanced models, cooperation between them feels like it will be crucial.
+
+Casper pointed to research showing that the benefits of international collaboration on AI dangers outweigh any national security risks that come from working together. He likened the current situation to how the US and the Soviet Union were forced to work together on nuclear dangers, even as they sought to out-stockpile one another.
+
+“One thing that almost everyone in AI can agree on right now is that AI doesn't need a Chernobyl moment,” Casper said.
+
+One day-long session highlighted the universality of the cyber challenges raised by more advanced AI. This includes new kinds of vulnerabilities in AI-generated code , novel ways of attacking systems enabled by agentic tool use, and automated methods for carrying out social engineering attacks.
+
+After another session, I spoke with Lin Yun, a professor at Shanghai Jia Tong University who does excellent work on AI and computer security. Yun told me he expects hackers to gain an advantage over the near term, but that new countermeasures, including novel uses of AI, should tip the balance back toward defense over time.
+
+Yun said that even if international cooperation is complicated by competition, it should remain a priority. “If different countries understand the risks in similar ways, it becomes easier to develop shared safety principles and technical standards,” he told me. “The key is to find areas where sharing can reduce systemic risk without exposing sensitive operational details.”
+
+Perhaps the most pressing question for both nations is how to balance openness with risk. Open-weight models have become crucial for research and innovation, with Chinese models proving popular in the US. But as these models advance, it will become more challenging to ensure they don’t help hackers identify security vulnerabilities and can’t be wielded as cyber weapons.
+
+Over the last few years, Chinese companies have taken the lead in offering highly capable open-weight AI models, like Moonshot’s Kimi, Alibaba’s Qwen, and Z.ai’s GLM. The US has rebooted its own open-weight AI push with models like Nvidia’s Nemotron . But we’re approaching an inflection point where even less powerful open models could prove dangerous if they’re stripped of guardrails. The latest model from China’s Z.ai, GLM 5.2, includes frontier agentic and coding capabilities, according to expert analysis . The next generation of open-weight AI models might be just as capable as Fable or Mythos. In fact, just this week, 360 Security Technologies, a top Chinese cybersecurity firm, said it had developed an AI model with hacking capabilities on par with Mythos.
+
+Yun said the industry will need to devise new ways of guaranteeing that open models are up-to-date, free of backdoors and vulnerabilities, and have met safety standards.
+
+One possible sign of things to come? A source at one of China’s leading AI companies, who asked to remain anonymous because they weren’t authorized to talk to the press, tells me that security concerns are one reason why some advanced models in China are no longer being released as open source.
+
+This is an edition of Will Knight’s AI Lab newsletter . Read previous newsletters here.
+
+Comments
+Back to top
+
+You Might Also Like
+
+In your inbox: Brian Kahn’s guide to how the universe works
+
+Meta added face recognition—and deleted it after a WIRED report
+
+Big Story: Jeff Bezos’ hunt for the brain’s ‘core algorithm’
+
+El Niño is here to turn the world’s weather upside down
+
+WIRED event: PepsiCo’s once-in-a-generation transformation
+
+Will Knight is a senior writer for WIRED, covering artificial intelligence. He writes the AI Lab newsletter , a weekly dispatch from beyond the cutting edge of AI— sign up here . He was previously a senior editor at MIT Technology Review, where he wrote about fundamental advances in AI and China’s AI ... Read More
+
+Senior Writer
+
+Topics AI Lab artificial intelligence China cybersecurity agentic AI cybersecurity hacking Anthropic
+
+Read More
+
+Meta Pauses Employee-Tracking Program Following Internal Data Leak
+
+The move comes after the company left potentially sensitive data from the initiative exposed internally.
+
+Paresh Dave
+
+A Source of Mysterious Repeating Radio Signals From Space Has Been Identified
+
+Researchers say the discovery could be a “Rosetta stone” for cosmic signals.
+
+Ritsuko Kawai
+
+The 97 Absolute Best Prime Day Deals on Our Favorite Products
+
+We've gone from A to Z to find Amazon's best Prime Day deals on the gear worth owning.
+
+Louryn Strampe
+
+The New Odyssey Movie Is Sparking a Right-Wing Backlash. This Female Scholar Knows It Well
+
+Emily Wilson’s 2017 translation of Homer’s epic—the first by a woman—was called a woke “abomination” by online reactionaries. Christopher Nolan’s film is facing similar critiques.
+
+John Semley
+
+Meta Exposed Data Internally From Its Controversial Employee-Tracking Program
+
+Employees had previously raised concerns about the initiative, which involves collecting workers’ keystroke data to train AI models.
+
+Paresh Dave
+
+Leak Exposes Members of Peter Thiel’s Secretive ‘Dialog’ Society
+
+More than 200 of the world's elites registered for a retreat whose agenda runs from panels on cult-building and sex to prepping for World War III. An associated app offers matchmaking.
+
+Dell Cameron
+
+Some Electricians Think Building Data Centers Is for Sellouts
+
+Big Tech is throwing big money into data center buildouts. As national opposition to the facilities grows, some workers are beginning to question whether it’s worth it.
+
+Caroline Haskins
+
+Federal Workers Can’t Get the White House’s App Off Their Phones
+
+“I deleted it as a test and it came immediately back,” says one government employee.
+
+Vittoria Elliott
+
+Even the Internet’s Favorite Pool Guy Doesn’t Know How to Fix the Reflecting Pool
+
+Algae blooms, peeling paint, and a host of fixes from hydrogen peroxide to nanobubblers have made it hard to diagnose what’s wrong with the Reflecting Pool—let alone how to clean up the mess.
+
+Molly Taft
+
+Top DoorDash Promo Code: 50% Off for June 2026
+
+Explore today’s top DoorDash promo codes for $25 off your first order, free delivery, and 50% off DashPass for students and select users.
+
+Molly Higgins
+
+28 Tips to Take Your ChatGPT Prompts to the Next Level
+
+Sure, anyone can use OpenAI’s chatbot. But with smart engineering, you can get way more interesting results.
+
+David Nield
+
+OpenAI Launches Full-Scale Effort to Patch Open-Source Bugs as It Takes on Anthropic’s Mythos
+
+Amid concerns about AI models’ cybersecurity capabilities, OpenAI revealed an improved version of GPT-5.5-Cyber and its “Patch the Planet” initiative to fix open-source software bugs.
+
+Lily Hay Newman
+
+WIRED is obsessed with what comes next. Through rigorous investigations and game-changing reporting, we tell stories that don’t just reflect the moment—they help create it. When you look back in 10, 20, even 50 years, WIRED will be the publication that led the story of the present, mapped the people, products, and ideas defining it, and explained how those forces forged the future. WIRED: For Future Reference.
+
+More From WIRED
+
+Subscribe
+
+Newsletters
+
+Livestreams
+
+Travel
+
+FAQ
+
+Contact Us
+
+WIRED Staff
+
+WIRED Education
+
+Editorial Standards
+
+Archive
+
+RSS
+
+Site Map
+
+Reviews and Guides
+
+Reviews
+
+Buying Guides
+
+Streaming Guides
+
+Wearables
+
+Coupons
+
+Prime Day
+
+Advertise
+
+Manage Account
+
+Jobs
+
+Press Center
+
+Condé Nast Store
+
+User Agreement
+
+Privacy Policy
+
+Your California Privacy Rights
+
+© 2026 Condé Nast. All rights reserved. WIRED may earn a portion of sales from products that are purchased through our site as part of our Affiliate Partnerships with retailers. The material on this site may not be reproduced, distributed, transmitted, cached or otherwise used, except with the prior written permission of Condé Nast. Ad Choices
+
+Select international site
+United States
+
+Italia
+
+Japón
+
+Czech Republic & Slovakia

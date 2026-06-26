@@ -1,0 +1,36 @@
+{
+  "success": true,
+  "input_url": "https://foreignpolicy.com/2026/06/24/china-dollar-dedollarization-yuan-renminbi-brics-finance-banks-sanctions/",
+  "resolved_url": "https://foreignpolicy.com/2026/06/24/china-dollar-dedollarization-yuan-renminbi-brics-finance-banks-sanctions/",
+  "capture_method": "chrome-extension-direct",
+  "started_at": "2026-06-25T05:35:58.537Z",
+  "finished_at": "2026-06-25T05:36:02.996Z",
+  "output_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/captures/foreignpolicy-dedollarization.chrome.txt",
+  "manifest_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/manifests/foreignpolicy-dedollarization.chrome.manifest.json",
+  "title": "China’s De-Dollarization Drive Has Hit a Wall",
+  "metadata": {
+    "byline": "Agathe Demarais",
+    "description": "Beijing can create financial instruments, but it cannot decree demand.",
+    "published_at": null,
+    "site_name": "Foreign Policy",
+    "title": "China’s De-Dollarization Drive Has Hit a Wall"
+  },
+  "access_limited": false,
+  "source_markdown_length": 14010,
+  "body_preview": "By using this website, you agree to our use of cookies. This use includes personalization of content and ads, and traffic analytics. Review our Privacy Policy for more information. Skip to navigation Skip to search Skip to main content Skip to footer Show expanded website navigation Back to Foreign Policy Magazine home page Latest Regions Newsletters FP Live Search this website ANALYSIS China’s De-Dollarization Drive Has Hit a Wall Beijing can create financial instruments, but it cannot decree demand. An illustrated portrait of Agathe Demarais Agathe Demarais By Agathe Demarais, a columnist at Foreign Policy and a senior policy fellow on geoeconomics and technology at the European Council on Foreign Relations. A close-up shot shows a row of curled United States 100-dollar bills alternating with pink Chinese 100-yuan banknotes, arranged in a wave-like pattern across a reflective surface. U.S. dollar and Chinese yuan banknotes. CFOTO/FUTURE PUBLISHING VIA GETTY IMAGES JUNE 24, 2026, 10:2",
+  "selected_snapshot_url": null,
+  "error": null,
+  "flow_manifest": {
+    "success": true,
+    "original_url": "https://foreignpolicy.com/2026/06/24/china-dollar-dedollarization-yuan-renminbi-brics-finance-banks-sanctions/",
+    "method": "chrome-extension-direct",
+    "started_at": "2026-06-25T05:35:58.537Z",
+    "resolved_url": "https://foreignpolicy.com/2026/06/24/china-dollar-dedollarization-yuan-renminbi-brics-finance-banks-sanctions/",
+    "title": "China’s De-Dollarization Drive Has Hit a Wall",
+    "access_limited": false,
+    "markdown_length": 14010,
+    "body_preview": "By using this website, you agree to our use of cookies. This use includes personalization of content and ads, and traffic analytics. Review our Privacy Policy for more information. Skip to navigation Skip to search Skip to main content Skip to footer Show expanded website navigation Back to Foreign Policy Magazine home page Latest Regions Newsletters FP Live Search this website ANALYSIS China’s De-Dollarization Drive Has Hit a Wall Beijing can create financial instruments, but it cannot decree demand. An illustrated portrait of Agathe Demarais Agathe Demarais By Agathe Demarais, a columnist at Foreign Policy and a senior policy fellow on geoeconomics and technology at the European Council on Foreign Relations. A close-up shot shows a row of curled United States 100-dollar bills alternating with pink Chinese 100-yuan banknotes, arranged in a wave-like pattern across a reflective surface. U.S. dollar and Chinese yuan banknotes. CFOTO/FUTURE PUBLISHING VIA GETTY IMAGES JUNE 24, 2026, 10:2",
+    "error": null,
+    "finished_at": "2026-06-25T05:36:02.976Z"
+  }
+}

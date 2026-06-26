@@ -1,0 +1,36 @@
+{
+  "success": true,
+  "input_url": "https://restofworld.org/2026/ev-battery-recycling-china-us/",
+  "resolved_url": "https://restofworld.org/2026/ev-battery-recycling-china-us/",
+  "capture_method": "chrome-extension-direct",
+  "started_at": "2026-06-25T05:29:35.155Z",
+  "finished_at": "2026-06-25T05:29:38.573Z",
+  "output_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/captures/restofworld-ev-battery-recycling.chrome.txt",
+  "manifest_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/manifests/restofworld-ev-battery-recycling.chrome.manifest.json",
+  "title": "China and the West are taking opposite paths on EV battery recycling",
+  "metadata": {
+    "byline": "By Indranil Ghosh + Indranil Ghosh is the Middle East and Africa Editor at Rest of World, based in Abu Dhabi. You need to sign in or create an account in order to follow this author. Follow+",
+    "description": "While China mandates rapid electric vehicle battery recycling, the U.S. is turning old EV packs into grid energy storage to fight resource scarcity.",
+    "published_at": "2026-06-24T10:00:00+00:00",
+    "site_name": "Rest of World",
+    "title": "China and the West are taking opposite paths on EV battery recycling"
+  },
+  "access_limited": false,
+  "source_markdown_length": 8794,
+  "body_preview": "Skip to content Reporting Global Tech Stories GlobalElectric Mobility SIGN IN EV REVOLUTION China and the West are taking opposite paths on EV battery recycling China has 85% of the world’s recycling capacity and a mandate to shred old packs. The U.S. has another plan: use them to save the power grid first. Rest of World/iStock By INDRANIL GHOSH + 24 JUNE 2026 翻译成中文 (简体字) ESPAÑOL PORTUGUÊS 中文 (简体字) 中文 (繁體字) DEUTSCH FRANÇAIS China mandates immediate recycling of spent EV batteries for metal recovery, while the U.S. prefers giving depleted batteries a second life as grid storage first. The strategies center on lithium, nickel, and cobalt — scarce metals dominated by Chinese refining — making battery recycling a matter of both economics and national security for Western nations. China has built over 85% of global recycling capacity and tracks every battery cradle-to-grave, while the U.S. lags without a national recycling plan. The first wave of electric-vehicle batteries is reaching the e",
+  "selected_snapshot_url": null,
+  "error": null,
+  "flow_manifest": {
+    "success": true,
+    "original_url": "https://restofworld.org/2026/ev-battery-recycling-china-us/",
+    "method": "chrome-extension-direct",
+    "started_at": "2026-06-25T05:29:35.155Z",
+    "resolved_url": "https://restofworld.org/2026/ev-battery-recycling-china-us/",
+    "title": "China and the West are taking opposite paths on EV battery recycling",
+    "access_limited": false,
+    "markdown_length": 8794,
+    "body_preview": "Skip to content Reporting Global Tech Stories GlobalElectric Mobility SIGN IN EV REVOLUTION China and the West are taking opposite paths on EV battery recycling China has 85% of the world’s recycling capacity and a mandate to shred old packs. The U.S. has another plan: use them to save the power grid first. Rest of World/iStock By INDRANIL GHOSH + 24 JUNE 2026 翻译成中文 (简体字) ESPAÑOL PORTUGUÊS 中文 (简体字) 中文 (繁體字) DEUTSCH FRANÇAIS China mandates immediate recycling of spent EV batteries for metal recovery, while the U.S. prefers giving depleted batteries a second life as grid storage first. The strategies center on lithium, nickel, and cobalt — scarce metals dominated by Chinese refining — making battery recycling a matter of both economics and national security for Western nations. China has built over 85% of global recycling capacity and tracks every battery cradle-to-grave, while the U.S. lags without a national recycling plan. The first wave of electric-vehicle batteries is reaching the e",
+    "error": null,
+    "finished_at": "2026-06-25T05:29:38.572Z"
+  }
+}

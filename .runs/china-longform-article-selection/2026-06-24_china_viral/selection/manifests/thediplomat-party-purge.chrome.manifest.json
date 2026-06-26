@@ -1,0 +1,36 @@
+{
+  "success": true,
+  "input_url": "https://thediplomat.com/2026/06/not-just-the-military-xi-jinpings-other-senior-party-purge/",
+  "resolved_url": "https://thediplomat.com/2026/06/not-just-the-military-xi-jinpings-other-senior-party-purge/",
+  "capture_method": "chrome-extension-direct",
+  "started_at": "2026-06-25T05:35:41.114Z",
+  "finished_at": "2026-06-25T05:35:44.871Z",
+  "output_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/captures/thediplomat-party-purge.chrome.txt",
+  "manifest_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/manifests/thediplomat-party-purge.chrome.manifest.json",
+  "title": "Not Just the Military: Xi Jinping’s Other Senior Party Purge",
+  "metadata": {
+    "byline": null,
+    "description": "Xi has ruthlessly gone after former Politburo Standing Committee member and one-time economic czar Wang Qishan.",
+    "published_at": null,
+    "site_name": null,
+    "title": "Not Just the Military: Xi Jinping’s Other Senior Party Purge"
+  },
+  "access_limited": false,
+  "source_markdown_length": 6305,
+  "body_preview": "ALL SECTIONS SEARCH READ THE DIPLOMAT, KNOW THE ASIA-PACIFIC SIGN IN CENTRAL ASIA EAST ASIA OCEANIA SOUTH ASIA SOUTHEAST ASIA | SECURITY POLITICS DIPLOMACY ECONOMY SOCIETY ENVIRONMENT OPINION FEATURES | ALL REGIONS Central Asia East Asia Oceania South Asia Southeast Asia TOPICS Diplomacy Economy Environment Opinion Politics Security Society BLOGS ASEAN Beat Asia Defense China Power Crossroads Asia Flashpoints Oceania Pacific Money The Debate The Koreas The Pulse Tokyo Report Trans-Pacific View MORE Features Interviews Photo Essays Podcasts Videos NEWSLETTER Diplomat Brief Weekly Newsletter Home Page About Us Contact Us Write for Us Advertise Syndicate Privacy Newsletter Subscriptions CHINA POWER Not Just the Military: Xi Jinping’s Other Senior Party Purge RECENT FEATURES POLITICS With the Military Ascendant, Is This the End for Imran Khan? DIPLOMACY Uyghurs Wonder: Does the US Still Care About Human Rights in China? VIDEOS Who’s Winning Southeast Asia’s De-risking Race? DIPLOMACY North",
+  "selected_snapshot_url": null,
+  "error": null,
+  "flow_manifest": {
+    "success": true,
+    "original_url": "https://thediplomat.com/2026/06/not-just-the-military-xi-jinpings-other-senior-party-purge/",
+    "method": "chrome-extension-direct",
+    "started_at": "2026-06-25T05:35:41.115Z",
+    "resolved_url": "https://thediplomat.com/2026/06/not-just-the-military-xi-jinpings-other-senior-party-purge/",
+    "title": "Not Just the Military: Xi Jinping’s Other Senior Party Purge",
+    "access_limited": false,
+    "markdown_length": 6305,
+    "body_preview": "ALL SECTIONS SEARCH READ THE DIPLOMAT, KNOW THE ASIA-PACIFIC SIGN IN CENTRAL ASIA EAST ASIA OCEANIA SOUTH ASIA SOUTHEAST ASIA | SECURITY POLITICS DIPLOMACY ECONOMY SOCIETY ENVIRONMENT OPINION FEATURES | ALL REGIONS Central Asia East Asia Oceania South Asia Southeast Asia TOPICS Diplomacy Economy Environment Opinion Politics Security Society BLOGS ASEAN Beat Asia Defense China Power Crossroads Asia Flashpoints Oceania Pacific Money The Debate The Koreas The Pulse Tokyo Report Trans-Pacific View MORE Features Interviews Photo Essays Podcasts Videos NEWSLETTER Diplomat Brief Weekly Newsletter Home Page About Us Contact Us Write for Us Advertise Syndicate Privacy Newsletter Subscriptions CHINA POWER Not Just the Military: Xi Jinping’s Other Senior Party Purge RECENT FEATURES POLITICS With the Military Ascendant, Is This the End for Imran Khan? DIPLOMACY Uyghurs Wonder: Does the US Still Care About Human Rights in China? VIDEOS Who’s Winning Southeast Asia’s De-risking Race? DIPLOMACY North",
+    "error": null,
+    "finished_at": "2026-06-25T05:35:44.849Z"
+  }
+}

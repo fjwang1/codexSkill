@@ -1,0 +1,93 @@
+Title: China and the West are taking opposite paths on EV battery recycling
+Byline: By Indranil Ghosh + Indranil Ghosh is the Middle East and Africa Editor at Rest of World, based in Abu Dhabi. You need to sign in or create an account in order to follow this author. Follow+
+Published: 2026-06-24T10:00:00+00:00
+Site: Rest of World
+Original URL: https://restofworld.org/2026/ev-battery-recycling-china-us/
+Resolved URL: https://restofworld.org/2026/ev-battery-recycling-china-us/
+Capture method: chrome-extension-direct
+Captured at: 2026-06-25T05:29:35.155Z
+
+# China and the West are taking opposite paths on EV battery recycling
+
+Rest of World/iStock
+By Indranil Ghosh + Indranil Ghosh
+
+is the Middle East and Africa Editor at Rest of World, based in Abu Dhabi.
+
+You need to sign in or create an account in order to follow this author.
+Follow +
+
+24 June 2026
+翻译成中文 (简体字) Español Português 中文 (简体字) 中文 (繁體字) Deutsch Français
+
+- China mandates immediate recycling of spent EV batteries for metal recovery, while the U.S. prefers giving depleted batteries a second life as grid storage first.
+- The strategies center on lithium, nickel, and cobalt — scarce metals dominated by Chinese refining — making battery recycling a matter of both economics and national security for Western nations.
+- China has built over 85% of global recycling capacity and tracks every battery cradle-to-grave, while the U.S. lags without a national recycling plan.
+
+The first wave of electric-vehicle batteries is reaching the end of the road, and China and the West are taking very different paths on what to do with them.
+
+An electric car battery wears out after about a decade. It is too weak by then to drive far, but still holds plenty of charge for lighter work, and that leftover life can be used two ways: The battery can be kept whole to store electricity, or shredded so the lithium, nickel, and cobalt inside can be recycled for new ones.
+
+Listen to story 7 minutes
+Learn more
+
+0:00 / 7:15
+1x
+
+China has picked the shredder. Rules that took effect on April 1 dropped reuse as a goal and put metal recovery first, according to a government statement. The U.S. and Europe are going the other way, backing companies that find a tired battery a gentler second job before it is taken apart.
+
+The choice is really about the metals inside them. Lithium, nickel, and cobalt are the lifeblood of every new battery, scarce and fought over, and pulling them from old packs costs less than mining fresh ore. Both China and the West want those metals, locked in millions of worn-out batteries, and differ only on when to go after them.
+
+What’s inside an EV battery, and what’s worth recovering
+Nickel High value, and the main reason recycling pays. Used in the pricier batteries in most U.S. and European EVs, and the metal recyclers most want .
+
+Cobalt Scarce and expensive, mostly mined in the Democratic Republic of Congo. Its high value drives the recycling , so recyclers prioritize it.
+
+Lithium Stores the charge and gives the battery its name. Worth recovering, but harder to extract and needs heavy processing to reach battery grade.
+
+Iron, manganese, copper, aluminium Used in varying amounts. Mostly low value, with copper the one worth recovering on price.
+
+Lithium Ion Phosphate Used in a fast-growing share of EVs, especially in China. It holds no valuable metals , which makes it unprofitable to recycle and the reason the cheapest batteries need rules to force recycling.
+
+“Many countries without lithium resources are seeing end-of-life batteries as a potential source of lithium to be more self-sufficient,” Adam Megginson, principal analyst at Benchmark Mineral Intelligence, a London firm that tracks battery supply chains, told Rest of World. “A kind of urban mining.”
+
+The choice matters to anyone weighing an electric car or paying a power bill, in the U.S. and beyond. The metals drawn from old batteries help set the price of new ones, which go into the next car and into the giant banks that store solar and wind power. Whoever controls that supply has a hand on the cost of EV cars and clean power.
+
+## From Waymo to the Texas power grid
+
+Whether a battery is worth recycling comes down to what is inside it. Nickel and cobalt are the valuable metals, and a battery built with them holds enough to pay for taking it apart. Most Chinese cars run on cheaper lithium-iron-phosphate batteries. These contain no nickel or cobalt and only a little lithium, so recycling one rarely pays off.
+
+That gives the West room to wait. The U.S. and Europe lack anything close to China’s capacity to shred and refine batteries, so for now they get extra years out of old packs as low-cost grid storage. The metal is not lost in the meantime, since a nickel-and-cobalt battery still holds its lithium, nickel and cobalt to recover at the end, so reusing first costs nothing while the West builds the recycling plants it needs.
+
+> The United States cannot out-mine and out-process China.”The Council on Foreign Relations
+
+A deal struck this month showed what that looks like. The robotaxi firm Waymo agreed to hand its worn-out nickel-and-cobalt batteries to B2U Storage Solutions, a Santa Monica company that turns used EV packs into power storage in California and Texas. A retired pack still holds enough charge to run another five to 10 years in a warehouse, useful for a grid leaning more on solar and wind.
+
+“By extending the use of these batteries as grid storage, we are monetizing the full potential of EV batteries, now providing crucial stability to the power grid as energy demand continues to grow,” B2U CEO Freeman Hall said in a statement.
+
+China can’t afford to wait. Its streets filled up with cheap cars running on lithium-iron-phosphate batteries years ahead of the rest of the world. As the first lot wore out, it left a mountain of batteries worth less than the cost of breaking them down.
+
+“The cheaper the battery, the less economic it is to recycle,” Beatrice Browning, battery recycling technology lead at Benchmark Mineral Intelligence, told Rest of World. “And with cheaper batteries comes more reliance on regulation to mandate their recycling.”
+
+## 85% of the world’s recycling capacity
+
+So China has made recycling a legal duty rather than wait for the numbers to work. Worn-out batteries there hit about 820,000 tons last year and should reach a million tons a year by 2030, according to the research firm EVtank. Sitting on the largest pile of dead EV batteries anywhere, China has also built the most places to process it, more than 85% of the world’s recycling capacity, according to the Global EV Outlook.
+
+The battery intake field, where 30 acres of old batteries await recycling, at the Redwood Materials recycling and manufacturing facility in Nevada. Emily Najera/Bloomberg via Getty Images
+China’s recycling drive goes beyond clearing away junk. It imports more than 90% of the cobalt, nickel, and manganese in its batteries, and about 60% of its lithium, which leaves it dependent on a handful of foreign suppliers, a senior researcher at the state-run China Automotive Technology and Research Center told state broadcaster CCTV. Recycling its own dead batteries reduces that dependence.
+
+China is also ensuring the batteries reach a recycler. Each one is tagged and tracked from factory to scrapyard, and carmakers must take back what they sold, closing the backstreet workshops where old batteries used to disappear, according to the government statement.
+
+The system still has limits. Many of China’s recycling plants run half-idle, because the cheap batteries piling up are the least rewarding to break apart, and the lithium recovered often needs further cleaning before it can be reused.
+
+## A role in U.S. national security
+
+Europe is moving early too, but through new targets rather than China’s blunt push. Its rules order recyclers to recover half of all lithium by 2027 and four-fifths by 2031, and require new batteries to contain a set share of recycled metal, according to the European Union. A separate law tells the bloc to draw a quarter of its key raw materials from recycling by 2030.
+
+The U.S. is the one big economy without such a plan, and it is also slipping for a simple reason: EV sales in the country are growing more slowly than in China, Europe, and Asia, so its share of global battery demand is set to fall from about 10% today to less than 5% by 2030, according to the Global EV Outlook.
+
+With few mines and little recycling of its own, the easiest place for the U.S. to find the metals it needs may be the millions of cars already on its roads — a mine-on-wheels waiting for the batteries to retire.
+
+Redwood Materials, the biggest U.S. recycler, estimates the 5 million electric cars on U.S. roads hold roughly 2.25 million tons of battery metals, to be tapped first through reuse and later through recovery. It calls this a matter of national security, not just economics, because lithium, nickel, and cobalt also power the electricity grid and military equipment. The U.S. now buys most of its processed supply from China, which refines the bulk of the world’s battery metals.
+
+“The United States cannot out-mine and out-process China,” the Council on Foreign Relations wrote in February. “Instead, it should leapfrog China’s dominance by scaling disruptive innovation, recovery, and recycling.”

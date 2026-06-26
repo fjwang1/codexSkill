@@ -1,6 +1,6 @@
 ---
 name: daily-china-article-to-wechat-bundle
-description: "每日英文外刊深度长文到微信公众号图文包的总控 skill。Use when the user wants to reuse china-longform-article-selection in global_deep_longform mode to select up to 2 material-available, China-unrelated, high-quality longform articles; depth, length, originality, explanatory power, and Chinese-reader value are mandatory, while China relevance is a hard exclusion for this workflow. Run every selected article through the full WeChat production workflow: strict faithful full Chinese translation, post-translation fidelity review, a dedicated Chinese-reader optimization node for fluency/logic/structure/readability, WeChat formatting, final copy and technical packaging check, cover image, chapter illustrations, and draft-box publishing as one single- or two-article WeChat draft. Article-local stages for selected candidates may be executed in parallel."
+description: "每日英文外刊深度长文到微信公众号图文包的总控 skill。Use when the user wants to reuse china-longform-article-selection in global_deep_longform mode to select up to 2 material-available, China-unrelated, high-quality longform articles; depth, length, originality, explanatory power, and Chinese-reader value are mandatory, while China relevance is a hard exclusion for this workflow. Run every selected article through the full WeChat production workflow: strict faithful full Chinese translation, post-translation fidelity review, a dedicated Chinese-reader optimization node for fluency/logic/structure/readability, an independent local-Chinese-reader subagent review loop, WeChat formatting, final copy and technical packaging check, cover image, chapter illustrations, and draft-box publishing as one single- or two-article WeChat draft. Article-local stages for selected candidates may be executed in parallel."
 ---
 
 # Daily Deep Longform Article To WeChat Bundle
@@ -17,6 +17,7 @@ target_date
    -> strict faithful full Chinese translation
    -> translation fidelity review: completeness/fidelity + baseline Chinese clarity
    -> Chinese-reader optimization: fluency + logic/structure + paragraph rhythm
+   -> local Chinese reader review loop: independent subagent finds comprehension blockers
    -> WeChat article formatting
    -> final copy and technical packaging check
    -> cover image
@@ -47,6 +48,7 @@ A1..A{returned_count} each:
 translation
 -> translation fidelity review loop
 -> Chinese-reader optimization loop
+-> local Chinese reader review loop
 -> WeChat Markdown formatting
 -> final copy and technical packaging check
 -> cover generation
@@ -55,7 +57,7 @@ translation
 
 Rules:
 
-- Do not reserve the full workflow for A1 only. Every selected article A1..A{returned_count} must receive the same translation review, Chinese-reader optimization, cover generation, formatting, illustration generation, and final draft inclusion.
+- Do not reserve the full workflow for A1 only. Every selected article A1..A{returned_count} must receive the same translation review, Chinese-reader optimization, local Chinese reader review, cover generation, formatting, illustration generation, and final draft inclusion.
 - Preserve per-article dependency order inside each chain. For example, do not generate chapter illustrations before `wechat/reviewed_article.md` exists.
 - It is acceptable to use parallel subagents or parallel shell jobs for different articles when the required inputs are already present.
 - Avoid parallel writes to shared files such as `wechat_bundle/wechat_bundle_manifest.json`, `orchestration_manifest.json`, and `publish/*`. Aggregate per-article outputs first, then write shared bundle/publish artifacts once.
@@ -110,6 +112,9 @@ articles/
     translation/chinese_reading_version.md
     translation/chinese_reading_optimization_result.json
     translation/chinese_reading_optimization_report.md
+    translation/local_reader_review_result.json
+    translation/local_reader_review_report.md
+    translation/local_reader_review_rounds/ optional round reports
     wechat/article.md
     wechat/reviewed_article.md
     wechat/article_quality_check.json
@@ -357,6 +362,7 @@ Purpose:
 - Optimize fluency, paragraph rhythm, logical transitions, section structure, subheads, and narrative clarity.
 - Keep the source's facts, claims, evidence, chronology, quotations, hedging, attribution, and overall argument intact.
 - Preserve full coverage. This node is not a summary, rewrite, commentary essay, or condensed adaptation.
+- Treat this as Chinese editorial rewriting, not light proofreading. A sentence can be faithful and still fail this phase if it sounds like translated English, uses awkward industry terms, repeats foreign names mechanically, or makes Chinese readers pause to decode foreign context.
 
 Allowed edits:
 
@@ -365,6 +371,22 @@ Allowed edits:
 - Add or rename H2/H3 subheads when they make the article easier to scan, as long as the subhead accurately reflects the nearby source material.
 - Add neutral Chinese connective words such as `同时`, `然而`, `因此`, `换句话说`, or `更重要的是` only when they make an already-present logical relationship explicit.
 - Replace literal translationese with idiomatic Chinese while preserving meaning and attribution.
+- Localize industry terms to common Chinese editorial usage. Examples:
+  - `agent` in a betting business context -> `代理商`, not bare `代理`.
+  - `offshore betting site` -> `境外博彩网站`, not `离岸投注平台`.
+  - `sports betting` -> `体育博彩`, not `体育投注`.
+  - `bookie` -> `地下庄家` / `庄家`, depending on local context.
+  - `bettor` / `customer` / internal `player` -> `赌客` unless the original explicitly discusses game play.
+- Reduce foreign-name burden. In the WeChat-facing body, prefer stable short Chinese names from first mention whenever context already makes the person identifiable; do not force a full Western transliteration on first mention unless it is needed for legal precision, quotation, or disambiguation. For minor figures, use surname, given name, role, or relationship. Avoid repeated full transliterations such as `蒂姆·普斯利` or `克里斯·唐纳森` when `普斯利` / `唐纳森` is clear. If two people share a surname, use a stable short disambiguator such as `内森`, `哥哥`, `妻子海莉`, or `伯德特兄弟`.
+- Do not preserve English nicknames or names mechanically when a Chinese-facing short form works better. Keep English only when it is a brand, legal name, quoted nickname, or necessary for identification.
+- Explain unfamiliar foreign brands, institutions, laws, places, restaurants, sports leagues, and industry products at first mention using a compact functional gloss, then use a Chinese short form. Example: `FanDuel 和 DraftKings 这类美国合法体育博彩平台`; later `这些合法博彩平台`.
+- Replace back-translated Chinese with reader-native phrasing. Examples:
+  - `地下博彩网络` -> `地下博彩网站` or `地下博彩生意`
+  - `顶级代理` -> `顶级代理商`
+  - `公司务虚会` -> `年度聚会` / `代理商大会`
+  - `气场过于出众` -> `条件太好`
+  - `私人调查机构` -> `私人调查公司`
+- Keep quoted speech natural in Chinese. If a literal quote sounds like subtitle translation, rewrite it into conversational Chinese while preserving meaning and speaker attitude.
 
 Forbidden edits:
 
@@ -379,6 +401,9 @@ Required quality checks:
 1. Readability:
    - The article should read as polished Chinese nonfiction, not line-by-line translated English.
    - Remove translationese, stiff calques, ambiguous pronouns, broken transitions, repeated subject names, and awkward noun piles.
+   - No major sentence should require back-translating into English to understand.
+   - No paragraph should overload readers with unexplained English names, brand names, laws, place names, or U.S.-specific institutions.
+   - Main and secondary characters should use stable short names. Repeated full foreign names are a readability failure unless needed for disambiguation.
 
 2. Structure:
    - The lead, section breaks, subheads, and paragraph order should help Chinese readers follow the article's core tension, evidence chain, and conclusion.
@@ -398,6 +423,8 @@ Optimization result schema:
   "status": "PASS | NEEDS_REVISION | FAIL",
   "readability_status": "PASS | NEEDS_REVISION",
   "structure_status": "PASS | NEEDS_REVISION",
+  "localization_status": "PASS | NEEDS_REVISION",
+  "name_simplification_status": "PASS | NEEDS_REVISION",
   "fidelity_status": "PASS | NEEDS_REVISION | FAIL",
   "coverage_status": "PASS | NEEDS_REVISION | FAIL",
   "reviewed_translation_sha256": "...",
@@ -415,16 +442,107 @@ Optimization result schema:
     }
   ],
   "forbidden_changes_found": [],
+  "localized_terms": [
+    {
+      "source_term": "agent",
+      "chosen_chinese": "代理商",
+      "rationale": "Chinese business/commission context"
+    }
+  ],
+  "name_policy": "short_names_after_identification",
   "revision_count": 1
 }
 ```
 
 Loop requirement:
 
-- If `readability_status`, `structure_status`, `fidelity_status`, or `coverage_status` is not `PASS`, revise `translation/chinese_reading_version.md`, then rerun this Phase 3c review.
+- If `readability_status`, `structure_status`, `localization_status`, `name_simplification_status`, `fidelity_status`, or `coverage_status` is not `PASS`, revise `translation/chinese_reading_version.md`, then rerun this Phase 3c review.
 - Repeat until all statuses are `PASS`.
 - Stop with `CHINESE_READING_OPTIMIZATION_GATE_FAILED` if the article cannot be made fluent and structurally readable in Chinese without adding, deleting, or distorting source material.
-- Later phases must use `translation/chinese_reading_version.md`, not `translation/reviewed_translation.md` or raw `translation/translation.md`.
+- Phase 3d must use `translation/chinese_reading_version.md`, not `translation/reviewed_translation.md` or raw `translation/translation.md`.
+
+## Phase 3d: Local Chinese Reader Review
+
+After Phase 3c passes, run an independent reader-review loop before WeChat formatting begins.
+
+This phase must be performed by a separate subagent. The main/control agent must not substitute its own self-review for this gate. If no subagent tool is available, stop with `LOCAL_READER_REVIEW_GATE_FAILED` and report that an independent reader review could not be run.
+
+Reviewer persona:
+
+- A Chinese reader who has not lived or studied abroad.
+- Reads mainly Chinese media and WeChat longform articles.
+- Has no assumed background in U.S. sports, U.S. sports betting, federal tax procedure, local U.S. geography, U.S. restaurant chains, or English brand names.
+- Wants to understand the story smoothly, not study a translation.
+
+Reviewer input:
+
+```text
+translation/chinese_reading_version.md
+```
+
+Do not provide the source article, the intended fixes, or the main agent's private reasoning to the reviewer. The reviewer must evaluate the Chinese article as a standalone WeChat-reading experience.
+
+Reviewer task:
+
+- Read the full article from beginning to end as an ordinary Chinese reader.
+- Identify every reading blocker, not just severe errors:
+  - unexplained English brand, organization, product, place, law, sports, or industry term
+  - awkward or uncommon Chinese industry wording
+  - repeated full foreign names, or unnecessary first-mention full transliterations, where short names would be easier
+  - unclear character relationships, role changes, or same-surname confusion
+  - paragraphs that feel translated rather than written in Chinese
+  - titles or subheads that are literal, stiff, too long, or hard to share on WeChat
+  - U.S.-specific context that needs a short gloss
+  - timeline, money, legal/tax, or business-model passages that a local Chinese reader may not follow
+  - sentence-level stumbles, pronoun ambiguity, broken transitions, or dense noun piles
+- For each issue, provide location, quoted excerpt, why a local Chinese reader may get stuck, and a concrete revision suggestion.
+- Return `PASS` only when the article can be read smoothly without needing foreign background knowledge or back-translation into English.
+
+Required outputs:
+
+```text
+articles/{candidate_id}_{slug}/translation/local_reader_review_result.json
+articles/{candidate_id}_{slug}/translation/local_reader_review_report.md
+articles/{candidate_id}_{slug}/translation/local_reader_review_rounds/ optional round reports
+```
+
+Review result schema:
+
+```json
+{
+  "schema_version": "wechat-local-reader-review.v1",
+  "candidate_id": "A1",
+  "status": "PASS | NEEDS_REVISION | FAIL",
+  "round": 1,
+  "reviewer_persona": "mainland_chinese_reader_no_overseas_background",
+  "chinese_reading_version_sha256": "...",
+  "readability_status": "PASS | NEEDS_REVISION",
+  "comprehension_status": "PASS | NEEDS_REVISION",
+  "foreign_context_status": "PASS | NEEDS_REVISION",
+  "name_burden_status": "PASS | NEEDS_REVISION",
+  "term_localization_status": "PASS | NEEDS_REVISION",
+  "wechat_title_status": "PASS | NEEDS_REVISION",
+  "issues": [
+    {
+      "type": "term | name | foreign_context | sentence | paragraph | structure | title",
+      "severity": "must_fix | should_fix",
+      "location": "heading or paragraph number",
+      "excerpt": "...",
+      "reader_blocker": "why a local Chinese reader may pause or misunderstand",
+      "suggestion": "concrete revision"
+    }
+  ],
+  "revision_count_after_review": 0
+}
+```
+
+Loop requirement:
+
+- If the subagent returns `NEEDS_REVISION` or `FAIL`, the main/control agent must revise `translation/chinese_reading_version.md`, update `translation/chinese_reading_optimization_result.json` hashes/statuses when material wording changes, and write a round report under `translation/local_reader_review_rounds/`.
+- Then send only the revised `translation/chinese_reading_version.md` back to a separate local-reader subagent review. Prefer reusing the same subagent thread if available so it can verify previous blockers are resolved, but do not let it edit the article directly.
+- Repeat until the local-reader review result is `PASS`.
+- Stop with `LOCAL_READER_REVIEW_GATE_FAILED` if the article cannot be made smooth for the reviewer without deleting, adding, or distorting substantive source material.
+- Later phases must use the Phase 3d-passed `translation/chinese_reading_version.md`, not any earlier draft.
 
 ## Chinese Title Policy
 
@@ -473,9 +591,10 @@ articles/{candidate_id}_{slug}/wechat/article_metadata.json
 
 Formatting rules:
 
-- Article body is the Chinese-reader optimized version from `translation/chinese_reading_version.md`, not the raw translation, not only the fidelity-reviewed translation, not a video script, and not a commentary essay.
+- Article body is the Phase 3d-passed Chinese-reader optimized version from `translation/chinese_reading_version.md`, not the raw translation, not only the fidelity-reviewed translation, not a video script, and not a commentary essay.
 - Do not proceed if `translation/translation_review_result.json` is missing or `full_translation_status` / `language_quality_status` is not `PASS`.
-- Do not proceed if `translation/chinese_reading_optimization_result.json` is missing or `readability_status`, `structure_status`, `fidelity_status`, or `coverage_status` is not `PASS`.
+- Do not proceed if `translation/chinese_reading_optimization_result.json` is missing or `readability_status`, `structure_status`, `localization_status`, `name_simplification_status`, `fidelity_status`, or `coverage_status` is not `PASS`.
+- Do not proceed if `translation/local_reader_review_result.json` is missing or `status` is not `PASS`.
 - `wechat/article.md` and `wechat/reviewed_article.md` are semantic Markdown intermediates, not the final WeChat visual format.
 - Do not encode visual styling in Markdown. Keep styling centralized in `/Users/wangfangjia/.codex/skills/wechat-article-publish-draft/references/wechat-article-style-spec.md`.
 - Insert downloaded original images/videos at the closest relevant position in the article.
@@ -513,12 +632,17 @@ Formatting rules:
   "chinese_reading_version_path": "...",
   "chinese_reading_optimization_result_path": "...",
   "chinese_reading_optimization_report_path": "...",
+  "local_reader_review_result_path": "...",
+  "local_reader_review_report_path": "...",
   "translation_full_translation_status": "PASS",
   "translation_language_quality_status": "PASS",
   "chinese_reading_readability_status": "PASS",
   "chinese_reading_structure_status": "PASS",
+  "chinese_reading_localization_status": "PASS",
+  "chinese_reading_name_simplification_status": "PASS",
   "chinese_reading_fidelity_status": "PASS",
   "chinese_reading_coverage_status": "PASS",
+  "local_reader_review_status": "PASS",
   "reviewed_article_path": "...",
   "article_quality_check_path": "...",
   "article_quality_check_report_path": "...",
@@ -546,11 +670,11 @@ articles/{candidate_id}_{slug}/wechat/article_quality_check.md
 
 Rules:
 
-- This phase does not replace Phase 3b or Phase 3c. It catches issues introduced by Markdown packaging, media captions, title synchronization, source-display handling, image paths, and final publishable copy assembly.
+- This phase does not replace Phase 3b, Phase 3c, or Phase 3d. It catches issues introduced by Markdown packaging, media captions, title synchronization, source-display handling, image paths, and final publishable copy assembly.
 - `reviewed_article.md` is the only article body allowed to enter bundle/publish.
 - Read the full article as a Chinese editor. Fix remaining awkward transitions, paragraph rhythm problems, unclear references, duplicated words, broken punctuation, and headline/subhead mismatches.
 - Do not run policy keyword screening for this China-unrelated workflow. Do not soften, delete, or skip material because of old topic categories. If the WeChat API itself rejects a draft, stop and report the API error.
-- Preserve every substantive source fact, quote, date, number, attribution, caveat, and counterargument already carried through Phase 3c.
+- Preserve every substantive source fact, quote, date, number, attribution, caveat, and counterargument already carried through Phase 3d.
 - Review the title against the Chinese Title Policy. Rewrite hard translations or awkward headline fragments even when the body reads cleanly.
 - Do not claim translated foreign articles are original. Preserve source publication, original title, original URL, and authorization basis in metadata/reports, not as visible article-body source notes.
 - Verify that the final article body contains no visible source declaration, original-title block, URL block, source-prefix headline, capture noise, broken Markdown image path, orphan media caption, raw webpage control text, or inline visual styling.
@@ -722,7 +846,7 @@ Default layout:
 }
 ```
 
-Use every returned material-available candidate. Unless the user specifies another editorial rule, keep the highest-scoring candidate as the main article and attach the remaining returned candidates in ranked order. Every returned candidate must have passed translation review, Chinese-reader optimization, final copy and technical packaging check, cover generation, article formatting, and illustration generation before the bundle manifest is written.
+Use every returned material-available candidate. Unless the user specifies another editorial rule, keep the highest-scoring candidate as the main article and attach the remaining returned candidates in ranked order. Every returned candidate must have passed translation review, Chinese-reader optimization, local Chinese reader review, final copy and technical packaging check, cover generation, article formatting, and illustration generation before the bundle manifest is written.
 
 Each `articles[]` entry must point to reviewed copy:
 
@@ -737,6 +861,8 @@ Each `articles[]` entry must point to reviewed copy:
   "translation_review_result_path": ".../articles/A1_slug/translation/translation_review_result.json",
   "chinese_reading_version_path": ".../articles/A1_slug/translation/chinese_reading_version.md",
   "chinese_reading_optimization_result_path": ".../articles/A1_slug/translation/chinese_reading_optimization_result.json",
+  "local_reader_review_result_path": ".../articles/A1_slug/translation/local_reader_review_result.json",
+  "local_reader_review_report_path": ".../articles/A1_slug/translation/local_reader_review_report.md",
   "article_quality_check_path": ".../articles/A1_slug/wechat/article_quality_check.json",
   "source_publication_zh": "金融时报",
   "authorization_basis": "account_authorized_source_whitelist",
@@ -749,8 +875,11 @@ Each `articles[]` entry must point to reviewed copy:
   "translation_full_translation_status": "PASS",
   "chinese_reading_readability_status": "PASS",
   "chinese_reading_structure_status": "PASS",
+  "chinese_reading_localization_status": "PASS",
+  "chinese_reading_name_simplification_status": "PASS",
   "chinese_reading_fidelity_status": "PASS",
   "chinese_reading_coverage_status": "PASS",
+  "local_reader_review_status": "PASS",
   "article_quality_status": "PASS",
   "illustration_count": 3
 }
@@ -780,7 +909,7 @@ python3 /Users/wangfangjia/.codex/skills/wechat-article-publish-draft/scripts/pu
 Rules:
 
 - This phase creates a draft only. It must not call `freepublish/submit`.
-- Do not create the draft until all selected article chains have passed translation review, Chinese-reader optimization, final copy and technical packaging check, cover generation, formatting, and illustration gates.
+- Do not create the draft until all selected article chains have passed translation review, Chinese-reader optimization, local Chinese reader review, final copy and technical packaging check, cover generation, formatting, and illustration gates.
 - This phase renders `wechat/reviewed_article.md` to styled inline HTML using `wechat-swiss-grid-v1`.
 - Inspect `publish/wechat_article.preview.html` before live draft creation when visual quality matters.
 - The publish script discovers the current public IP and records it in `publish/wechat_draft_report.json`.
@@ -805,6 +934,8 @@ TRANSLATION_REVIEW_GATE_FAILED
 TRANSLATION_REVIEW_COMPLETE
 CHINESE_READING_OPTIMIZATION_GATE_FAILED
 CHINESE_READING_OPTIMIZATION_COMPLETE
+LOCAL_READER_REVIEW_GATE_FAILED
+LOCAL_READER_REVIEW_COMPLETE
 ARTICLE_QUALITY_GATE_FAILED
 ARTICLE_FULL_WORKFLOW_COMPLETE
 WECHAT_PACKAGE_READY
@@ -820,11 +951,12 @@ Final report must include:
 - Main article and attached article IDs.
 - Translation paths for all selected articles.
 - Translation review paths and full-translation/language statuses for all selected articles.
-- Chinese-reader optimization paths and readability/structure/fidelity/coverage statuses for all selected articles.
+- Chinese-reader optimization paths and readability/structure/localization/name-simplification/fidelity/coverage statuses for all selected articles.
+- Local Chinese reader review paths, review rounds, statuses, and unresolved blocker counts for all selected articles.
 - Final article quality check paths and statuses for all selected articles.
 - Cover paths, cover manifests, and cover spec for all selected articles.
 - Illustration manifest paths and illustration counts for all selected articles.
 - WeChat bundle manifest path.
 - Publish draft report path and status.
 - WeChat style version and preview HTML path.
-- Any blocker, especially translation coverage failures, Chinese readability failures, article quality gate failures, or WeChat API errors.
+- Any blocker, especially translation coverage failures, Chinese readability failures, unresolved local-reader comprehension blockers, article quality gate failures, or WeChat API errors.

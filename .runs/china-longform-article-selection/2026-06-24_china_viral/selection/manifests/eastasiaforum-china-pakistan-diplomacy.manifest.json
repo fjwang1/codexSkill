@@ -1,0 +1,25 @@
+{
+  "success": false,
+  "input_url": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+  "started_at": "2026-06-25T05:20:56.631Z",
+  "finished_at": "2026-06-25T05:21:07.187Z",
+  "output_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/captures/eastasiaforum-china-pakistan-diplomacy.txt",
+  "manifest_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/manifests/eastasiaforum-china-pakistan-diplomacy.manifest.json",
+  "attempts": [
+    {
+      "success": false,
+      "capture_method": "http-fetch",
+      "input_url": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+      "resolved_url": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+      "selected_snapshot_url": null,
+      "status": null,
+      "content_type": null,
+      "title": null,
+      "access_limited": true,
+      "content_text_length": 0,
+      "body_preview": "",
+      "error": "TypeError: fetch failed"
+    }
+  ],
+  "error": "Error: No usable page content captured. Use Chrome Extension / chrome:control-chrome with the user main Google Chrome, or rerun as HTTP-only for public variants.\n    at main (file:///Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_url_cli.mjs:61:10)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)"
+}

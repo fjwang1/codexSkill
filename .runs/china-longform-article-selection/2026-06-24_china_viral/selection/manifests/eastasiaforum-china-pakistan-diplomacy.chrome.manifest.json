@@ -1,0 +1,112 @@
+{
+  "success": false,
+  "input_url": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+  "resolved_url": null,
+  "capture_method": "archive.is-homepage-search-via-chrome",
+  "started_at": "2026-06-25T05:33:30.103Z",
+  "finished_at": "2026-06-25T05:35:12.573Z",
+  "output_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/captures/eastasiaforum-china-pakistan-diplomacy.chrome.txt",
+  "manifest_path": "/Users/wangfangjia/code/codexSkill/.runs/china-longform-article-selection/2026-06-24_china_viral/selection/manifests/eastasiaforum-china-pakistan-diplomacy.chrome.manifest.json",
+  "title": null,
+  "metadata": {},
+  "access_limited": false,
+  "source_markdown_length": 0,
+  "body_preview": "",
+  "selected_snapshot_url": null,
+  "error": "No archive home mirror yielded searchable snapshot results",
+  "flow_manifest": {
+    "original_url": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+    "method": "archive.is-homepage-search-via-chrome",
+    "started_at": "2026-06-25T05:33:30.103Z",
+    "search_page": {
+      "body_preview": "archive.today\n网页存档\n\t\n搜索示例\neastasiaforum.org 搜索所有来自此域名的网页存档\n*.eastasiaforum.org 搜索所有来自此域名及其子域名的网页存档\nhttps://eastasiaforum.org/ 根据精确网址查询存档\nhttps://eastasiaforum.org/* 查询以此网址开头的网页\n没有结果\nYou may want to\narchive this url\nsearch this url in Archive.Org\nsearch this url in WebCite\nsearch this url in Megalodon",
+      "links": [
+        {
+          "href": "https://archive.today/",
+          "text": "archive.today网页存档"
+        },
+        {
+          "href": "https://archive.is/eastasiaforum.org",
+          "text": "eastasiaforum.org"
+        },
+        {
+          "href": "https://archive.is/*.eastasiaforum.org",
+          "text": "*.eastasiaforum.org"
+        },
+        {
+          "href": "https://archive.is/https://eastasiaforum.org/",
+          "text": "https://eastasiaforum.org/"
+        },
+        {
+          "href": "https://archive.is/https://eastasiaforum.org/*",
+          "text": "https://eastasiaforum.org/*"
+        },
+        {
+          "href": "https://d0f9hmlgpihykn.archive.is/?url=https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+          "text": "archive this url"
+        },
+        {
+          "href": "http://web.archive.org/web/*/https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+          "text": "search this url in Archive.Org"
+        },
+        {
+          "href": "http://www.webcitation.org/query?url=https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+          "text": "search this url in WebCite"
+        },
+        {
+          "href": "http://megalodon.jp/?url=https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+          "text": "search this url in Megalodon"
+        }
+      ],
+      "title": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+      "url": "https://archive.is/https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/"
+    },
+    "home_attempts": [
+      {
+        "home_url": "https://archive.is/",
+        "search_url": "https://archive.is/https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+        "title": "https://eastasiaforum.org/2026/06/24/china-pakistan-diplomacy-is-moving-beyond-bilateralism/",
+        "access_limited": false,
+        "body_preview": "archive.today\n网页存档\n\t\n搜索示例\neastasiaforum.org 搜索所有来自此域名的网页存档\n*.eastasiaforum.org 搜索所有来自此域名及其子域名的网页存档\nhttps://eastasiaforum.org/ 根据精确网址查询存档\nhttps://eastasiaforum.org/* 查询以此网址开头的网页\n没有结果\nYou may want to\narchive this url\nsearch this url in Archive.Org\nsearch this url in WebCite\nsearch this url in Megalodon",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: No archive snapshot links found on archive search results page\n    at runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:72:11)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_1.mjs:11:16"
+      },
+      {
+        "home_url": "https://archive.today/",
+        "search_url": null,
+        "title": "archive.ph",
+        "access_limited": false,
+        "body_preview": "无法访问此网站\n\narchive.ph 意外终止了连接。\n\n请试试以下办法：\n\n检查网络连接\n检查代理服务器和防火墙\nERR_CONNECTION_CLOSED\n重新加载\n详情",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: Missing unique archive search input. Inputs seen: []\n    at locateUniqueArchiveSearchInput (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:231:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async fillArchiveSearchForm (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:170:22)\n    at async runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:54:4)\n    at async captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_1.mjs:11:16"
+      },
+      {
+        "home_url": "https://archive.ph/",
+        "search_url": null,
+        "title": "archive.ph",
+        "access_limited": false,
+        "body_preview": "无法访问此网站\n\narchive.ph 意外终止了连接。\n\n请试试以下办法：\n\n检查网络连接\n检查代理服务器和防火墙\nERR_CONNECTION_CLOSED\n重新加载\n详情",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: Missing unique archive search input. Inputs seen: []\n    at locateUniqueArchiveSearchInput (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:231:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async fillArchiveSearchForm (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:170:22)\n    at async runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:54:4)\n    at async captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_1.mjs:11:16"
+      },
+      {
+        "home_url": "https://archive.md/",
+        "search_url": null,
+        "title": "archive.md",
+        "access_limited": false,
+        "body_preview": "无法访问此网站\n\narchive.md 意外终止了连接。\n\n请试试以下办法：\n\n检查网络连接\n检查代理服务器和防火墙\nERR_CONNECTION_CLOSED\n重新加载\n详情",
+        "snapshot_candidates": [],
+        "success": false,
+        "error": "Error: Missing unique archive search input. Inputs seen: []\n    at locateUniqueArchiveSearchInput (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:231:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async fillArchiveSearchForm (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:170:22)\n    at async runArchiveIsChromeFlow (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/archive_is_chrome_flow.mjs:54:4)\n    at async captureUrlWithChromeExtension (/Users/wangfangjia/code/codexSkill/url-page-capture/scripts/capture_chrome_extension.mjs:47:26)\n    at async /Users/wangfangjia/code/codexSkill/.node_repl_cell_1.mjs:11:16"
+      }
+    ],
+    "snapshot_attempts": [],
+    "success": false,
+    "selected_snapshot_url": null,
+    "error": "No archive home mirror yielded searchable snapshot results",
+    "finished_at": "2026-06-25T05:35:12.529Z"
+  }
+}
