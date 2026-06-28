@@ -493,15 +493,6 @@ def apply_voice_distinctness_policy(
 		lightweight_similarity = _voice_similarity_score(left_ref, right_ref)
 		reference_identity = _voice_reference_identity(left_info, right_info, left_ref, right_ref)
 		source_evidence = _source_reference_evidence(left_info, right_info)
-		verification = _speaker_verification_comparisons(
-			left_info,
-			right_info,
-			left_ref,
-			right_ref,
-			backend=speaker_verification_backend,
-			threshold=speaker_verification_threshold,
-			cache_dir=speaker_verification_cache_dir,
-		)
 		policy = {
 			**base_policy,
 			"status": "PASS_ORIGINAL_CLONED_PAIR",
@@ -511,7 +502,7 @@ def apply_voice_distinctness_policy(
 			"speaker_a_reference_wav": str(left_ref),
 			"speaker_b_reference_wav": str(right_ref),
 			"similarity": lightweight_similarity,
-			"speaker_verification": verification,
+			"speaker_verification": None,
 			"reference_identity": reference_identity,
 			"source_reference_evidence": source_evidence,
 			"reason": "speaker_verification_did_not_trigger_default_fallback",
@@ -536,6 +527,16 @@ def apply_voice_distinctness_policy(
 				"repair_guidance": "Rerun 02b/02c with distinct source clips before considering default fallback.",
 			})
 		else:
+			verification = _speaker_verification_comparisons(
+				left_info,
+				right_info,
+				left_ref,
+				right_ref,
+				backend=speaker_verification_backend,
+				threshold=speaker_verification_threshold,
+				cache_dir=speaker_verification_cache_dir,
+			)
+			policy["speaker_verification"] = verification
 			prompt_verification = verification.get("prompt_reference") if isinstance(verification.get("prompt_reference"), dict) else {}
 			source_verification = verification.get("source_reference") if isinstance(verification.get("source_reference"), dict) else None
 			unavailable = [
