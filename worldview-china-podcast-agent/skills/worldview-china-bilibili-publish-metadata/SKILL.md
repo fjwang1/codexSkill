@@ -23,7 +23,7 @@ Rules:
 - Use `cover/cover_4k.png` as the upload cover.
 - Use `video/final_video.mp4` as the upload video.
 - Write `publish_info.txt` with exactly one concise public-facing content summary sentence. The Bilibili description must tell viewers what this episode discusses, using the episode subtitle, chapter/script content, and key topics as evidence. Do not describe the production method.
-- Target 8-10 visible Bilibili tags.
+- Target 6-10 visible Bilibili tags. Six or seven precise tags are acceptable; do not pad with weak generic tags just to reach eight.
 - Tags must fit a translated YouTube podcast/video product, not an article product.
 - Set `category` to `知识`.
 - Set `creation_declaration` to `含AI生成内容`.
@@ -130,7 +130,7 @@ metadata.video_path == video/final_video.mp4
 metadata.cover_path == cover/cover_4k.png
 metadata.category == 知识
 metadata.creation_declaration == 含AI生成内容
-metadata.tags has 8-10 unique tags
+metadata.tags has 6-10 unique tags
 metadata.tags does not contain 外刊解读, 外刊精读, 英语学习, or 英语听力 unless explicitly justified by source type
 metadata.description does not contain local file paths, model names, manifest paths, internal QA notes, or production-method filler such as 中文配音版本, 保留原视频画面, 替换为中文对话音频, 方便中文观众理解
 metadata.description is exactly one public-facing content summary sentence and contains concrete episode topics supported by the current episode script, subtitle, chapter segments, title, or cover title
@@ -141,5 +141,7 @@ if scheduled_publish_at exists, metadata preserves scheduled_publish_at, schedul
 if episode_manifest.json exists and scheduled_publish_at exists, metadata.schedule_source == series_daily_11_17_balanced_ordered_slots
 metadata.description does not include title/source/channel/url/tag/chapter blocks such as 观点身份, 核心议题, 身份依据, 原视频标题, 来源频道, 原链接, 标签, or 章节
 ```
+
+If this gate fails, do not enter upload. Regenerate only the failing metadata fields when possible: rewrite production-method descriptions into one content-summary sentence, replace article-only tags with video/podcast/topic tags, restore preserved schedule fields, or sync title/cover paths from the current artifacts. After metadata changes, rerun the parent 04c text compliance review before upload.
 
 After this gate passes, invoke `bilibili-video-upload-draft` directly. Do not reimplement Bilibili Chrome automation in this skill.

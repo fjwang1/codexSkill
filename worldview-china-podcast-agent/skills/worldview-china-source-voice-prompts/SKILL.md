@@ -129,6 +129,6 @@ Speaker 1 -> speaker_voices["Speaker 1"].vibevoice_name
 Speaker N-1 -> speaker_voices["Speaker N-1"].vibevoice_name
 ```
 
-If both 02c and 02b manifests are absent, formal production must stop. Default `Xinran` / `BowenClean` preset voices are allowed only for explicit debugging or smoke validation, and the run report must make that fallback explicit.
+If both 02c and 02b manifests are absent, formal production must block 05 and repair 02a/02b/02c first. Try to recover by freezing the 02a roster, adding or correcting the speaker timeline, selecting cleaner same-speaker clips, regenerating the manifest, and registering voices. Default `Xinran` / `BowenClean` preset voices are allowed only for explicit debugging or smoke validation, and the run report must make that fallback explicit.
 
 Downstream chunks must preserve this frozen roster for every episode and chunk. A chunk that contains only one speaker still belongs to the same 1-4 speaker roster; it must not trigger a new voice choice, voice name, speaker numbering scheme, or default preset fallback.

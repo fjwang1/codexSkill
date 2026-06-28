@@ -108,6 +108,64 @@ SOURCE_AD_PATTERNS = {
 	),
 }
 
+OPENING_CTA_DIALOGUE_PATTERNS = (
+	r"\bwhat\b[^.?!]{0,180}\?",
+	r"\bwhy\b[^.?!]{0,180}\?",
+	r"\bhow\b[^.?!]{0,180}\?",
+	r"\btell me\b",
+	r"\blet'?s\s+(?:start|begin)\b",
+)
+
+OPENING_ANSWER_CUE_PATTERNS = (
+	r"\bso\s+let\s+me\s+first\s+start\b",
+	r"\blet\s+me\s+first\s+start\b",
+	r"\blet\s+me\s+start\b",
+	r"\bi\s+think\b",
+	r"\bi\s+would\b",
+	r"\blook\b",
+	r"\bwell\b",
+)
+
+HOST_SHORT_QUESTION_PATTERNS = (
+	r"^(?:really|right|okay|so)?\s*(?:what|why|how|which|do you|can you|should we|tell me)\b",
+	r"\?",
+)
+
+GUEST_ANSWER_CUE_PATTERNS = (
+	*OPENING_ANSWER_CUE_PATTERNS,
+	r"\blet'?s\s+be\s+(?:very\s+)?clear\b",
+	r"\bi\s+said\b",
+	r"\bi\s+didn'?t\s+say\b",
+	r"\bi'?ll\s+come\s+back\b",
+	r"\btherefore\b",
+	r"\bthe\s+fact\s+is\b",
+	r"\bone\s+way\s+of\s+thinking\b",
+	r"\bwe\s+have\b",
+	r"\bwe\s+must\b",
+)
+
+ROSTER_HOST_KEYWORDS = (
+	"host",
+	"interviewer",
+	"moderator",
+	"asks short",
+	"question",
+	"主持",
+	"采访",
+	"提问",
+)
+
+ROSTER_GUEST_KEYWORDS = (
+	"guest",
+	"expert",
+	"primary expert",
+	"answering",
+	"嘉宾",
+	"专家",
+	"回答",
+	"受访",
+)
+
 ZH_FIXES = [
 	("习近平平", "习近平"),
 	("习金平", "习近平"),
@@ -325,6 +383,268 @@ def _prepare_source_text_for_translation(raw_source_text: str) -> tuple[str, str
 	return reduced, source_text, False, []
 
 
+def _first_pattern_match(text: str, patterns: tuple[str, ...], start_offset: int = 0) -> re.Match[str] | None:
+	best: re.Match[str] | None = None
+	for pattern in patterns:
+		match = re.compile(pattern, flags=re.IGNORECASE | re.DOTALL).search(text, pos=start_offset)
+		if match is None:
+			continue
+		if best is None or match.start() < best.start():
+			best = match
+	return best
+
+
+def _time_at_text_offset(start_sec: float, end_sec: float, text: str, offset: int) -> float:
+	if end_sec <= start_sec or not text:
+		return start_sec
+	ratio = min(1.0, max(0.0, offset / max(1, len(text))))
+	return start_sec + (end_sec - start_sec) * ratio
+
+
+def _roster_role_scores(speaker_info: dict[str, Any]) -> tuple[int, int]:
+	text = " ".join(
+		str(speaker_info.get(key) or "")
+		for key in ("description", "identity", "role", "speaker")
+	).lower()
+	host_score = sum(1 for keyword in ROSTER_HOST_KEYWORDS if keyword.lower() in text)
+	guest_score = sum(1 for keyword in ROSTER_GUEST_KEYWORDS if keyword.lower() in text)
+	return host_score, guest_score
+
+
+def _infer_two_speaker_host_guest(run_dir: Path | None) -> tuple[str | None, str | None]:
+	if run_dir is None:
+		return None, None
+	candidates = [
+		run_dir / "02a-speaker-census/speaker_roster.json",
+		run_dir.parent.parent / "02a-speaker-census/speaker_roster.json",
+	]
+	roster_path = next((path for path in candidates if path.exists()), None)
+	if roster_path is None:
+		return None, None
+	try:
+		roster = _read_json(roster_path)
+	except Exception:
+		return None, None
+	if int(roster.get("speaker_count") or 0) != 2:
+		return None, None
+	speakers = roster.get("speakers") if isinstance(roster.get("speakers"), dict) else {}
+	role_scores: dict[str, tuple[int, int]] = {}
+	for speaker, info in speakers.items():
+		if not re.fullmatch(r"Speaker [0-3]", str(speaker)) or not isinstance(info, dict):
+			continue
+		role_scores[str(speaker)] = _roster_role_scores(info)
+	if len(role_scores) != 2:
+		return None, None
+	host_candidates = [
+		speaker for speaker, (host_score, guest_score) in role_scores.items()
+		if host_score > guest_score and host_score > 0
+	]
+	guest_candidates = [
+		speaker for speaker, (host_score, guest_score) in role_scores.items()
+		if guest_score > host_score and guest_score > 0
+	]
+	if len(host_candidates) == 1 and len(guest_candidates) == 1 and host_candidates[0] != guest_candidates[0]:
+		return host_candidates[0], guest_candidates[0]
+	return None, None
+
+
+def _source_turn_payload(
+	*,
+	speaker: str,
+	start_sec: float,
+	end_sec: float,
+	source_text: str,
+	raw_char_count: int,
+	cleaned_char_count: int,
+	pre_translation_cleanup: dict[str, Any],
+) -> dict[str, Any]:
+	return {
+		"source_turn_index": 0,
+		"speaker": speaker,
+		"source_start_sec": round(start_sec, 3),
+		"source_end_sec": round(max(start_sec, end_sec), 3),
+		"source_start": _seconds_to_stamp(start_sec),
+		"source_end": _seconds_to_stamp(max(start_sec, end_sec)),
+		"source_text": source_text,
+		"source_text_raw_char_count": raw_char_count,
+		"source_text_cleaned_char_count": cleaned_char_count,
+		"pre_translation_cleanup": pre_translation_cleanup,
+	}
+
+
+def _looks_like_short_host_question(text: str) -> bool:
+	value = _clean_space(text)
+	if not value or len(value) > 240:
+		return False
+	if _first_pattern_match(value, GUEST_ANSWER_CUE_PATTERNS) is not None and len(value) > 90:
+		return False
+	return _first_pattern_match(value, HOST_SHORT_QUESTION_PATTERNS) is not None
+
+
+def _looks_like_guest_answer(text: str) -> bool:
+	value = _clean_space(text)
+	if not value:
+		return False
+	if len(value) >= 260:
+		return True
+	if len(value) >= 90 and _first_pattern_match(value, GUEST_ANSWER_CUE_PATTERNS) is not None:
+		return True
+	return False
+
+
+def _repair_two_speaker_host_guest_turn_speakers(turns: list[dict[str, Any]], run_dir: Path | None) -> list[dict[str, Any]]:
+	host_speaker, guest_speaker = _infer_two_speaker_host_guest(run_dir)
+	if host_speaker is None or guest_speaker is None:
+		return turns
+	repaired: list[dict[str, Any]] = []
+	for turn in turns:
+		item = dict(turn)
+		cleanup = item.get("pre_translation_cleanup") if isinstance(item.get("pre_translation_cleanup"), dict) else {}
+		if cleanup.get("opening_dialogue_role") == "host_question" or cleanup.get("source_opening_bridge_inserted") is True:
+			item["speaker"] = host_speaker
+		elif cleanup.get("opening_dialogue_role") == "guest_answer":
+			item["speaker"] = guest_speaker
+		else:
+			text = str(item.get("source_text") or "")
+			if _looks_like_short_host_question(text):
+				item["speaker"] = host_speaker
+				item.setdefault("pre_translation_cleanup", {})["speaker_repair"] = "short_host_question_to_host"
+			elif _looks_like_guest_answer(text):
+				item["speaker"] = guest_speaker
+				item.setdefault("pre_translation_cleanup", {})["speaker_repair"] = "long_or_answer_like_turn_to_guest"
+		repaired.append(item)
+	for index, item in enumerate(repaired):
+		text = str(item.get("source_text") or "")
+		if item.get("speaker") == host_speaker or _looks_like_short_host_question(text) or len(text) > 80:
+			continue
+		prev_item = repaired[index - 1] if index > 0 else None
+		next_item = repaired[index + 1] if index + 1 < len(repaired) else None
+		prev_guest = prev_item is not None and prev_item.get("speaker") == guest_speaker
+		next_guest = next_item is not None and next_item.get("speaker") == guest_speaker
+		text_norm = _source_compare_text(text)
+		neighbor_text = " ".join(
+			str(neighbor.get("source_text") or "")
+			for neighbor in (prev_item, next_item)
+			if isinstance(neighbor, dict)
+		)
+		if prev_guest and next_guest and text_norm:
+			item["speaker"] = guest_speaker
+			item.setdefault("pre_translation_cleanup", {})["speaker_repair"] = "short_statement_between_guest_turns_to_guest"
+		elif text_norm and text_norm in _source_compare_text(neighbor_text):
+			item["speaker"] = guest_speaker
+			item.setdefault("pre_translation_cleanup", {})["speaker_repair"] = "duplicate_short_statement_near_guest_turn_to_guest"
+	for index, item in enumerate(repaired, start=1):
+		item["source_turn_index"] = index
+	return repaired
+
+
+def _split_post_cold_open_mixed_opening_turn(
+	raw_text: str,
+	*,
+	start_sec: float,
+	end_sec: float,
+	speaker: str,
+	run_dir: Path | None,
+) -> list[dict[str, Any]] | None:
+	if start_sec > 3.0:
+		return None
+	source_text = _clean_source_caption_text(raw_text)
+	fixed = _fix_source_text(source_text)
+	if not fixed:
+		return None
+	lower_prefix = fixed[:420].lower()
+	if "before we start" not in lower_prefix or "podcast" not in lower_prefix:
+		return None
+	if not any(token in lower_prefix for token in ("subscribe", "follow us", "spotify", "audio experience")):
+		return None
+	dialogue_match = _first_pattern_match(fixed, OPENING_CTA_DIALOGUE_PATTERNS)
+	if dialogue_match is None:
+		return None
+	dialogue_start = dialogue_match.start()
+	if dialogue_start <= 20:
+		return None
+	opening_prefix = fixed[:dialogue_start]
+	ad_reasons = _source_ad_noise_reasons(opening_prefix)
+	if not ad_reasons:
+		prefix_lower = opening_prefix.lower()
+		if any(token in prefix_lower for token in ("please subscribe", "follow us on spotify", "audio experience")):
+			ad_reasons = ["opening_channel_cta"]
+		else:
+			return None
+	host_speaker, guest_speaker = _infer_two_speaker_host_guest(run_dir)
+	host_speaker = host_speaker or speaker
+	guest_speaker = guest_speaker or speaker
+	dialogue_start_sec = _time_at_text_offset(start_sec, end_sec, fixed, dialogue_start)
+	turns = [
+		_source_turn_payload(
+			speaker=host_speaker,
+			start_sec=start_sec,
+			end_sec=dialogue_start_sec,
+			source_text="Before we start today's podcast, here is a brief opening note. Then we move into today's question.",
+			raw_char_count=len(raw_text),
+			cleaned_char_count=len(source_text),
+			pre_translation_cleanup={
+				"filler_reduction": True,
+				"dropped_as_ad": False,
+				"removed_opening_cta": True,
+				"source_opening_bridge_inserted": True,
+				"ad_reasons": ad_reasons,
+			},
+		)
+	]
+	remainder = fixed[dialogue_start:].strip()
+	answer_match = _first_pattern_match(remainder, OPENING_ANSWER_CUE_PATTERNS, start_offset=20)
+	if answer_match is not None and "?" in remainder[:answer_match.start()]:
+		answer_start = dialogue_start + answer_match.start()
+		answer_start_sec = _time_at_text_offset(start_sec, end_sec, fixed, answer_start)
+		question_text = _reduce_source_fillers(remainder[:answer_match.start()].strip())
+		answer_text = _reduce_source_fillers(remainder[answer_match.start():].strip())
+		if question_text:
+			turns.append(_source_turn_payload(
+				speaker=host_speaker,
+				start_sec=dialogue_start_sec,
+				end_sec=answer_start_sec,
+				source_text=question_text,
+				raw_char_count=0,
+				cleaned_char_count=0,
+				pre_translation_cleanup={
+					"filler_reduction": True,
+					"split_from_mixed_opening_segment": True,
+					"opening_dialogue_role": "host_question",
+				},
+			))
+		if answer_text:
+			turns.append(_source_turn_payload(
+				speaker=guest_speaker,
+				start_sec=answer_start_sec,
+				end_sec=end_sec,
+				source_text=answer_text,
+				raw_char_count=0,
+				cleaned_char_count=0,
+				pre_translation_cleanup={
+					"filler_reduction": True,
+					"split_from_mixed_opening_segment": True,
+					"opening_dialogue_role": "guest_answer",
+				},
+			))
+	else:
+		clean_remainder = _reduce_source_fillers(remainder)
+		if clean_remainder:
+			turns.append(_source_turn_payload(
+				speaker=host_speaker if "?" in clean_remainder[:180] else speaker,
+				start_sec=dialogue_start_sec,
+				end_sec=end_sec,
+				source_text=clean_remainder,
+				raw_char_count=0,
+				cleaned_char_count=0,
+				pre_translation_cleanup={
+					"filler_reduction": True,
+					"split_from_mixed_opening_segment": True,
+				},
+			))
+	return turns if len(turns) >= 2 else None
+
+
 def _fix_zh_text(text: str) -> str:
 	value = re.sub(r"(?<![A-Za-z])Xi\s+Jinping(?![A-Za-z])", "中国国家领导人", text, flags=re.IGNORECASE)
 	value = re.sub(r"\s+", "", value).strip()
@@ -482,16 +802,17 @@ def _sentence_split_zh(text: str, max_chars: int) -> list[str]:
 	return [chunk for chunk in chunks if chunk]
 
 
-def _parse_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+def _parse_source_turns(transcript: dict[str, Any], run_dir: Path | None = None) -> list[dict[str, Any]]:
 	payload = transcript.get("transcript") if isinstance(transcript.get("transcript"), dict) else {}
 	if payload.get("plain_text_no_timing"):
 		return _dedupe_adjacent_source_turns(_parse_plain_source_turns(
 			str(payload.get("text") or ""),
 			float(transcript.get("source_duration_sec") or 0.0),
 		))
-	segmented_turns = _parse_segmented_source_turns(transcript)
+	segmented_turns = _parse_segmented_source_turns(transcript, run_dir=run_dir)
 	if segmented_turns:
-		return _dedupe_adjacent_source_turns(segmented_turns)
+		repaired_turns = _repair_two_speaker_host_guest_turn_speakers(segmented_turns, run_dir)
+		return _dedupe_adjacent_source_turns(repaired_turns)
 
 	text = transcript["transcript"]["text"]
 	offsets = _segment_offsets(transcript)
@@ -620,7 +941,7 @@ def _parse_plain_source_turns(text: str, duration_sec: float) -> list[dict[str, 
 	return turns
 
 
-def _parse_segmented_source_turns(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+def _parse_segmented_source_turns(transcript: dict[str, Any], run_dir: Path | None = None) -> list[dict[str, Any]]:
 	payload = transcript.get("transcript") if isinstance(transcript.get("transcript"), dict) else transcript
 	raw_segments = payload.get("segments") if isinstance(payload, dict) else None
 	if not isinstance(raw_segments, list):
@@ -642,9 +963,6 @@ def _parse_segmented_source_turns(transcript: dict[str, Any]) -> list[dict[str, 
 			speaker = current_speaker
 		else:
 			current_speaker = speaker
-		fixed, source_text, dropped_as_ad, ad_reasons = _prepare_source_text_for_translation(raw_text)
-		if dropped_as_ad or len(fixed) < 3:
-			continue
 		start_value = item.get("start_sec", item.get("start", 0.0))
 		start_sec = float(start_value or 0.0)
 		if item.get("end_sec") is not None:
@@ -655,6 +973,19 @@ def _parse_segmented_source_turns(transcript: dict[str, Any]) -> list[dict[str, 
 			end_sec = start_sec + float(item.get("duration") or 0.0)
 		if end_sec <= start_sec:
 			end_sec = start_sec
+		mixed_opening_turns = _split_post_cold_open_mixed_opening_turn(
+			raw_text,
+			start_sec=start_sec,
+			end_sec=end_sec,
+			speaker=speaker,
+			run_dir=run_dir,
+		)
+		if mixed_opening_turns is not None:
+			turns.extend(mixed_opening_turns)
+			continue
+		fixed, source_text, dropped_as_ad, ad_reasons = _prepare_source_text_for_translation(raw_text)
+		if dropped_as_ad or len(fixed) < 3:
+			continue
 		pieces = _sentence_split_en(fixed, TRANSLATE_MAX_CHARS)
 		for piece_index, piece in enumerate(pieces):
 			piece_start = start_sec + (end_sec - start_sec) * piece_index / max(1, len(pieces))
@@ -766,6 +1097,8 @@ def _expand_translated_turns(source_turns: list[dict[str, Any]], translated: lis
 				"zh_text": piece,
 				"zh_char_count": len(re.sub(r"\s+", "", piece)),
 			})
+			if index == 0 and source_turn.get("pre_translation_cleanup"):
+				expanded[-1]["pre_translation_cleanup"] = source_turn["pre_translation_cleanup"]
 	return expanded
 
 
@@ -838,7 +1171,7 @@ def run_translation(run_dir: Path, sleep_sec: float) -> dict[str, Any]:
 	cache_path = output_dir / "translation_cache.json"
 	cache = _read_json(cache_path) if cache_path.exists() else {}
 	translator = _translator()
-	source_turns = _parse_source_turns(transcript)
+	source_turns = _parse_source_turns(transcript, run_dir=run_dir)
 	raw_source_chars = sum(_source_text_count(turn, "source_text_raw_char_count") for turn in source_turns)
 	cleaned_source_chars = sum(_source_text_count(turn, "source_text_cleaned_char_count") for turn in source_turns)
 	translated = []

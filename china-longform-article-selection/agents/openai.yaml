@@ -1,3 +1,3 @@
 interface:
-  display_name: "China Longform Article Selection"
-  short_description: "Help with China Longform Article Selection tasks"
+  display_name: "World Explainer Longform Selection"
+  short_description: "Select world-explainer longform articles with country anchors and social-science explanatory value"

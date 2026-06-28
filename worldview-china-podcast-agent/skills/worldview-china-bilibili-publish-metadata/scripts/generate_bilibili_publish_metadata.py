@@ -10,6 +10,8 @@ from typing import Any
 
 BASE_TAGS = ("外网热议", "海外视角", "中国观察", "国际观察")
 FALLBACK_TAGS = ("国际播客", "中文配音", "财经解读", "中美关系", "国际经济", "全球化")
+MIN_BILIBILI_TAGS = 6
+MAX_BILIBILI_TAGS = 10
 DESCRIPTION_PRODUCTION_NOTE_PATTERNS = (
 	r"中文配音版本",
 	r"保留原视频画面",
@@ -19,18 +21,26 @@ DESCRIPTION_PRODUCTION_NOTE_PATTERNS = (
 	r"本期是基于",
 )
 DESCRIPTION_TOPIC_PATTERNS = (
-	("中国台湾穆斯林社群", r"中国台湾[^。！？\n]{0,40}穆斯林|穆斯林[^。！？\n]{0,40}中国台湾"),
-	("印尼护理人员与清真生活", r"印尼|印度尼西亚|护理人员|清真"),
-	("回族穆斯林与中国伊斯兰历史", r"回族|兰州牛肉面|清真寺|中国伊斯兰|伊斯兰教在中国"),
-	("东亚低生育和家庭关系", r"低出生率|低生育|家庭关系|孝道|结婚|孩子"),
-	("日本、韩国和中国台湾的社会困境", r"日本|韩国|东亚文化圈|低出生率|低生育"),
-	("西方媒体叙事和中国观感", r"美国媒体|西方媒体|宣传|中国不是|中国人民"),
-	("穆斯林社群如何与中国打交道", r"穆斯林[^。！？\n]{0,60}中国|中国[^。！？\n]{0,60}穆斯林|中国超级大国"),
-	("华语伊斯兰教育资源", r"普通话|中文[^。！？\n]{0,20}伊斯兰|讲座|微信群|学习资源|寻求知识"),
-	("动漫、叙事和东亚文化", r"动漫|漫画|讲故事|东方写作|日本写作"),
-	("婚姻危机与社群项目", r"婚姻|婚介|配偶|家庭单位"),
-	("贸易、战略和国际秩序", r"贸易|战略|国际秩序|全球舞台"),
+	("印度经济", r"印度[^。！？\n]{0,50}(经济|GDP|增长|投资|制造业|私营|资本|企业|基础设施|数据红利)"),
+	("印度的全球影响力", r"印度[^。！？\n]{0,60}(全球|世界|外交|战略|国际关系|影响力|超级大国)"),
+	("中美关系", r"中美|美国[^。！？\n]{0,50}中国|中国[^。！？\n]{0,50}美国|美中"),
+	("中国竞争", r"中国竞争|中国[^。！？\n]{0,50}(竞争|一带一路|印太|制造业|供应链|贸易伙伴)"),
+	("制造业机会", r"制造业|供应链|工厂|产业|工业|出口"),
+	("战略自主", r"战略自主|外交政策|国际关系|地缘政治|全球秩序|多极"),
+	("数据红利", r"数据红利|数字公共基础设施|DPI|数字化|技术平台"),
+	("全球南方", r"全球南方|拉丁美洲|非洲|东盟|印尼|印度尼西亚|中亚"),
+	("贸易和国际秩序", r"贸易|关税|国际秩序|全球化|全球舞台"),
 )
+WEAK_DESCRIPTION_TAGS = {
+	"外网热议",
+	"海外视角",
+	"中国观察",
+	"国际观察",
+	"国际播客",
+	"中文配音",
+	"财经解读",
+	"地缘政治",
+}
 KEYWORD_PATTERNS = [
 	("中国经济", r"中国经济|经济|增长|消费|出口|房地产|内需|脆弱|疲软"),
 	("财经解读", r"经济|财经|贸易|出口|消费|房地产|制造业|供应链|企业|市场"),
@@ -151,7 +161,7 @@ def _chapter_lines(run_dir: Path) -> list[str]:
 
 def _strip_speaker_and_markup(text: str) -> str:
 	text = re.sub(r"(?s)^---.*?---", " ", text)
-	text = re.sub(r"^#+\s*", " ", text, flags=re.M)
+	text = re.sub(r"^#+\s*.*$", " ", text, flags=re.M)
 	text = re.sub(r"\bSpeaker\s+\d+\s*:\s*", " ", text)
 	text = re.sub(r"\[[^\]]{1,20}\]", " ", text)
 	text = re.sub(r"\([^)]{1,40}\)", " ", text)
@@ -174,7 +184,7 @@ def _title_core(title: str, cover_title: dict[str, Any], episode_manifest: dict[
 	return "本集核心话题"
 
 
-def _description_topic_terms(text: str) -> list[str]:
+def _description_topic_terms(text: str, tags: list[str]) -> list[str]:
 	matches: list[tuple[int, int, str]] = []
 	for label, pattern in DESCRIPTION_TOPIC_PATTERNS:
 		match = re.search(pattern, text, re.I)
@@ -185,13 +195,27 @@ def _description_topic_terms(text: str) -> list[str]:
 	for _, _, label in matches:
 		if label not in terms:
 			terms.append(label)
+	for tag in tags:
+		if tag in WEAK_DESCRIPTION_TAGS:
+			continue
+		if tag not in terms and re.search(re.escape(tag), text, re.I):
+			terms.append(tag)
 	return terms
 
 
 def _fallback_script_sentence(text: str) -> str:
 	for sentence in re.split(r"[。！？]\s*", text):
 		sentence = _clean_text(sentence)
-		if 18 <= len(sentence) <= 72 and not re.search(r"赞助|广告|访问|http|www|\.com|音乐", sentence, re.I):
+		sentence = re.sub(r"^就(.{2,40}?)而言[，,]", r"\1方面，", sentence)
+		if (
+			18 <= len(sentence) <= 72
+			and not re.search(r"赞助|广告|访问|http|www|\.com|音乐", sentence, re.I)
+			and not re.search(r"^(大家好|欢迎收听|我是|这里是|每周我们|这一次|刚才说了|为了让大家)|欢迎收听", sentence)
+			and not re.search(r"^(看[，,、 ]*|我认为|我的问题是|毫无疑问|但|不过|所以|而且|然后)", sentence)
+			and not re.search(r"[你您]|刚才|别误会|抱歉", sentence)
+			and not re.search(r"我(?!们)|[俺咱]", sentence)
+			and (sentence.startswith("今天我们") or "我们" not in sentence)
+		):
 			return sentence
 	return ""
 
@@ -229,11 +253,11 @@ def _build_tags(run_dir: Path, title: str, source_metadata: dict[str, Any], cove
 		_append_tag(tags, seen, report, item, "cover.highlight_texts")
 
 	for tag in FALLBACK_TAGS:
-		if len(tags) >= 10:
+		if len(tags) >= MAX_BILIBILI_TAGS:
 			break
 		_append_tag(tags, seen, report, tag, "fallback.compatible")
 
-	return tags[:10], report[:10]
+	return tags[:MAX_BILIBILI_TAGS], report[:MAX_BILIBILI_TAGS]
 
 
 def _build_description(run_dir: Path, title: str, source_metadata: dict[str, Any], cover_title: dict[str, Any], tags: list[str]) -> str:
@@ -241,18 +265,23 @@ def _build_description(run_dir: Path, title: str, source_metadata: dict[str, Any
 	core = _title_core(title, cover_title, episode_manifest)
 	script_text = _strip_speaker_and_markup(_read_text_optional(run_dir / "podcast_script.md", limit=16000))
 	context = _context_text(core, cover_title.get("title_text"), cover_title.get("video_title_text"), script_text)
-	terms = _description_topic_terms(context)
+	terms = _description_topic_terms(context, tags)
+	source_identity_label = _clean_text(cover_title.get("source_identity_label"))
+	if source_identity_label:
+		terms = [term for term in terms if term != source_identity_label]
 	if "中国台湾" in core and "看中国" not in core:
 		terms = [term for term in terms if term != "穆斯林社群如何与中国打交道"]
 	terms = terms[:3]
+	fallback = _fallback_script_sentence(script_text)
 	if terms:
 		topic_phrase = "、".join(terms[:-1]) + ("，以及" + terms[-1] if len(terms) > 1 else terms[0])
 		if "？" in core or "?" in core:
 			description = f"这一集从“{core}”这个问题切入，重点谈到{topic_phrase}。"
 		else:
 			description = f"这一集围绕“{core}”展开，重点谈到{topic_phrase}。"
+		if fallback and core not in fallback and len(description) + len(fallback) + 4 <= 118:
+			description = description.rstrip("。") + f"，并讨论{fallback}。"
 	else:
-		fallback = _fallback_script_sentence(script_text)
 		description = f"这一集围绕“{core}”展开，梳理{fallback or '人物经历、社群处境与背后的现实张力'}。"
 	description = _clean_text(description, max_len=120).rstrip("；;，,")
 	if not description.endswith(("。", "！", "？")):
@@ -302,12 +331,12 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 	episode_manifest = _read_json_optional(run_dir / "episode_manifest.json")
 	source_metadata = _source_metadata(run_dir)
 	tags, tag_sources = _build_tags(run_dir, title, source_metadata, cover_title)
-	if len(tags) < 8:
+	if len(tags) < MIN_BILIBILI_TAGS:
 		for tag in FALLBACK_TAGS:
-			if len(tags) >= 8:
+			if len(tags) >= MIN_BILIBILI_TAGS:
 				break
 			_append_tag(tags, {item["tag"] for item in tag_sources}, tag_sources, tag, "fallback.underfilled")
-		tags = [item["tag"] for item in tag_sources][:10]
+		tags = [item["tag"] for item in tag_sources][:MAX_BILIBILI_TAGS]
 
 	description = _build_description(run_dir, title, source_metadata, cover_title, tags)
 	publish_info_path = run_dir / "publish_info.txt"
@@ -357,7 +386,7 @@ def generate_metadata(run_dir: Path, output_path: Path, report_path: Path) -> tu
 		"scheduled_publish_timezone": metadata.get("scheduled_publish_timezone"),
 		"schedule_source": metadata.get("schedule_source"),
 		"strategy": "Worldview China 外网播客视频标签：外网/海外视角定位优先，中国主题和具体议题其次；不使用外刊文章专属标签。",
-		"warnings": [] if len(tags) >= 8 else ["bilibili tags underfilled"],
+		"warnings": [] if len(tags) >= MIN_BILIBILI_TAGS else ["bilibili tags underfilled"],
 	}
 	return metadata, report, publish_info_path
 

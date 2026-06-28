@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 
 SKILL_DIR = Path("/Users/wangfangjia/.codex/skills/worldview-china-podcast-agent")
@@ -23,7 +26,18 @@ def _load_module(name: str, path: Path) -> Any:
 
 
 vibevoice_chunks = _load_module("run_vibevoice_chunks_normalization_test", SKILL_DIR / "scripts/run_vibevoice_chunks.py")
+preflight = _load_module("run_vibevoice_preflight_audition_test", SKILL_DIR / "scripts/run_vibevoice_preflight_audition.py")
 display_numbers = _load_module("chinese_number_display_normalization_test", SKILL_DIR / "scripts/chinese_number_display.py")
+voice_policy = _load_module("apply_voice_distinctness_policy_test", SKILL_DIR / "scripts/apply_voice_distinctness_policy.py")
+
+
+def _write_json(path: Path, data: Any) -> None:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> Any:
+	return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_chinese_display_number_normalization_is_not_blanket_wan_conversion() -> None:
@@ -74,7 +88,194 @@ def test_default_chunk_shape_is_small_enough_for_production() -> None:
 	assert vibevoice_chunks.TARGET_CHARS == 320
 	assert vibevoice_chunks.MIN_SPLIT_CHARS == 180
 	assert vibevoice_chunks.HARD_MAX_CHARS == 420
+	assert vibevoice_chunks.DEFAULT_MAX_CHUNKS_PER_EPISODE == 40
+	assert vibevoice_chunks.CHUNKS_PER_TARGET_MINUTE == 1.0
 	assert vibevoice_chunks.DEFAULT_SPLIT_LONG_TURN_MAX_CHARS == 160
+
+
+def test_chunk_count_limit_tracks_episode_target_minutes(tmp_path: Path) -> None:
+	run_dir = tmp_path / "episode_001"
+	parent_dir = tmp_path / "parent"
+	run_dir.mkdir()
+	_write_json = vibevoice_chunks._write_json
+	_write_json(run_dir / "episode_manifest.json", {
+		"parent_run_dir": str(parent_dir),
+		"estimated_minutes": 32.0,
+	})
+	_write_json(parent_dir / "04b-series-episodes/series_manifest.json", {
+		"target_minutes_max": 25.0,
+	})
+
+	policy = vibevoice_chunks._chunk_limit_policy(run_dir)
+
+	assert policy["max_chunks_per_episode"] == 25
+	assert policy["chunk_limit_source"] == "parent_series_manifest.target_minutes_max"
+
+
+def test_chunk_count_limit_rejects_over_fragmented_plan() -> None:
+	chunks = [[{"char_count": 10}] for _ in range(41)]
+	policy = {
+		"max_chunks_per_episode": 40,
+		"chunk_limit_target_minutes": 40.0,
+		"chunk_limit_source": "test",
+	}
+
+	with pytest.raises(RuntimeError, match="exceeds max_chunks_per_episode=40"):
+		vibevoice_chunks._assert_chunk_count_within_limit(chunks, policy)
+
+
+def test_preflight_raw_level_gate_uses_pass_yellow_fail_bands() -> None:
+	assert preflight._classify_raw_level(
+		{"mean_volume_dbfs": -25.0, "max_volume_dbfs": -12.0},
+		-12.0,
+		-15.0,
+		-30.0,
+	)[0] == "PASS"
+	assert preflight._classify_raw_level(
+		{"mean_volume_dbfs": -25.0, "max_volume_dbfs": -12.1},
+		-12.0,
+		-15.0,
+		-30.0,
+	)[0] == "YELLOW"
+	assert preflight._classify_raw_level(
+		{"mean_volume_dbfs": -25.0, "max_volume_dbfs": -15.0},
+		-12.0,
+		-15.0,
+		-30.0,
+	)[0] == "YELLOW"
+	assert preflight._classify_raw_level(
+		{"mean_volume_dbfs": -25.0, "max_volume_dbfs": -15.1},
+		-12.0,
+		-15.0,
+		-30.0,
+	)[0] == "FAIL"
+	assert preflight._classify_raw_level(
+		{"mean_volume_dbfs": -30.1, "max_volume_dbfs": -11.0},
+		-12.0,
+		-15.0,
+		-30.0,
+	)[0] == "FAIL"
+
+
+def test_two_speaker_voice_distinctness_policy_keeps_cloned_pair_on_lightweight_warning(
+	monkeypatch: pytest.MonkeyPatch,
+	tmp_path: Path,
+) -> None:
+	run_dir = tmp_path / "run"
+	voice0 = run_dir / "voices/voice0.wav"
+	voice1 = run_dir / "voices/voice1.wav"
+	voice0.parent.mkdir(parents=True, exist_ok=True)
+	voice0.write_bytes(b"voice0")
+	voice1.write_bytes(b"voice1")
+	_write_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json", {
+		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
+		"status": "pass",
+		"speaker_voices": {
+			"Speaker 0": {
+				"vibevoice_name": "Clone0",
+				"reference_wav": str(voice0),
+			},
+			"Speaker 1": {
+				"vibevoice_name": "Clone1",
+				"reference_wav": str(voice1),
+			},
+		},
+	})
+	monkeypatch.setattr(
+		voice_policy,
+		"_voice_similarity_score",
+		lambda left, right: {
+			"metric": "test_metric",
+			"similarity_score": 0.95,
+			"speaker_a_rms": 0.1,
+			"speaker_b_rms": 0.1,
+		},
+	)
+	result = voice_policy.apply_voice_distinctness_policy(
+		run_dir,
+		voices_dir=tmp_path / "registered_voices",
+		threshold=0.90,
+	)
+	manifest = _read_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json")
+	assert result["status"] == "WARN_LIGHTWEIGHT_SIMILARITY_HIGH_CLONED_PAIR_KEPT"
+	assert "effective_speaker_voices_source" not in manifest
+	assert "original_cloned_speaker_voices" not in manifest
+	assert manifest["speaker_voices"]["Speaker 0"]["vibevoice_name"] == "Clone0"
+	assert manifest["speaker_voices"]["Speaker 1"]["vibevoice_name"] == "Clone1"
+	assert manifest["voice_distinctness_policy"]["fallback_action"] == "none_cloned_pair_kept"
+	assert manifest["voice_distinctness_policy"]["legacy_threshold_exceeded"] is True
+	assert "warning" in manifest["voice_distinctness_policy"]
+	loaded_voices, loaded_manifest_path = vibevoice_chunks._load_speaker_voices(run_dir, "qwen_chinese_required")
+	assert loaded_voices == {
+		"Speaker 0": "Clone0",
+		"Speaker 1": "Clone1",
+	}
+	assert loaded_manifest_path == str(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json")
+
+
+def test_two_speaker_voice_distinctness_policy_fails_identical_reference(
+	monkeypatch: pytest.MonkeyPatch,
+	tmp_path: Path,
+) -> None:
+	run_dir = tmp_path / "run"
+	voice0 = run_dir / "voices/voice0.wav"
+	voice1 = run_dir / "voices/voice1.wav"
+	voice0.parent.mkdir(parents=True, exist_ok=True)
+	voice0.write_bytes(b"same-registered-audio")
+	voice1.write_bytes(b"same-registered-audio")
+	_write_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json", {
+		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
+		"status": "pass",
+		"speaker_voices": {
+			"Speaker 0": {
+				"vibevoice_name": "Clone0",
+				"reference_wav": str(voice0),
+			},
+			"Speaker 1": {
+				"vibevoice_name": "Clone1",
+				"reference_wav": str(voice1),
+			},
+		},
+	})
+	monkeypatch.setattr(
+		voice_policy,
+		"_voice_similarity_score",
+		lambda left, right: {
+			"metric": "test_metric",
+			"similarity_score": 0.10,
+			"speaker_a_rms": 0.1,
+			"speaker_b_rms": 0.1,
+		},
+	)
+
+	result = voice_policy.apply_voice_distinctness_policy(
+		run_dir,
+		voices_dir=tmp_path / "registered_voices",
+		threshold=0.90,
+	)
+	manifest = _read_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json")
+
+	assert result["status"] == "FAIL_IDENTICAL_VOICE_REFERENCE_REQUIRES_REPAIR"
+	assert voice_policy._policy_status_is_complete(result["policy"]) is False
+	assert manifest["speaker_voices"]["Speaker 0"]["vibevoice_name"] == "Clone0"
+	assert manifest["speaker_voices"]["Speaker 1"]["vibevoice_name"] == "Clone1"
+	assert manifest["voice_distinctness_policy"]["reference_identity"]["registered_reference_same_sha256"] is True
+	with pytest.raises(RuntimeError, match="not pass/warning/fallback"):
+		vibevoice_chunks._load_speaker_voices(run_dir, "qwen_chinese_required")
+
+
+def test_two_speaker_qwen_manifest_must_have_voice_distinctness_policy(tmp_path: Path) -> None:
+	run_dir = tmp_path / "run"
+	_write_json(run_dir / "02c-qwen-vibevoice-prompts/voice_prompt_manifest.json", {
+		"schema_version": "worldview-china-qwen-vibevoice-prompts.v1",
+		"status": "pass",
+		"speaker_voices": {
+			"Speaker 0": {"vibevoice_name": "Voice0"},
+			"Speaker 1": {"vibevoice_name": "Voice1"},
+		},
+	})
+	with pytest.raises(RuntimeError, match="voice distinctness policy"):
+		vibevoice_chunks._load_speaker_voices(run_dir, "qwen_chinese_required")
 
 
 def test_long_turns_are_split_before_chunking() -> None:

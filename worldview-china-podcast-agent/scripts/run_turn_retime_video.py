@@ -27,6 +27,12 @@ DEFAULT_MAX_TURN_EXTENSION_RATIO = 0.30
 DEFAULT_MAX_TURN_BOUNDARY_DRIFT_SEC = 0.75
 DEFAULT_MIN_KEPT_SEGMENT_SEC = 1.2
 DEFAULT_MAX_CUTS_PER_MINUTE = 10.0
+DEFAULT_RENDERED_DURATION_TOLERANCE_SEC = 0.75
+DEFAULT_STATIC_CHECK_MAX_SAMPLES = 24
+DEFAULT_STATIC_CHECK_MIN_SEGMENT_SEC = 6.0
+DEFAULT_STATIC_CHECK_GAP_SEC = 5.0
+DEFAULT_STATIC_CHECK_RENDERED_MAD_THRESHOLD = 0.25
+DEFAULT_STATIC_CHECK_SOURCE_MAD_THRESHOLD = 2.0
 REUSABLE_SOURCE_AUDIO_EVENT_TYPES = {"music", "applause", "intro", "outro", "sound", "sfx", "laughter"}
 
 
@@ -141,6 +147,141 @@ def _path_for_concat(path: Path) -> str:
 
 def _ffmpeg_filter_path(path: Path) -> str:
 	return str(path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def _select_evenly_spaced(items: list[dict[str, Any]], max_count: int) -> list[dict[str, Any]]:
+	if max_count <= 0 or not items:
+		return []
+	if len(items) <= max_count:
+		return list(items)
+	if max_count == 1:
+		return [items[len(items) // 2]]
+	selected: list[dict[str, Any]] = []
+	seen: set[int] = set()
+	for index in range(max_count):
+		source_index = round(index * (len(items) - 1) / (max_count - 1))
+		if source_index in seen:
+			continue
+		seen.add(source_index)
+		selected.append(items[source_index])
+	return selected
+
+
+def _raw_upper_frame_bytes(path: Path, time_sec: float, width: int = 320, height: int = 180) -> bytes:
+	result = subprocess.run([
+		"ffmpeg",
+		"-hide_banner",
+		"-loglevel",
+		"error",
+		"-ss",
+		f"{max(0.0, time_sec):.3f}",
+		"-i",
+		str(path),
+		"-frames:v",
+		"1",
+		"-vf",
+		f"crop=iw:ih*0.70:0:0,scale={width}:{height}",
+		"-pix_fmt",
+		"rgb24",
+		"-f",
+		"rawvideo",
+		"-",
+	], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	return result.stdout
+
+
+def _mean_abs_frame_delta(left: bytes, right: bytes) -> float:
+	assert len(left) == len(right), "frame byte lengths differ"
+	if not left:
+		return 0.0
+	return sum(abs(a - b) for a, b in zip(left, right)) / len(left)
+
+
+def detect_static_video_range_mismatches(
+	plan: dict[str, Any],
+	rendered_video: Path,
+	max_samples: int = DEFAULT_STATIC_CHECK_MAX_SAMPLES,
+	min_segment_sec: float = DEFAULT_STATIC_CHECK_MIN_SEGMENT_SEC,
+	gap_sec: float = DEFAULT_STATIC_CHECK_GAP_SEC,
+	rendered_static_mad_threshold: float = DEFAULT_STATIC_CHECK_RENDERED_MAD_THRESHOLD,
+	source_motion_mad_threshold: float = DEFAULT_STATIC_CHECK_SOURCE_MAD_THRESHOLD,
+) -> dict[str, Any]:
+	source_video = Path(str(plan["source_video"]))
+	assert source_video.exists(), f"Missing source video: {source_video}"
+	assert rendered_video.exists(), f"Missing rendered video: {rendered_video}"
+	eligible = [
+		segment
+		for segment in plan.get("edit_segments") or []
+		if segment.get("source_mode") == "video_range" and float(segment.get("duration_sec") or 0.0) >= min_segment_sec
+	]
+	checks: list[dict[str, Any]] = []
+	failures: list[dict[str, Any]] = []
+	for segment in _select_evenly_spaced(eligible, max_samples):
+		duration = float(segment.get("duration_sec") or 0.0)
+		local_start = min(1.0, max(0.1, duration * 0.15))
+		local_gap = min(gap_sec, max(0.0, duration - local_start - 0.2))
+		if local_gap < 2.0:
+			continue
+		target_a = float(segment["target_start_sec"]) + local_start
+		target_b = target_a + local_gap
+		source_a = float(segment["source_start_sec"]) + local_start
+		source_b = source_a + local_gap
+		rendered_delta = _mean_abs_frame_delta(
+			_raw_upper_frame_bytes(rendered_video, target_a),
+			_raw_upper_frame_bytes(rendered_video, target_b),
+		)
+		source_delta = _mean_abs_frame_delta(
+			_raw_upper_frame_bytes(source_video, source_a),
+			_raw_upper_frame_bytes(source_video, source_b),
+		)
+		item = {
+			"segment_index": int(segment.get("segment_index") or 0),
+			"turn_index": segment.get("turn_index"),
+			"target_start_sec": round(target_a, 3),
+			"target_end_sec": round(target_b, 3),
+			"source_start_sec": round(source_a, 3),
+			"source_end_sec": round(source_b, 3),
+			"rendered_mad": round(rendered_delta, 6),
+			"source_mad": round(source_delta, 6),
+		}
+		checks.append(item)
+		if rendered_delta <= rendered_static_mad_threshold and source_delta >= source_motion_mad_threshold:
+			failures.append({
+				**item,
+				"reason": "rendered_video_range_static_while_mapped_source_moves",
+			})
+	return {
+		"schema_version": "worldview-china-static-video-range-check.v1",
+		"status": "PASS" if not failures else "FAIL",
+		"sample_count": len(checks),
+		"failure_count": len(failures),
+		"thresholds": {
+			"min_segment_sec": min_segment_sec,
+			"gap_sec": gap_sec,
+			"rendered_static_mad_threshold": rendered_static_mad_threshold,
+			"source_motion_mad_threshold": source_motion_mad_threshold,
+		},
+		"checks": checks,
+		"failures": failures,
+	}
+
+
+def _filter_complex_line_for_segment(segment: dict[str, Any], label: str) -> str:
+	source_mode = str(segment.get("source_mode") or "video_range")
+	start = float(segment["source_start_sec"])
+	end = float(segment["source_end_sec"])
+	duration = float(segment.get("duration_sec") or max(0.0, end - start))
+	if source_mode == "freeze_tail":
+		frame_end = max(start + 0.05, start + min(0.2, duration))
+		return (
+			f"[0:v]trim=start={start:.6f}:end={frame_end:.6f},setpts=PTS-STARTPTS,"
+			f"loop=loop=-1:size=1:start=0,trim=duration={duration:.6f},"
+			f"setpts=PTS-STARTPTS,fps=30,format=yuv420p[{label}]"
+		)
+	return (
+		f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,"
+		f"fps=30,format=yuv420p[{label}]"
+	)
 
 
 def _measure_frame_motion(frame_paths: list[Path]) -> list[dict[str, float]]:
@@ -402,6 +543,14 @@ def _load_source_turns(path: Path, source_time_offset_sec: float = 0.0) -> list[
 			"silence_ranges": item.get("silence_ranges") or [],
 			"filler_ranges": item.get("filler_ranges") or item.get("low_value_ranges") or [],
 		}
+		if item.get("audio_turn_ids"):
+			turn["audio_turn_ids"] = list(item.get("audio_turn_ids") or [])
+		elif item.get("target_audio_turn_ids"):
+			turn["audio_turn_ids"] = list(item.get("target_audio_turn_ids") or [])
+		if item.get("audio_turn_id"):
+			turn["audio_turn_id"] = str(item.get("audio_turn_id"))
+		elif item.get("target_audio_turn_id"):
+			turn["audio_turn_id"] = str(item.get("target_audio_turn_id"))
 		turn["non_dialogue"] = bool(item.get("non_dialogue")) or event_type is not None
 		turn["source_audio_event_type"] = event_type
 		turn["reuse_source_audio"] = reuse_source_audio
@@ -414,6 +563,7 @@ def _load_audio_turns(path: Path) -> dict[str, dict[str, Any]]:
 	raw = data.get("turns") if isinstance(data, dict) else data if isinstance(data, list) else []
 	by_id: dict[str, dict[str, Any]] = {}
 	by_index: dict[str, dict[str, Any]] = {}
+	ordered_turns: list[dict[str, Any]] = []
 	for index, item in enumerate(raw or [], start=1):
 		if not isinstance(item, dict):
 			continue
@@ -435,8 +585,19 @@ def _load_audio_turns(path: Path) -> dict[str, dict[str, Any]]:
 			"audio_end_sec": end,
 			"alignment_confidence": item.get("alignment_confidence") or item.get("match_confidence"),
 		}
-		by_id[turn_id] = audio_turn
-		by_index[str(turn_index)] = audio_turn
+		ordered_turns.append(audio_turn)
+	ordered_turns.sort(key=lambda item: (float(item["audio_start_sec"]), float(item["audio_end_sec"])))
+	for index, audio_turn in enumerate(ordered_turns):
+		if index + 1 < len(ordered_turns):
+			next_start = float(ordered_turns[index + 1]["audio_start_sec"])
+			visual_end = max(float(audio_turn["audio_start_sec"]) + 0.05, next_start)
+		else:
+			manifest_duration = float(data.get("duration_sec") or audio_turn["audio_end_sec"]) if isinstance(data, dict) else float(audio_turn["audio_end_sec"])
+			visual_end = max(float(audio_turn["audio_end_sec"]), manifest_duration)
+		audio_turn["visual_audio_end_sec"] = visual_end
+		audio_turn["following_silence_held_by_current_speaker_sec"] = round(visual_end - float(audio_turn["audio_end_sec"]), 3)
+		by_id[audio_turn["turn_id"]] = audio_turn
+		by_index[str(audio_turn["turn_index"])] = audio_turn
 	return {**{f"index:{key}": value for key, value in by_index.items()}, **by_id}
 
 
@@ -488,12 +649,73 @@ def _load_audio_turn_groups(path: Path) -> list[dict[str, Any]]:
 			group["visual_audio_end_sec"] = next_start
 			group["following_silence_held_by_current_speaker_sec"] = round(next_start - float(group["audio_end_sec"]), 3)
 		else:
-			group["visual_audio_end_sec"] = group["audio_end_sec"]
+			group["visual_audio_end_sec"] = max(float(group["audio_start_sec"]) + 0.05, next_start)
 			group["following_silence_held_by_current_speaker_sec"] = 0.0
 	if groups:
 		groups[-1]["visual_audio_end_sec"] = groups[-1]["audio_end_sec"]
 		groups[-1]["following_silence_held_by_current_speaker_sec"] = 0.0
 	return groups
+
+
+def _audio_turn_binding_keys(source_turn: dict[str, Any]) -> list[str]:
+	raw_keys = source_turn.get("audio_turn_ids") or source_turn.get("target_audio_turn_ids") or []
+	if isinstance(raw_keys, str):
+		keys = [raw_keys]
+	elif isinstance(raw_keys, list):
+		keys = [str(item) for item in raw_keys if item is not None]
+	else:
+		keys = []
+	single = source_turn.get("audio_turn_id") or source_turn.get("target_audio_turn_id")
+	if single is not None:
+		keys.append(str(single))
+	cleaned: list[str] = []
+	seen: set[str] = set()
+	for key in keys:
+		key = key.strip()
+		if not key or key in seen:
+			continue
+		seen.add(key)
+		cleaned.append(key)
+	return cleaned
+
+
+def _combine_bound_audio_turns(audio_turns: dict[str, dict[str, Any]], keys: list[str]) -> dict[str, Any] | None:
+	selected: list[dict[str, Any]] = []
+	for key in keys:
+		candidate = audio_turns.get(key)
+		if candidate is None and key.isdigit():
+			candidate = audio_turns.get(f"index:{key}")
+		if candidate is not None:
+			selected.append(candidate)
+	if not selected:
+		return None
+	selected.sort(key=lambda item: (float(item["audio_start_sec"]), float(item["audio_end_sec"])))
+	speakers = [str(item.get("speaker") or "").strip() for item in selected if str(item.get("speaker") or "").strip()]
+	speaker = speakers[0] if speakers and all(value == speakers[0] for value in speakers) else ""
+	return {
+		"turn_id": selected[0]["turn_id"] if len(selected) == 1 else f"bound_audio_{selected[0]['turn_id']}_{selected[-1]['turn_id']}",
+		"turn_index": selected[0]["turn_index"],
+		"speaker": speaker,
+		"audio_start_sec": min(float(item["audio_start_sec"]) for item in selected),
+		"audio_end_sec": max(float(item["audio_end_sec"]) for item in selected),
+		"visual_audio_end_sec": float(selected[-1].get("visual_audio_end_sec") or selected[-1]["audio_end_sec"]),
+		"alignment_confidence": selected[0].get("alignment_confidence"),
+		"turn_ids": [item["turn_id"] for item in selected],
+		"turn_indices": [item["turn_index"] for item in selected],
+		"following_silence_held_by_current_speaker_sec": round(float(selected[-1].get("following_silence_held_by_current_speaker_sec") or 0.0), 3),
+	}
+
+
+def _select_source_turn_map(run_dir: Path, explicit_path: Path | None) -> Path:
+	if explicit_path is not None:
+		return explicit_path.resolve()
+	candidates = [
+		run_dir / "04-source-dialogue-turn-map/source_dialogue_turn_map.active.json",
+	]
+	for path in candidates:
+		if path.exists():
+			return path.resolve()
+	return (run_dir / "04-source-dialogue-turn-map/source_dialogue_turn_map.active.json").resolve()
 
 
 def _coerce_range_list(raw: Any, parent_start: float, parent_end: float) -> list[tuple[float, float]]:
@@ -765,9 +987,78 @@ def _plan_turn(
 	}
 
 
-def _rebalance_turn_plans_to_target(turn_plans: list[dict[str, Any]], tolerance_sec: float = 0.75) -> list[dict[str, Any]]:
+def _rebalance_turn_plans_to_target(
+	turn_plans: list[dict[str, Any]],
+	tolerance_sec: float = 0.75,
+	min_kept_segment_sec: float = DEFAULT_MIN_KEPT_SEGMENT_SEC,
+) -> list[dict[str, Any]]:
 	target_duration = sum(float(turn["target_duration_sec"]) for turn in turn_plans)
 	current_duration = sum(float(turn.get("output_duration_sec", turn["kept_duration_sec"])) for turn in turn_plans)
+	surplus = current_duration - target_duration
+	if surplus > tolerance_sec:
+		trim_needed = surplus
+		overlong_turn_refs = [
+			(
+				float(turn.get("duration_delta_vs_target_sec") or 0.0),
+				index,
+			)
+			for index, turn in enumerate(turn_plans)
+			if float(turn.get("duration_delta_vs_target_sec") or 0.0) > 0.0 and not turn.get("extension_segments")
+		]
+		for turn_delta, turn_index in sorted(overlong_turn_refs, reverse=True):
+			if trim_needed <= 0.001:
+				break
+			turn = turn_plans[turn_index]
+			kept = [
+				(float(item["start_sec"]), float(item["end_sec"]))
+				for item in turn.get("kept_source_ranges") or []
+			]
+			if not kept:
+				continue
+			trim_budget = min(trim_needed, turn_delta)
+			new_kept = list(kept)
+			cuts = [
+				(float(item["start_sec"]), float(item["end_sec"]))
+				for item in turn.get("trimmed_source_ranges") or []
+			]
+			trimmed_here = 0.0
+			for kept_index in range(len(new_kept) - 1, -1, -1):
+				start, end = new_kept[kept_index]
+				available = max(0.0, (end - start) - min_kept_segment_sec)
+				if available <= 0:
+					continue
+				take = min(available, trim_budget - trimmed_here)
+				if take <= 0:
+					continue
+				cut = (end - take, end)
+				new_kept[kept_index] = (start, end - take)
+				cuts.append(cut)
+				trimmed_here += take
+				if trimmed_here >= trim_budget - 0.001:
+					break
+			if trimmed_here <= 0:
+				continue
+			new_kept = [(start, end) for start, end in new_kept if end - start > 0.001]
+			kept_duration = _range_duration(new_kept)
+			cut_ranges = _merge_ranges(cuts)
+			turn["kept_source_ranges"] = [_round_range(start, end) for start, end in new_kept]
+			turn["trimmed_source_ranges"] = [
+				{
+					**_round_range(start, end),
+					"reason": "global_surplus_tail_rebalance",
+					"score": 0.0,
+				}
+				for start, end in cut_ranges
+			]
+			turn["trimmed_duration_sec"] = round(_range_duration(cut_ranges), 3)
+			turn["kept_duration_sec"] = round(kept_duration, 3)
+			turn["output_duration_sec"] = round(kept_duration, 3)
+			turn["duration_delta_vs_target_sec"] = round(kept_duration - float(turn["target_duration_sec"]), 3)
+			if turn.get("confidence") == "high":
+				turn["confidence"] = "medium"
+			turn["global_rebalance_trimmed_sec"] = round(float(turn.get("global_rebalance_trimmed_sec") or 0.0) + trimmed_here, 3)
+			trim_needed -= trimmed_here
+		return turn_plans
 	restore_needed = target_duration - current_duration
 	if restore_needed <= tolerance_sec:
 		return turn_plans
@@ -854,13 +1145,17 @@ def build_retime_plan(
 	for source_turn in source_turns:
 		audio_turn = None
 		if not source_turn.get("non_dialogue"):
-			source_speaker = str(source_turn.get("speaker") or "").strip()
-			for group_index in range(audio_group_cursor, len(audio_groups)):
-				candidate = audio_groups[group_index]
-				if not source_speaker or not candidate.get("speaker") or candidate.get("speaker") == source_speaker:
-					audio_turn = candidate
-					audio_group_cursor = group_index + 1
-					break
+			binding_keys = _audio_turn_binding_keys(source_turn)
+			if binding_keys:
+				audio_turn = _combine_bound_audio_turns(audio_turns, binding_keys)
+			if audio_turn is None:
+				source_speaker = str(source_turn.get("speaker") or "").strip()
+				for group_index in range(audio_group_cursor, len(audio_groups)):
+					candidate = audio_groups[group_index]
+					if not source_speaker or not candidate.get("speaker") or candidate.get("speaker") == source_speaker:
+						audio_turn = candidate
+						audio_group_cursor = group_index + 1
+						break
 			if audio_turn is None:
 				audio_turn = audio_turns.get(str(source_turn["turn_id"])) or audio_turns.get(f"index:{source_turn['turn_index']}")
 		turn_plans.append(
@@ -877,7 +1172,7 @@ def build_retime_plan(
 				min_kept_segment_sec,
 			)
 		)
-	turn_plans = _rebalance_turn_plans_to_target(turn_plans)
+	turn_plans = _rebalance_turn_plans_to_target(turn_plans, min_kept_segment_sec=min_kept_segment_sec)
 	edit_segments = []
 	cursor = 0.0
 	for turn in turn_plans:
@@ -1063,54 +1358,50 @@ def render_retimed_video(plan_path: Path, output_video: Path, video_encoder: str
 	source_video = Path(str(plan["source_video"]))
 	assert source_video.exists(), f"Missing source video: {source_video}"
 	output_video.parent.mkdir(parents=True, exist_ok=True)
-	concat_path = output_video.with_suffix(".ffconcat")
-	freeze_dir = output_video.with_suffix(".freeze_segments")
-	if freeze_dir.exists():
-		shutil.rmtree(freeze_dir)
-	freeze_dir.mkdir(parents=True, exist_ok=True)
+	filter_script = output_video.with_suffix(".filter_complex.txt")
+	edit_segments = [
+		segment
+		for segment in plan.get("edit_segments") or []
+		if float(segment.get("duration_sec") or 0.0) > 0.0
+	]
+	assert edit_segments, "retime edit plan has no renderable edit segments"
+	filter_labels: list[str] = []
+	filter_lines: list[str] = []
 	freeze_segment_count = 0
-	with concat_path.open("w", encoding="utf-8") as handle:
-		handle.write("ffconcat version 1.0\n")
-		for segment in plan.get("edit_segments") or []:
-			source_mode = str(segment.get("source_mode") or "video_range")
-			start = float(segment["source_start_sec"])
-			end = float(segment["source_end_sec"])
-			duration = float(segment.get("duration_sec") or max(0.0, end - start))
-			if source_mode == "freeze_tail":
-				if duration <= 0:
-					continue
-				freeze_segment_count += 1
-				freeze_video = freeze_dir / f"freeze_{freeze_segment_count:04d}.mp4"
-				frame_expr = f"select='gte(t,{max(0.0, start):.3f})',setpts=PTS-STARTPTS"
-				_run([
-					"ffmpeg",
-					"-hide_banner",
-					"-loglevel",
-					"error",
-					"-y",
-					"-i",
-					str(source_video),
-					"-vf",
-					f"{frame_expr},trim=end_frame=1,loop=loop=-1:size=1:start=0,trim=duration={duration:.3f},fps=30,format=yuv420p",
-					"-an",
-					*(
-						["-c:v", "h264_videotoolbox", "-b:v", "12000k", "-pix_fmt", "yuv420p", "-tag:v", "avc1"]
-						if video_encoder == "h264_videotoolbox"
-						else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-tag:v", "avc1"]
-					),
-					"-t",
-					f"{duration:.3f}",
-					"-movflags",
-					"+faststart",
-					str(freeze_video),
-				])
-				handle.write(f"file '{_path_for_concat(freeze_video)}'\n")
-				continue
-			if end <= start:
-				continue
-			handle.write(f"file '{_path_for_concat(source_video)}'\n")
-			handle.write(f"inpoint {start:.3f}\n")
-			handle.write(f"outpoint {end:.3f}\n")
+	for index, segment in enumerate(edit_segments):
+		label = f"v{index}"
+		filter_labels.append(f"[{label}]")
+		if str(segment.get("source_mode") or "video_range") == "freeze_tail":
+			freeze_segment_count += 1
+		filter_lines.append(_filter_complex_line_for_segment(segment, label))
+	filter_lines.append(f"{''.join(filter_labels)}concat=n={len(filter_labels)}:v=1:a=0,format=yuv420p[vout]")
+	filter_script.write_text(";\n".join(filter_lines) + "\n", encoding="utf-8")
+	plan_target_duration = float((plan.get("summary") or {}).get("target_duration_sec") or 0.0)
+	if output_video.exists() and plan_target_duration:
+		existing_duration = _duration(output_video)
+		existing_delta = existing_duration - plan_target_duration
+		if abs(existing_delta) <= DEFAULT_RENDERED_DURATION_TOLERANCE_SEC:
+			static_check = detect_static_video_range_mismatches(plan, output_video)
+			if static_check["status"] != "PASS":
+				raise AssertionError(
+					"Existing retimed video contains static video_range spans while mapped source ranges move: "
+					f"{static_check['failure_count']} failures"
+				)
+			return {
+				"schema_version": "worldview-china-turn-retime-render.v1",
+				"retime_edit_plan": str(plan_path),
+				"filter_complex_script": str(filter_script),
+				"render_strategy": "existing_valid_retimed_video_reused",
+				"retimed_video": str(output_video),
+				"retimed_video_sha256": _sha256(output_video),
+				"duration_sec": round(existing_duration, 3),
+				"target_duration_sec": round(plan_target_duration, 3),
+				"duration_delta_vs_plan_sec": round(existing_delta, 3),
+				"duration_tolerance_sec": DEFAULT_RENDERED_DURATION_TOLERANCE_SEC,
+				"edit_segment_count": len(plan.get("edit_segments") or []),
+				"freeze_segment_count": freeze_segment_count,
+				"static_video_range_check": static_check,
+			}
 	tmp = output_video.with_suffix(output_video.suffix + ".tmp.mp4")
 	if tmp.exists():
 		tmp.unlink()
@@ -1124,15 +1415,17 @@ def render_retimed_video(plan_path: Path, output_video: Path, video_encoder: str
 		"-loglevel",
 		"error",
 		"-y",
-		"-f",
-		"concat",
-		"-safe",
-		"0",
 		"-i",
-		str(concat_path),
+		str(source_video),
+		"-filter_complex_script",
+		str(filter_script),
 		"-map",
-		"0:v:0",
+		"[vout]",
 		"-an",
+		"-r",
+		"30",
+		"-fps_mode",
+		"cfr",
 		*encoder_args,
 		"-movflags",
 		"+faststart",
@@ -1142,16 +1435,58 @@ def render_retimed_video(plan_path: Path, output_video: Path, video_encoder: str
 		output_video.unlink()
 	tmp.replace(output_video)
 	duration = _duration(output_video)
+	duration_delta = duration - plan_target_duration
+	if plan_target_duration and duration_delta > DEFAULT_RENDERED_DURATION_TOLERANCE_SEC:
+		trimmed = output_video.with_suffix(output_video.suffix + ".duration_trimmed.mp4")
+		if trimmed.exists():
+			trimmed.unlink()
+		_run([
+			"ffmpeg",
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-y",
+			"-i",
+			str(output_video),
+			"-t",
+			f"{plan_target_duration:.3f}",
+			"-map",
+			"0:v:0",
+			"-an",
+			"-c:v",
+			"copy",
+			"-movflags",
+			"+faststart",
+			str(trimmed),
+		])
+		trimmed.replace(output_video)
+		duration = _duration(output_video)
+		duration_delta = duration - plan_target_duration
+	if plan_target_duration and abs(duration_delta) > DEFAULT_RENDERED_DURATION_TOLERANCE_SEC:
+		raise AssertionError(
+			"Rendered retimed video duration does not match retime plan target: "
+			f"rendered={duration:.3f}s target={plan_target_duration:.3f}s delta={duration_delta:.3f}s"
+		)
+	static_check = detect_static_video_range_mismatches(plan, output_video)
+	if static_check["status"] != "PASS":
+		raise AssertionError(
+			"Rendered retimed video contains static video_range spans while mapped source ranges move: "
+			f"{static_check['failure_count']} failures"
+		)
 	return {
 		"schema_version": "worldview-china-turn-retime-render.v1",
 		"retime_edit_plan": str(plan_path),
-		"concat_file": str(concat_path),
+		"filter_complex_script": str(filter_script),
+		"render_strategy": "filter_complex_trim_setpts_concat",
 		"retimed_video": str(output_video),
 		"retimed_video_sha256": _sha256(output_video),
 		"duration_sec": round(duration, 3),
+		"target_duration_sec": round(plan_target_duration, 3),
+		"duration_delta_vs_plan_sec": round(duration_delta, 3),
+		"duration_tolerance_sec": DEFAULT_RENDERED_DURATION_TOLERANCE_SEC,
 		"edit_segment_count": len(plan.get("edit_segments") or []),
 		"freeze_segment_count": freeze_segment_count,
-		"freeze_segments_dir": str(freeze_dir),
+		"static_video_range_check": static_check,
 	}
 
 
@@ -1191,7 +1526,7 @@ def main() -> None:
 	output_dir = run_dir / "08-source-video-revoice"
 	work_dir = output_dir / "work"
 	source_video = (args.source_video or run_dir / "02-source-capture/youtube-media/source.mp4").resolve()
-	source_turn_map = (args.source_turn_map or run_dir / "02b-source-voice-prompts/source_speaker_timeline.normalized.json").resolve()
+	source_turn_map = _select_source_turn_map(run_dir, args.source_turn_map)
 	turn_audio_timeline = (args.turn_audio_timeline or run_dir / "audio/dialogue_timeline.json").resolve()
 	visual_activity = (args.visual_activity or output_dir / "visual_activity.json").resolve()
 	output_plan = (args.output_plan or output_dir / "retime_edit_plan.json").resolve()

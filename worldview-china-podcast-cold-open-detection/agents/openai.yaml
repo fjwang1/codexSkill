@@ -1,0 +1,4 @@
+interface:
+  display_name: "Podcast Cold Open Detection"
+  short_description: "Conservatively detect and cut podcast teaser intros"
+  default_prompt: "Use $worldview-china-podcast-cold-open-detection to detect whether a podcast source video begins with a teaser/cold open and only cut it when confidence is high."

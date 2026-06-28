@@ -23,6 +23,11 @@ FOUR_THREE_CROP_SAFE_X = 480
 FOUR_THREE_CROP_SAFE_WIDTH = 2880
 CENTER_TITLE_MAX_WIDTH = FOUR_THREE_CROP_SAFE_WIDTH
 TARGET_TITLE_LINE_COUNT = 3
+LEFT_TITLE_START_SIZES = {1: 430, 2: 380, 3: 330}
+CENTER_TITLE_TWO_LINE_LARGE_FONT_SIZE = 460
+CENTER_TITLE_THREE_LINE_LARGE_FONT_SIZE = 400
+CENTER_TITLE_START_SIZES = {1: 520, 2: CENTER_TITLE_TWO_LINE_LARGE_FONT_SIZE, 3: CENTER_TITLE_THREE_LINE_LARGE_FONT_SIZE}
+FONT_SIZE_FIT_STEP_PX = 2
 BREAK_AFTER_CHARS = set("，、：；")
 BREAK_BEFORE_CHARS = set("，、：；？！）】》")
 BAD_LINE_END_CHARS = set("的和与及或在把被对给向从")
@@ -115,26 +120,155 @@ def rebalance_title_lines(lines: list[str], highlight_texts: list[str], target_c
 		return lines
 	highlight_ranges = _highlight_ranges_for_title(title, highlight_texts)
 	n = len(title)
-	best_breaks: tuple[int, int] | None = None
+	best_breaks: tuple[int, ...] | None = None
 	best_score = float("inf")
 	target_len = n / target_count
-	for first in range(2, n - 1):
-		for second in range(first + 2, n):
-			chunks = [title[:first], title[first:second], title[second:]]
-			if any(not chunk.strip() for chunk in chunks):
-				continue
-			lengths = [len(chunk) for chunk in chunks]
-			score = sum((length - target_len) ** 2 for length in lengths)
-			score += sum(3.0 for length in lengths if length <= 3)
-			score += _line_break_penalty(title, first, highlight_ranges)
-			score += _line_break_penalty(title, second, highlight_ranges)
-			if score < best_score:
-				best_score = score
-				best_breaks = (first, second)
+	for breaks in _line_break_candidates(n, target_count):
+		chunks = _chunks_for_breaks(title, breaks)
+		if any(not chunk.strip() for chunk in chunks):
+			continue
+		lengths = [len(chunk) for chunk in chunks]
+		score = sum((length - target_len) ** 2 for length in lengths)
+		score += sum(3.0 for length in lengths if length <= 3)
+		score += sum(_line_break_penalty(title, break_pos, highlight_ranges) for break_pos in breaks)
+		if score < best_score:
+			best_score = score
+			best_breaks = tuple(breaks)
 	if best_breaks is None:
 		return lines
-	first, second = best_breaks
-	return [title[:first], title[first:second], title[second:]]
+	return _chunks_for_breaks(title, best_breaks)
+
+
+def _line_break_candidates(title_length: int, target_count: int):
+	if target_count <= 1:
+		yield ()
+		return
+	if target_count == 2:
+		for first in range(2, title_length - 1):
+			yield (first,)
+		return
+	if target_count == 3:
+		for first in range(2, title_length - 1):
+			for second in range(first + 2, title_length):
+				yield (first, second)
+		return
+	raise ValueError(f"Unsupported title line count: {target_count}")
+
+
+def _chunks_for_breaks(title: str, breaks: tuple[int, ...]) -> list[str]:
+	chunks: list[str] = []
+	start = 0
+	for break_pos in breaks:
+		chunks.append(title[start:break_pos])
+		start = break_pos
+	chunks.append(title[start:])
+	return chunks
+
+
+def _score_line_breaks(title: str, chunks: list[str], breaks: tuple[int, ...], highlight_ranges: list[tuple[int, int]], target_count: int) -> float:
+	target_len = len(title) / target_count
+	lengths = [len(chunk) for chunk in chunks]
+	score = sum((length - target_len) ** 2 for length in lengths)
+	score += sum(3.0 for length in lengths if length <= 3)
+	score += sum(_line_break_penalty(title, break_pos, highlight_ranges) for break_pos in breaks)
+	return score
+
+
+def _lines_fit_at_font_size(
+	draw: ImageDraw.ImageDraw,
+	lines: list[str],
+	highlight_texts: list[str],
+	font_path: Path,
+	font_size: int,
+	max_width: int,
+) -> bool:
+	parsed = split_by_highlight(lines, highlight_texts)
+	font = ImageFont.truetype(str(font_path), font_size)
+	stroke = max(22, int(font_size * 0.115))
+	gap = int(font_size * 0.03)
+	return all(line_size(draw, segments, font, stroke, gap)[0] <= max_width for segments in parsed)
+
+
+def _best_lines_for_count(
+	draw: ImageDraw.ImageDraw,
+	source_lines: list[str],
+	highlight_texts: list[str],
+	font_path: Path,
+	max_width: int,
+	target_count: int,
+	required_font_size: int | None = None,
+) -> list[str] | None:
+	title = "".join(source_lines)
+	if len(title) < target_count:
+		return source_lines if len(source_lines) == target_count else None
+	highlight_ranges = _highlight_ranges_for_title(title, highlight_texts)
+	best_lines: list[str] | None = None
+	best_score = float("inf")
+	for breaks in _line_break_candidates(len(title), target_count):
+		chunks = _chunks_for_breaks(title, tuple(breaks))
+		if len(chunks) != target_count or any(not chunk.strip() for chunk in chunks):
+			continue
+		if required_font_size is not None and not _lines_fit_at_font_size(
+			draw,
+			chunks,
+			highlight_texts,
+			font_path,
+			required_font_size,
+			max_width,
+		):
+			continue
+		score = _score_line_breaks(title, chunks, tuple(breaks), highlight_ranges, target_count)
+		if score < best_score:
+			best_score = score
+			best_lines = chunks
+	return best_lines
+
+
+def choose_center_title_lines(
+	draw: ImageDraw.ImageDraw,
+	source_lines: list[str],
+	highlight_texts: list[str],
+	font_path: Path,
+	max_width: int,
+) -> tuple[list[str], str]:
+	"""Prefer large two-line covers, then large three-line covers, then shrink only in three lines."""
+	title = "".join(source_lines)
+	if len(title) <= 1:
+		return source_lines, "center_source_lines_too_short_to_reflow"
+	two_line = _best_lines_for_count(
+		draw,
+		source_lines,
+		highlight_texts,
+		font_path,
+		max_width,
+		2,
+		required_font_size=CENTER_TITLE_TWO_LINE_LARGE_FONT_SIZE,
+	)
+	if two_line is not None:
+		return two_line, "center_large_two_line_fit"
+	three_line_large = _best_lines_for_count(
+		draw,
+		source_lines,
+		highlight_texts,
+		font_path,
+		max_width,
+		3,
+		required_font_size=CENTER_TITLE_THREE_LINE_LARGE_FONT_SIZE,
+	)
+	if three_line_large is not None:
+		return three_line_large, "center_large_three_line_after_large_two_line_failed"
+	three_line = _best_lines_for_count(
+		draw,
+		source_lines,
+		highlight_texts,
+		font_path,
+		max_width,
+		3,
+		required_font_size=None,
+	)
+	if three_line is not None:
+		return three_line, "center_three_line_shrink_after_large_two_and_large_three_failed"
+	return source_lines, "center_source_lines_fallback"
 
 
 def text_bbox(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, stroke: int) -> tuple[int, int]:
@@ -180,7 +314,7 @@ def fit_font(
 		width, _height = line_size(draw, segments, font, stroke, gap)
 		if width <= max_width:
 			return font
-		size -= 8
+		size -= FONT_SIZE_FIT_STEP_PX
 	return ImageFont.truetype(str(font_path), size)
 
 
@@ -198,7 +332,7 @@ def fit_common_font(
 		gap = int(size * 0.03)
 		if all(line_size(draw, segments, font, stroke, gap)[0] <= max_width for segments in all_segments):
 			return font
-		size -= 8
+		size -= FONT_SIZE_FIT_STEP_PX
 	return ImageFont.truetype(str(font_path), size)
 
 
@@ -283,18 +417,23 @@ def main() -> None:
 	if not args.font.exists():
 		raise SystemExit(f"Font not found: {args.font}")
 
-	source_lines, highlight_texts, preserve_title_lines = load_title_data(args)
-	lines = source_lines if preserve_title_lines else rebalance_title_lines(source_lines, highlight_texts)
-	if "".join(lines) != "".join(source_lines):
-		raise SystemExit("Internal title reflow error: visual line breaks changed title text.")
-	parsed = split_by_highlight(lines, highlight_texts)
-
 	background = cover_crop(Image.open(args.background).convert("RGB"), CANVAS)
 	im = background.convert("RGBA")
 	draw = ImageDraw.Draw(im)
 
 	max_width = CENTER_TITLE_MAX_WIDTH if args.layout == "center" else TITLE_MAX_WIDTH
-	start_size = {1: 430, 2: 380, 3: 330}[len(lines)]
+	source_lines, highlight_texts, preserve_title_lines = load_title_data(args)
+	if args.layout == "center":
+		lines, visual_line_policy = choose_center_title_lines(draw, source_lines, highlight_texts, args.font, max_width)
+	else:
+		lines = source_lines if preserve_title_lines else rebalance_title_lines(source_lines, highlight_texts)
+		visual_line_policy = "preserve_title_json_lines" if preserve_title_lines else "auto_reflow_to_three_lines_preserve_title_text"
+	if "".join(lines) != "".join(source_lines):
+		raise SystemExit("Internal title reflow error: visual line breaks changed title text.")
+	parsed = split_by_highlight(lines, highlight_texts)
+
+	start_sizes = CENTER_TITLE_START_SIZES if args.layout == "center" else LEFT_TITLE_START_SIZES
+	start_size = start_sizes[len(lines)]
 	common_font = fit_common_font(draw, parsed, args.font, start_size, max_width)
 	fonts = [common_font for _segments in parsed]
 	metrics: list[tuple[int, int, int, int]] = []
@@ -304,7 +443,7 @@ def main() -> None:
 		gap = int(size * 0.03)
 		w, h = line_size(draw, segments, font, stroke, gap)
 		metrics.append((w, h, stroke, gap))
-	line_gap = 74 if len(lines) == 2 else 58
+	line_gap = max(74 if len(lines) == 2 else 58, int(common_font.size * 0.18))
 	block_h = sum(h for _w, h, _stroke, _gap in metrics) + line_gap * (len(lines) - 1)
 	y = (CANVAS[1] - block_h) // 2 if args.layout == "center" else {1: 790, 2: 600, 3: 450}[len(lines)]
 
@@ -340,8 +479,16 @@ def main() -> None:
 				"applies_to_center_layout": args.layout == "center",
 			},
 			"font_size_px": common_font.size,
+			"font_start_size_px": start_size,
+			"font_size_fit_step_px": FONT_SIZE_FIT_STEP_PX,
 			"line_font_size_policy": "uniform_across_title_lines",
-			"visual_line_policy": "preserve_title_json_lines" if preserve_title_lines else "auto_reflow_to_three_lines_preserve_title_text",
+			"visual_line_policy": visual_line_policy,
+			"source_preserve_title_lines": preserve_title_lines,
+			"center_line_priority": [
+				"large_two_line",
+				"large_three_line",
+				"shrunk_three_line",
+			] if args.layout == "center" else None,
 			"subject_expected_position": "right" if args.layout == "left" else "background_source_frame",
 			"line_positions": line_positions,
 		},

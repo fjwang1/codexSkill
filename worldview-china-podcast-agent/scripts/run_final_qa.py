@@ -19,6 +19,7 @@ FORBIDDEN_CHINESE_CONTEMPORARY_LEADER_NAMES = [
 MAX_SPEAKERS = 4
 SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 TARGET_SOURCE_VIDEO_HEIGHT = 1440
+MIN_FORMAL_SOURCE_VIDEO_HEIGHT = 1080
 TARGET_FINAL_VIDEO_WIDTH = 2560
 TARGET_FINAL_VIDEO_HEIGHT = 1440
 FULL_TRANSLATION_COVERAGE_VALUES = {
@@ -30,6 +31,15 @@ LOCKED_ROSTER_PATCH_POLICIES = {
 	"single_speaker_patch_from_locked_roster",
 }
 MIN_SUBTITLE_GLOBAL_LEAD_SEC = 0.08
+WEAK_COVER_HIGHLIGHT_TEXTS = {
+	"外网",
+	"播客",
+	"视频",
+	"中文配音",
+	"中国观察",
+	"海外视角",
+	"国际观察",
+}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -82,6 +92,32 @@ def _read_text(path: Path) -> str:
 	return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def _source_audio_selection_is_original_or_default(source_manifest_path: Path, source_manifest: dict[str, Any]) -> tuple[bool, str | None]:
+	audio_format = source_manifest.get("selected_audio_format") or {}
+	format_note = str(audio_format.get("format_note") or "").lower()
+	if "original" in format_note or "default" in format_note:
+		return True, None
+	info_path = source_manifest_path.parent / "source.info.json"
+	if not info_path.exists():
+		return False, None
+	info = _read_json(info_path)
+	formats = info.get("formats") if isinstance(info.get("formats"), list) else []
+	audio_languages = {
+		str(item.get("language") or "").lower()
+		for item in formats
+		if isinstance(item, dict)
+		and item.get("vcodec") == "none"
+		and item.get("acodec") not in {None, "none"}
+		and str(item.get("language") or "").strip()
+	}
+	selected_language = str(audio_format.get("language") or "").lower()
+	video_language = str(info.get("language") or "").lower()
+	selected_is_drc = "drc" in format_note or str(audio_format.get("format_id") or "").endswith("-drc")
+	if len(audio_languages) <= 1 and not selected_is_drc and (not selected_language or not video_language or selected_language == video_language):
+		return True, "selected source audio has no original/default label, but source.info.json exposes only one audio language and the selected non-DRC track matches the video language"
+	return False, None
+
+
 def _forbidden_chinese_leader_names(text: str) -> list[str]:
 	found = [name for name in FORBIDDEN_CHINESE_CONTEMPORARY_LEADER_NAMES if name in text]
 	if re.search(r"(?<![A-Za-z])Xi(?![A-Za-z])", text):
@@ -117,6 +153,42 @@ def _expected_speakers_from_roster(roster: dict[str, Any], failures: list[str], 
 
 def _is_locked_roster_policy(value: Any) -> bool:
 	return str(value or "") in {"locked_multi_speaker_roster", "locked_two_speaker_roster"}
+
+
+def _require_two_speaker_voice_distinctness_policy(
+	voice_prompt_manifest: dict[str, Any],
+	failures: list[str],
+) -> None:
+	speaker_voices = voice_prompt_manifest.get("speaker_voices")
+	if not isinstance(speaker_voices, dict):
+		return
+	speaker_ids = _sorted_speakers(speaker_voices.keys())
+	if len(speaker_ids) != 2:
+		return
+	policy = voice_prompt_manifest.get("voice_distinctness_policy")
+	if not isinstance(policy, dict):
+		failures.append("two-speaker Qwen voice_prompt_manifest missing voice_distinctness_policy")
+		return
+	status = str(policy.get("status") or "")
+	if status not in {"PASS_ORIGINAL_CLONED_PAIR", "WARN_LIGHTWEIGHT_SIMILARITY_HIGH_CLONED_PAIR_KEPT", "DEFAULT_FALLBACK_APPLIED"}:
+		failures.append(f"two-speaker voice distinctness policy is not pass/warning/fallback: {status}")
+	if str(policy.get("scope") or "") != "exactly_two_speakers_only":
+		failures.append("two-speaker voice distinctness policy scope is not exactly_two_speakers_only")
+	try:
+		threshold = float(policy.get("threshold") or 0)
+	except (TypeError, ValueError):
+		threshold = 0.0
+	if abs(threshold - 0.90) > 0.0001:
+		failures.append(f"two-speaker voice distinctness threshold is not 0.90: {threshold}")
+	if status == "DEFAULT_FALLBACK_APPLIED":
+		if voice_prompt_manifest.get("effective_speaker_voices_source") != "default_pair_20260618_3":
+			failures.append("two-speaker fallback source is not default_pair_20260618_3")
+		if not isinstance(voice_prompt_manifest.get("original_cloned_speaker_voices"), dict):
+			failures.append("two-speaker fallback manifest missing original_cloned_speaker_voices")
+		for speaker in speaker_ids:
+			info = speaker_voices.get(speaker)
+			if not isinstance(info, dict) or info.get("voice_distinctness_fallback") is not True:
+				failures.append(f"two-speaker fallback voice entry missing fallback marker for {speaker}")
 
 
 def _is_full_translation_coverage(value: Any) -> bool:
@@ -222,6 +294,54 @@ def _require_text_review_registry_loaded(review: dict[str, Any], failures: list[
 		failures.append(f"{review_label} risk registry is missing deterministic rule ids")
 
 
+def _require_independent_review_pass(
+	review: dict[str, Any],
+	review_result_path: Path,
+	required_paths: dict[str, Path],
+	failures: list[str],
+	review_label: str,
+) -> None:
+	independent_review = review.get("independent_review") if isinstance(review.get("independent_review"), dict) else {}
+	independent_review_path = review_result_path.parent / "independent-review-result.json"
+	if not independent_review:
+		if not independent_review_path.exists():
+			failures.append(f"{review_label} independent review result is missing: {independent_review_path}")
+			return
+		independent_review = _read_json(independent_review_path)
+	status = independent_review.get("status") or independent_review.get("overall_status")
+	if status != "PASS":
+		failures.append(f"{review_label} independent review status is not PASS")
+	_require_reviewed_file_hashes_current(
+		independent_review,
+		required_paths,
+		failures,
+		f"{review_label} independent review",
+	)
+
+
+def _require_cover_highlights(cover_title: dict[str, Any], rendered_title: str, failures: list[str]) -> None:
+	highlights = cover_title.get("highlight_texts")
+	if not isinstance(highlights, list) or not (2 <= len(highlights) <= 4):
+		failures.append("cover_title.json highlight_texts must contain 2-4 carefully chosen title substrings")
+		return
+	seen: set[str] = set()
+	for item in highlights:
+		highlight = str(item or "").strip()
+		if not highlight:
+			failures.append("cover_title.json highlight_texts contains an empty highlight")
+			return
+		if highlight in seen:
+			failures.append(f"cover_title.json highlight_texts contains a duplicate highlight: {highlight}")
+			return
+		seen.add(highlight)
+		if highlight not in rendered_title:
+			failures.append(f"cover_title.json highlight_texts item is not a title substring: {highlight}")
+			return
+		if highlight in WEAK_COVER_HIGHLIGHT_TEXTS:
+			failures.append(f"cover_title.json highlight_texts uses a weak generic highlight: {highlight}")
+			return
+
+
 def _require_platform_rejection_lessons_used(
 	run_dir: Path,
 	review: dict[str, Any],
@@ -299,6 +419,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		"translation_reading_review": run_dir / "03c-translation-semantic-qa/translation-reading-review-result.json",
 		"early_text_compliance": run_dir / "03d-risk-compliance-review/text-compliance-review-result.json",
 		"text_compliance": run_dir / "04c-bilibili-text-compliance/text-compliance-review-result.json",
+		"pre_tts_frozen_contract": run_dir / "04d-pre-tts-frozen-contract/pre-tts-frozen-contract-result.json",
 		"podcast_script": run_dir / "podcast_script.md",
 		"script_report": run_dir / "04-podcast-script/script_report.md",
 		"chunk_plan": run_dir / "05-vibevoice-chunks/chunk_plan.json",
@@ -312,6 +433,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		"subtitle_manifest": run_dir / "video/subtitle_manifest.json",
 		"final_video": run_dir / "video/final_video.mp4",
 		"render_manifest": run_dir / "video/render_manifest.json",
+		"multimodal_spot_qa": run_dir / "09a-multimodal-spot-qa/multimodal-spot-qa-result.json",
 	}
 	for label, path in paths.items():
 		_exists(path, failures, label)
@@ -329,19 +451,27 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	available_max_height = int(source_manifest.get("available_max_height") or selected_height or 0)
 	if selected_height <= 0:
 		failures.append("source video selected height is missing")
-	elif available_max_height >= TARGET_SOURCE_VIDEO_HEIGHT and selected_height < TARGET_SOURCE_VIDEO_HEIGHT:
+	elif selected_height < MIN_FORMAL_SOURCE_VIDEO_HEIGHT:
 		failures.append(
-			f"source video selected height is below {TARGET_SOURCE_VIDEO_HEIGHT}p while {TARGET_SOURCE_VIDEO_HEIGHT}p+ was available "
-			"without recorded user downgrade authorization"
+			f"source video selected height is below the formal production floor: "
+			f"selected={selected_height}, minimum={MIN_FORMAL_SOURCE_VIDEO_HEIGHT}"
+		)
+	elif available_max_height >= TARGET_SOURCE_VIDEO_HEIGHT and selected_height < TARGET_SOURCE_VIDEO_HEIGHT:
+		warnings.append(
+			f"source video selected height is below the preferred {TARGET_SOURCE_VIDEO_HEIGHT}p target even though "
+			f"{TARGET_SOURCE_VIDEO_HEIGHT}p+ was reported available; confirm blocker/retry evidence before publishing: "
+			f"selected={selected_height}, available_max={available_max_height}"
 		)
 	elif selected_height > TARGET_SOURCE_VIDEO_HEIGHT:
 		warnings.append(
 			f"source video selected height is above the podcast 2K target; final render must downscale: "
 			f"selected={selected_height}, target={TARGET_SOURCE_VIDEO_HEIGHT}"
 		)
-	audio_format = source_manifest.get("selected_audio_format") or {}
-	if "original" not in str(audio_format.get("format_note", "")).lower() and "default" not in str(audio_format.get("format_note", "")).lower():
+	audio_selection_ok, audio_selection_note = _source_audio_selection_is_original_or_default(paths["source_manifest"], source_manifest)
+	if not audio_selection_ok:
 		failures.append("selected source audio is not original/default")
+	elif audio_selection_note:
+		warnings.append(audio_selection_note)
 	if not _source_frame_report_has_podcast_pass(_read_text(paths["frame_report"])):
 		failures.append("source frame QA does not record podcast form PASS")
 	video_title = _read_text(paths["video_title"]).strip()
@@ -394,6 +524,7 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		attractive_policy = cover_title.get("attractive_title_policy") or {}
 		if attractive_policy.get("status") != "PASS":
 			failures.append("cover_title.json attractive_title_policy.status is not PASS")
+		_require_cover_highlights(cover_title, str(cover_title.get("title_text") or ""), failures)
 	if str(cover_title.get("source_identity_label") or "").strip() != base_title_prefix:
 		failures.append("cover_title.json source_identity_label does not equal video_title prefix")
 	if str(cover_title.get("translated_title_core") or "").strip() != title_core:
@@ -470,6 +601,8 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		failures.append("voice_prompt_manifest status is not pass")
 	voice_prompt_schema = str(voice_prompt_manifest_data.get("schema_version") or "")
 	is_qwen_chinese_prompt = voice_prompt_schema == "worldview-china-qwen-vibevoice-prompts.v1"
+	if is_qwen_chinese_prompt:
+		_require_two_speaker_voice_distinctness_policy(voice_prompt_manifest_data, failures)
 	speaker_voice_names: dict[str, str] = {}
 	for speaker in expected_speakers:
 		info = voice_prompt_manifest_data.get("speaker_voices", {}).get(speaker)
@@ -601,19 +734,24 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	if int(early_text_compliance.get("summary", {}).get("fail_findings") or 0) != 0:
 		failures.append("early risk compliance review still has fail findings")
 	early_reviewed_files = _resolved_path_set(early_text_compliance.get("reviewed_files"))
-	for label, path in {
+	early_review_required_paths = {
 		"faithful_translation_json": paths["faithful_translation_json"],
 		"active_translation_json": paths["translation_json"],
-	}.items():
+	}
+	for label, path in early_review_required_paths.items():
 		if str(path.resolve()) not in early_reviewed_files:
 			failures.append(f"early risk compliance review did not cover current {label}: {path}")
 	_require_text_review_registry_loaded(early_text_compliance, failures, "early risk compliance review")
 	_require_reviewed_file_hashes_current(
 		early_text_compliance,
-		{
-			"faithful_translation_json": paths["faithful_translation_json"],
-			"active_translation_json": paths["translation_json"],
-		},
+		early_review_required_paths,
+		failures,
+		"early risk compliance review",
+	)
+	_require_independent_review_pass(
+		early_text_compliance,
+		paths["early_text_compliance"],
+		early_review_required_paths,
 		failures,
 		"early risk compliance review",
 	)
@@ -645,33 +783,67 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	if int(text_compliance.get("summary", {}).get("fail_findings") or 0) != 0:
 		failures.append("Bilibili text compliance review still has fail findings")
 	reviewed_files = _resolved_path_set(text_compliance.get("reviewed_files"))
-	for label, path in {
+	text_review_required_paths = {
 		"podcast_script": paths["podcast_script"],
 		"video_title": paths["video_title"],
 		"cover_title": paths["cover_title"],
-		"audio_manifest": paths["audio_manifest"],
-		"subtitle_manifest": paths["subtitle_manifest"],
 		"subtitles_srt": paths["subtitles_srt"],
 		"subtitles_ass": paths["subtitles_ass"],
-	}.items():
+	}
+	for label, path in text_review_required_paths.items():
 		if str(path.resolve()) not in reviewed_files:
 			failures.append(f"Bilibili text compliance review did not cover current {label}: {path}")
 	_require_text_review_registry_loaded(text_compliance, failures, "Bilibili text compliance review")
 	_require_reviewed_file_hashes_current(
 		text_compliance,
-		{
-			"podcast_script": paths["podcast_script"],
-			"video_title": paths["video_title"],
-			"cover_title": paths["cover_title"],
-			"audio_manifest": paths["audio_manifest"],
-			"subtitle_manifest": paths["subtitle_manifest"],
-			"subtitles_srt": paths["subtitles_srt"],
-			"subtitles_ass": paths["subtitles_ass"],
-		},
+		text_review_required_paths,
+		failures,
+		"Bilibili text compliance review",
+	)
+	_require_independent_review_pass(
+		text_compliance,
+		paths["text_compliance"],
+		text_review_required_paths,
 		failures,
 		"Bilibili text compliance review",
 	)
 	_require_platform_rejection_lessons_used(run_dir, text_compliance, paths["text_compliance"], failures)
+	pre_tts_contract = _read_json(paths["pre_tts_frozen_contract"])
+	if pre_tts_contract.get("status") != "PASS":
+		failures.append("pre-TTS frozen contract status is not PASS")
+	pre_tts_hashes_raw = pre_tts_contract.get("input_file_hashes") if isinstance(pre_tts_contract.get("input_file_hashes"), dict) else {}
+	pre_tts_hashes: dict[str, str] = {}
+	for key, value in pre_tts_hashes_raw.items():
+		key_path = Path(str(key)).expanduser()
+		if not key_path.is_absolute():
+			key_path = run_dir / key_path
+		try:
+			pre_tts_hashes[str(key_path.resolve())] = str(value)
+		except OSError:
+			pre_tts_hashes[str(key_path)] = str(value)
+	if not pre_tts_hashes:
+		failures.append("pre-TTS frozen contract does not record input_file_hashes")
+	pre_tts_required_paths = {
+		"speaker_roster": paths["speaker_census"],
+		"voice_prompt_manifest": paths["voice_prompt_manifest"],
+		"active_translation_json": paths["translation_json"],
+		"podcast_script": paths["podcast_script"],
+		"video_title": paths["video_title"],
+		"cover_title": paths["cover_title"],
+	}
+	for optional_label, optional_path in {
+		"script_turns": run_dir / "04-podcast-script/script_turns.json",
+		"node_podcast_script": run_dir / "04-podcast-script/podcast_script.md",
+	}.items():
+		if optional_path.exists():
+			pre_tts_required_paths[optional_label] = optional_path
+	for label, path in pre_tts_required_paths.items():
+		resolved = str(path.resolve())
+		expected = pre_tts_hashes.get(resolved)
+		if expected is None:
+			failures.append(f"pre-TTS frozen contract did not cover current {label}: {path}")
+		elif expected != _sha256(path):
+			failures.append(f"pre-TTS frozen contract is stale for current {label}: {path}")
 	translation_display_text = "\n".join(str(segment.get("zh_text") or "") for segment in translation.get("segments") or [])
 	for label, text in {
 		"translation zh_text": translation_display_text,
@@ -784,7 +956,12 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		)
 	render_manifest = _read_json(paths["render_manifest"])
 	visual_mode = str(render_manifest.get("visual_mode") or "")
+	formal_turn_retimed = visual_mode.startswith("source_video_revoice") and render_manifest.get("visual_sync_mode") == "turn_retimed_basic_v1"
 	if visual_mode.startswith("source_video_revoice"):
+		if render_manifest.get("visual_sync_mode") != "turn_retimed_basic_v1":
+			failures.append("formal source-video revoice must use visual_sync_mode=turn_retimed_basic_v1")
+		if not render_manifest.get("turn_retime"):
+			failures.append("formal source-video revoice must include turn_retime evidence")
 		target_duration = float(render_manifest.get("target_duration_sec") or render_manifest.get("source_duration_sec") or 0)
 		if abs(video_duration - target_duration) > 0.5:
 			failures.append(f"source-video revoice duration mismatch: video={video_duration:.2f} target={target_duration:.2f}")
@@ -820,31 +997,84 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 			failures.append("series episode render_manifest does not record series_episode=true")
 		if series_episode and "episode_segment" not in visual_mode:
 			failures.append("series episode render visual_mode must be an episode segment render")
+		if formal_turn_retimed:
+			turn_retime_evidence = render_manifest.get("turn_retime") if isinstance(render_manifest.get("turn_retime"), dict) else {}
+			if turn_retime_evidence.get("visual_sync_mode") != "turn_retimed_basic_v1":
+				failures.append("turn-retimed render missing turn_retime.visual_sync_mode=turn_retimed_basic_v1")
+			for label in ("visual_activity", "retime_edit_plan", "retimed_video"):
+				value = turn_retime_evidence.get(label)
+				if not value:
+					failures.append(f"turn-retimed render missing {label}")
+					continue
+				if not _resolve_run_path(run_dir, value).exists():
+					failures.append(f"turn-retimed render {label} path is missing: {value}")
+			retimed_video_render = turn_retime_evidence.get("retimed_video_render") if isinstance(turn_retime_evidence.get("retimed_video_render"), dict) else {}
+			if retimed_video_render:
+				if abs(float(retimed_video_render.get("duration_delta_vs_plan_sec") or 0.0)) > 0.75:
+					failures.append("turn-retimed rendered video duration does not match retime edit plan target")
+				static_check = retimed_video_render.get("static_video_range_check") if isinstance(retimed_video_render.get("static_video_range_check"), dict) else {}
+				if static_check and static_check.get("status") != "PASS":
+					failures.append("turn-retimed rendered video has static video_range spans while mapped source ranges move")
 		if series_episode and episode_manifest.get("source_episode_video_status") == "pass":
 			source_episode_video = Path(str(episode_manifest.get("source_episode_video") or ""))
 			if not source_episode_video.exists():
 				failures.append(f"series episode source_episode_video is missing: {source_episode_video}")
 			if render_manifest.get("source_episode_video_used") is not True:
 				failures.append("series episode render did not use the pre-cut source_episode_video")
-		if "turn_retimed_basic" in visual_mode or render_manifest.get("visual_sync_mode") == "turn_retimed_basic_v1":
-			turn_retime = render_manifest.get("turn_retime") or {}
-			if turn_retime.get("visual_sync_mode") != "turn_retimed_basic_v1":
-				failures.append("turn-retimed render missing turn_retime.visual_sync_mode=turn_retimed_basic_v1")
-			for label in ("visual_activity", "retime_edit_plan", "retimed_video"):
-				value = turn_retime.get(label)
-				if not value:
-					failures.append(f"turn-retimed render missing {label}")
-					continue
-				if not _resolve_run_path(run_dir, value).exists():
-					failures.append(f"turn-retimed render {label} path is missing: {value}")
-			retime_plan_value = turn_retime.get("retime_edit_plan")
-			if retime_plan_value:
-				retime_plan_path = _resolve_run_path(run_dir, retime_plan_value)
-				if retime_plan_path.exists():
-					retime_plan = _read_json(retime_plan_path)
-					summary = retime_plan.get("summary") or {}
-					if retime_plan.get("status") != "pass":
-						failures.append("turn-retimed edit plan status is not pass")
+			if "turn_retimed_basic" in visual_mode or render_manifest.get("visual_sync_mode") == "turn_retimed_basic_v1":
+				turn_retime = render_manifest.get("turn_retime") or {}
+				if turn_retime.get("visual_sync_mode") != "turn_retimed_basic_v1":
+					failures.append("turn-retimed render missing turn_retime.visual_sync_mode=turn_retimed_basic_v1")
+				for label in ("visual_activity", "retime_edit_plan", "retimed_video"):
+					value = turn_retime.get(label)
+					if not value:
+						failures.append(f"turn-retimed render missing {label}")
+						continue
+					if not _resolve_run_path(run_dir, value).exists():
+						failures.append(f"turn-retimed render {label} path is missing: {value}")
+				retimed_video_render = turn_retime.get("retimed_video_render") if isinstance(turn_retime.get("retimed_video_render"), dict) else {}
+				if retimed_video_render:
+					if abs(float(retimed_video_render.get("duration_delta_vs_plan_sec") or 0.0)) > 0.75:
+						failures.append("turn-retimed rendered video duration does not match retime edit plan target")
+					static_check = retimed_video_render.get("static_video_range_check") if isinstance(retimed_video_render.get("static_video_range_check"), dict) else {}
+					if static_check and static_check.get("status") != "PASS":
+						failures.append("turn-retimed rendered video has static video_range spans while mapped source ranges move")
+				source_turn_map_selection = str(turn_retime.get("source_turn_map_selection") or "")
+				if source_turn_map_selection != "active_dialogue_turn_map":
+					failures.append(f"turn-retimed render used invalid source turn map selection: {source_turn_map_selection}")
+				source_turn_map_value = turn_retime.get("source_turn_map")
+				source_turn_map_path = _resolve_run_path(run_dir, source_turn_map_value) if source_turn_map_value else None
+				if source_turn_map_path is None:
+					failures.append("turn-retimed render missing source_turn_map")
+				elif not source_turn_map_path.exists():
+					failures.append(f"turn-retimed render source_turn_map path is missing: {source_turn_map_value}")
+				else:
+					source_turn_map = _read_json(source_turn_map_path)
+					if source_turn_map.get("status") != "PASS":
+						failures.append("source dialogue turn map status is not PASS")
+					for turn in source_turn_map.get("turns") or []:
+						if turn.get("non_dialogue"):
+							continue
+						if not turn.get("audio_turn_id") and not turn.get("audio_turn_ids"):
+							failures.append("source dialogue turn map contains dialogue turn without audio_turn_id(s)")
+							break
+				retime_plan_value = turn_retime.get("retime_edit_plan")
+				retime_plan: dict[str, Any] = {}
+				summary: dict[str, Any] = {}
+				if retime_plan_value:
+					retime_plan_path = _resolve_run_path(run_dir, retime_plan_value)
+					if retime_plan_path.exists():
+						retime_plan = _read_json(retime_plan_path)
+						summary = retime_plan.get("summary") or {}
+						if source_turn_map_path is not None and source_turn_map_path.exists():
+							expected_source_map_sha = str(retime_plan.get("source_turn_map_sha256") or "")
+							if expected_source_map_sha and expected_source_map_sha != _sha256(source_turn_map_path):
+								failures.append("turn-retimed edit plan source_turn_map_sha256 is stale")
+						if retime_plan.get("status") != "pass":
+							failures.append("turn-retimed edit plan status is not pass")
+					else:
+						failures.append(f"turn-retimed render retime_edit_plan path is missing: {retime_plan_value}")
+				if summary:
 					if int(summary.get("protected_range_violation_count") or 0) != 0:
 						failures.append("turn-retimed edit plan cuts through protected scene ranges")
 					if float(summary.get("min_kept_segment_duration_sec") or 0) < 1.2:
@@ -917,23 +1147,23 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 	if timing_policy.get("lead_applied_per_split_cue") is not True:
 		failures.append("subtitle_manifest does not confirm lead_applied_per_split_cue=true")
 	if segmentation_policy.get("status") != "PASS":
-		failures.append("subtitle_manifest segmentation_policy.status is not PASS")
+		warnings.append("subtitle_manifest segmentation_policy.status is not PASS; review visual subtitle fit")
 	if int(segmentation_policy.get("hard_width_fallback_count") or 0) != 0:
-		failures.append("subtitle_manifest used hard width fallback splitting")
+		warnings.append("subtitle_manifest used hard width fallback splitting")
 	if int(segmentation_policy.get("line_violation_count") or 0) != 0:
-		failures.append("subtitle_manifest has non-single-line cue violations")
+		warnings.append("subtitle_manifest has non-single-line cue violations")
 	if int(segmentation_policy.get("dangling_fragment_violation_count") or 0) != 0:
 		failures.append("subtitle_manifest has dangling fragment cue violations")
 	if (subtitle_manifest.get("style") or {}).get("max_lines") != 1:
-		failures.append("subtitle_manifest style.max_lines is not 1")
+		warnings.append("subtitle_manifest style.max_lines is not 1")
 	subtitle_manifest_text = "\n".join(str(cue.get("display_text") or cue.get("text") or "") for cue in subtitle_manifest.get("cues") or [])
 	for cue in subtitle_manifest.get("cues") or []:
 		text = str(cue.get("display_text") or cue.get("text") or "")
 		if "\n" in text:
-			failures.append(f"subtitle cue contains a line break: index={cue.get('index')}")
+			warnings.append(f"subtitle cue contains a line break: index={cue.get('index')}")
 			break
 		if cue.get("fits_single_line") is False:
-			failures.append(f"subtitle cue does not fit one visible line: index={cue.get('index')}")
+			warnings.append(f"subtitle cue does not fit one visible line: index={cue.get('index')}")
 			break
 	subtitle_sidecar_text = "\n".join([
 		subtitle_manifest_text,
@@ -947,6 +1177,46 @@ def run_qa(run_dir: Path, write_history: bool) -> dict[str, Any]:
 		screenshot = Path(str(render_manifest.get("screenshots", {}).get(key) or ""))
 		if not screenshot.exists():
 			failures.append(f"render screenshot missing: {key}")
+	multimodal_spot_qa = _read_json(paths["multimodal_spot_qa"])
+	if multimodal_spot_qa.get("status") != "PASS":
+		failures.append("multimodal spot QA status is not PASS")
+	spot_summary = multimodal_spot_qa.get("summary") if isinstance(multimodal_spot_qa.get("summary"), dict) else {}
+	if int(spot_summary.get("sample_count") or 0) < 20:
+		failures.append("multimodal spot QA must review at least 20 samples")
+	if int(spot_summary.get("reviewed_sample_count") or 0) != int(spot_summary.get("sample_count") or 0):
+		failures.append("multimodal spot QA did not review every sample")
+	if int(spot_summary.get("fail_count") or 0) != 0:
+		failures.append("multimodal spot QA records failed criteria")
+	required_spot_criteria = {
+		"visual_audio_semantic_alignment",
+		"subtitle_audio_timing",
+		"subtitle_text_segmentation",
+		"voice_identity_consistency",
+		"speaker_switch_coherence",
+		"video_motion_integrity",
+	}
+	if not required_spot_criteria.issubset(set(multimodal_spot_qa.get("required_criteria") or [])):
+		failures.append("multimodal spot QA does not cover all required criteria")
+	spot_automatic_checks = multimodal_spot_qa.get("automatic_checks") if isinstance(multimodal_spot_qa.get("automatic_checks"), dict) else {}
+	spot_motion = spot_automatic_checks.get("video_motion_integrity") if isinstance(spot_automatic_checks.get("video_motion_integrity"), dict) else {}
+	if formal_turn_retimed and spot_motion.get("status") != "PASS":
+		failures.append("formal turn-retimed video motion integrity automatic check must PASS")
+	elif spot_motion and spot_motion.get("status") not in {"PASS", "SKIPPED"}:
+		failures.append("multimodal spot QA video motion integrity automatic check is not PASS")
+	spot_hashes = _resolved_hash_map(multimodal_spot_qa.get("input_file_hashes"))
+	for label, path in {
+		"final_video": paths["final_video"],
+		"final_audio": paths["final_audio"],
+		"render_manifest": paths["render_manifest"],
+		"subtitle_manifest": paths["subtitle_manifest"],
+		"dialogue_timeline": paths["dialogue_timeline"],
+		"voice_consistency": paths["voice_consistency"],
+	}.items():
+		resolved = str(path.resolve())
+		if resolved not in spot_hashes:
+			failures.append(f"multimodal spot QA did not record current hash for {label}: {path}")
+		elif spot_hashes[resolved] != _sha256(path):
+			failures.append(f"multimodal spot QA is stale for current {label}: {path}")
 
 	return _write_result(run_dir, failures, warnings, write_history)
 

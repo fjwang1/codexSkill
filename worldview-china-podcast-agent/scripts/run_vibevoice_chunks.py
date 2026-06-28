@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+import run_pre_tts_frozen_contract
 
 
 PREPARE_SCRIPT = Path("/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-vibevoice-audio/scripts/prepare_vibevoice_audio_inputs.py")
@@ -22,10 +25,12 @@ RUNTIME_PYTHON = Path("/Users/wangfangjia/.cache/codex-runtimes/codex-primary-ru
 TARGET_CHARS = 320
 MIN_SPLIT_CHARS = 180
 HARD_MAX_CHARS = 420
+DEFAULT_MAX_CHUNKS_PER_EPISODE = 40
+CHUNKS_PER_TARGET_MINUTE = 1.0
 DEFAULT_SPLIT_LONG_TURN_MAX_CHARS = 160
 MIN_SPEAKER_TURNS_PER_CHUNK = 0
 INTER_CHUNK_PAUSE_SEC = 0.5
-DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME = -10.0
+DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME = -15.0
 DROP_TINY_TTS_TURNS = {
 	"啊",
 	"呃",
@@ -57,6 +62,10 @@ DEFAULT_VIBEVOICE_TORCH_DTYPE = "auto"
 DEFAULT_VIBEVOICE_ATTN_IMPLEMENTATION = "auto"
 MAX_SPEAKERS = 4
 SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
+SPEAKER_TURN_ROSTER_GATE_RESULT = Path("03e-speaker-turn-roster-consistency/speaker-turn-roster-consistency-result.json")
+PRE_TTS_FROZEN_CONTRACT_RESULT = Path("04d-pre-tts-frozen-contract/pre-tts-frozen-contract-result.json")
+VIBEVOICE_PREFLIGHT_AUDITION_RESULT = Path("05-vibevoice-preflight-audition/preflight_audition_result.json")
+VIBEVOICE_PREFLIGHT_AUDITION_CHUNK_PLAN = Path("05-vibevoice-preflight-audition/chunk_plan.json")
 DEFAULT_SPEAKER_VOICES = {
 	"Speaker 0": "Xinran",
 	"Speaker 1": "BowenClean",
@@ -83,6 +92,10 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
 	path.parent.mkdir(parents=True, exist_ok=True)
 	path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _timestamp_id() -> str:
+	return time.strftime("%Y%m%dT%H%M%S") + f"_{time.time_ns() % 1_000_000_000:09d}"
 
 
 def _sha256(path: Path) -> str:
@@ -390,6 +403,42 @@ def _speaker_voices_from_manifest(manifest_path: Path) -> dict[str, str] | None:
 	return result
 
 
+def _validate_two_speaker_voice_distinctness_policy(manifest_path: Path) -> None:
+	manifest = _read_json(manifest_path)
+	speaker_voices = manifest.get("speaker_voices")
+	if not isinstance(speaker_voices, dict):
+		return
+	speaker_ids = _sorted_speakers(speaker_voices.keys())
+	if len(speaker_ids) != 2:
+		return
+	policy = manifest.get("voice_distinctness_policy")
+	if not isinstance(policy, dict):
+		raise RuntimeError(
+			"Two-speaker Qwen voice prompt manifests must pass 02c voice distinctness policy "
+			f"before preflight/full VibeVoice: {manifest_path}. Run "
+			"`python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/"
+			"apply_voice_distinctness_policy.py --run-dir <run_dir>`."
+		)
+	status = str(policy.get("status") or "")
+	allowed = {
+		"PASS_ORIGINAL_CLONED_PAIR",
+		"WARN_LIGHTWEIGHT_SIMILARITY_HIGH_CLONED_PAIR_KEPT",
+		"DEFAULT_FALLBACK_APPLIED",
+	}
+	if status not in allowed:
+		raise RuntimeError(f"Two-speaker voice distinctness policy is not pass/warning/fallback: {status} ({manifest_path})")
+	if str(policy.get("scope") or "") != "exactly_two_speakers_only":
+		raise RuntimeError(f"Two-speaker voice distinctness policy has wrong scope: {manifest_path}")
+	threshold = float(policy.get("threshold") or 0)
+	if abs(threshold - 0.90) > 0.0001:
+		raise RuntimeError(f"Two-speaker voice distinctness policy threshold must be 0.90, got {threshold}: {manifest_path}")
+	if status == "DEFAULT_FALLBACK_APPLIED":
+		if manifest.get("effective_speaker_voices_source") != "default_pair_20260618_3":
+			raise RuntimeError(f"Fallback voice source is not default_pair_20260618_3: {manifest_path}")
+		if not isinstance(manifest.get("original_cloned_speaker_voices"), dict):
+			raise RuntimeError(f"Fallback manifest must preserve original_cloned_speaker_voices: {manifest_path}")
+
+
 def _load_speaker_roster(run_dir: Path) -> dict[str, Any]:
 	path = run_dir / "02a-speaker-census" / "speaker_roster.json"
 	if not path.exists():
@@ -399,6 +448,167 @@ def _load_speaker_roster(run_dir: Path) -> dict[str, Any]:
 	except json.JSONDecodeError:
 		return {}
 	return roster if isinstance(roster, dict) else {}
+
+
+def _active_translation_path(run_dir: Path) -> Path | None:
+	for rel in (
+		"03b-mainland-publish-safety/source_transcript.zh.safe.json",
+		"03-source-translation/source_transcript.zh.json",
+	):
+		path = run_dir / rel
+		if path.exists():
+			return path
+	return None
+
+
+def _speaker_turn_roster_gate_applies(run_dir: Path) -> bool:
+	return (
+		(run_dir / "02a-speaker-census/speaker_roster.json").exists()
+		and _active_translation_path(run_dir) is not None
+		and (run_dir / "04-podcast-script/script_turns.json").exists()
+	)
+
+
+def _validate_speaker_turn_roster_consistency_gate(run_dir: Path) -> None:
+	if not _speaker_turn_roster_gate_applies(run_dir):
+		return
+	result_path = run_dir / SPEAKER_TURN_ROSTER_GATE_RESULT
+	if not result_path.exists():
+		raise RuntimeError(
+			"Missing required 03e speaker-turn roster consistency gate before 05 VibeVoice. "
+			"Run: python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/"
+			f"run_speaker_turn_roster_consistency_gate.py --run-dir {run_dir}"
+		)
+	result = _read_json(result_path)
+	status = str(result.get("status") or "")
+	if status != "PASS":
+		raise RuntimeError(f"03e speaker-turn roster consistency gate is {status}; see {result_path}")
+	hashes = result.get("input_file_hashes") if isinstance(result.get("input_file_hashes"), dict) else {}
+	required_paths = [
+		run_dir / "02a-speaker-census/speaker_roster.json",
+		_active_translation_path(run_dir),
+		run_dir / "04-podcast-script/script_turns.json",
+		run_dir / "04-podcast-script/podcast_script.md",
+		run_dir / "podcast_script.md",
+	]
+	for path in required_paths:
+		if path is None or not path.exists():
+			continue
+		rel = str(path.relative_to(run_dir))
+		expected = hashes.get(rel)
+		if expected is None:
+			raise RuntimeError(f"03e gate did not review required current input {rel}; rerun {result_path.parent.name}.")
+		current = _sha256(path)
+		if current != expected:
+			raise RuntimeError(
+				f"03e gate is stale for {rel}: expected sha256 {expected}, current {current}. "
+				"Rerun run_speaker_turn_roster_consistency_gate.py before 05."
+			)
+
+
+def _pre_tts_frozen_contract_gate_applies(run_dir: Path) -> bool:
+	return (
+		(run_dir / PRE_TTS_FROZEN_CONTRACT_RESULT).exists()
+		or (run_dir / "04c-bilibili-text-compliance/text-compliance-review-result.json").exists()
+	)
+
+
+def _validate_pre_tts_frozen_contract_gate(run_dir: Path, required: bool = False) -> None:
+	if not required and not _pre_tts_frozen_contract_gate_applies(run_dir):
+		return
+	run_pre_tts_frozen_contract.validate_contract_gate(run_dir)
+
+
+def _preflight_secondary_qa_passed(result: dict[str, Any]) -> bool:
+	if str(result.get("secondary_qa_status") or "").upper() == "PASS":
+		return True
+	secondary_qa = result.get("secondary_qa")
+	return isinstance(secondary_qa, dict) and str(secondary_qa.get("status") or "").upper() == "PASS"
+
+
+def _validate_vibevoice_preflight_audition_gate(
+	run_dir: Path,
+	voice_prompt_manifest: str | None,
+	voice_prompt_policy: str,
+	voice_context_policy: str,
+	split_long_turn_max_chars: int,
+	fixed_chunk_plan_json: Path | None,
+) -> None:
+	result_path = run_dir / VIBEVOICE_PREFLIGHT_AUDITION_RESULT
+	if not result_path.exists():
+		raise RuntimeError(
+			"Missing required 05-vibevoice-preflight-audition PASS before full 05 VibeVoice. "
+			"Run: python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/"
+			f"run_vibevoice_preflight_audition.py --run-dir {run_dir} --voice-prompt-policy {voice_prompt_policy} "
+			f"--voice-context-policy {voice_context_policy}"
+		)
+	result = _read_json(result_path)
+	status = str(result.get("status") or "").upper()
+	if status == "YELLOW" and _preflight_secondary_qa_passed(result):
+		pass
+	elif status != "PASS":
+		raise RuntimeError(
+			f"05-vibevoice-preflight-audition status is {status or 'MISSING'}; "
+			f"full 05 VibeVoice is blocked. See {result_path}"
+		)
+	rows = result.get("rows")
+	if not isinstance(rows, list) or not rows:
+		raise RuntimeError(f"05-vibevoice-preflight-audition has no reviewed rows: {result_path}")
+	for row in rows:
+		if not isinstance(row, dict):
+			raise RuntimeError(f"05-vibevoice-preflight-audition has malformed row: {result_path}")
+		row_status = str(row.get("raw_level_status") or "").upper()
+		if row_status == "FAIL":
+			raise RuntimeError(f"05-vibevoice-preflight-audition contains FAIL row; full 05 is blocked: {result_path}")
+		if status == "PASS" and row_status != "PASS":
+			raise RuntimeError(
+				f"05-vibevoice-preflight-audition status PASS contains non-PASS row {row_status}; rerun preflight: {result_path}"
+			)
+	script_path = run_dir / "podcast_script.md"
+	if not script_path.exists():
+		raise RuntimeError(f"Missing root podcast_script.md required by 05 preflight gate: {script_path}")
+	expected_script_sha = str(result.get("script_sha256") or "")
+	current_script_sha = _sha256(script_path)
+	if expected_script_sha != current_script_sha:
+		raise RuntimeError(
+			f"05-vibevoice-preflight-audition is stale for podcast_script.md: expected sha256 "
+			f"{expected_script_sha or 'MISSING'}, current {current_script_sha}. Rerun preflight before full 05."
+		)
+	if voice_prompt_manifest is not None:
+		manifest_path = Path(voice_prompt_manifest)
+		expected_manifest_sha = str(result.get("voice_prompt_manifest_sha256") or "")
+		current_manifest_sha = _sha256(manifest_path)
+		if expected_manifest_sha != current_manifest_sha:
+			raise RuntimeError(
+				f"05-vibevoice-preflight-audition is stale for voice_prompt_manifest.json: expected sha256 "
+				f"{expected_manifest_sha or 'MISSING'}, current {current_manifest_sha}. Rerun preflight before full 05."
+			)
+	if str(result.get("voice_prompt_policy") or "") != voice_prompt_policy:
+		raise RuntimeError(
+			f"05-vibevoice-preflight-audition used voice_prompt_policy={result.get('voice_prompt_policy')!r}, "
+			f"current full 05 uses {voice_prompt_policy!r}; rerun preflight."
+		)
+	if str(result.get("voice_context_policy") or "") != voice_context_policy:
+		raise RuntimeError(
+			f"05-vibevoice-preflight-audition used voice_context_policy={result.get('voice_context_policy')!r}, "
+			f"current full 05 uses {voice_context_policy!r}; rerun preflight."
+		)
+	chunk_plan_path = run_dir / VIBEVOICE_PREFLIGHT_AUDITION_CHUNK_PLAN
+	if chunk_plan_path.exists():
+		chunk_plan = _read_json(chunk_plan_path)
+		if int(chunk_plan.get("split_long_turn_max_chars") or 0) != split_long_turn_max_chars:
+			raise RuntimeError(
+				"05-vibevoice-preflight-audition chunking policy is stale: "
+				f"preflight split_long_turn_max_chars={chunk_plan.get('split_long_turn_max_chars')}, "
+				f"current={split_long_turn_max_chars}. Rerun preflight before full 05."
+			)
+		expected_fixed_plan = str(fixed_chunk_plan_json) if fixed_chunk_plan_json is not None else None
+		if chunk_plan.get("fixed_chunk_plan_json") != expected_fixed_plan:
+			raise RuntimeError(
+				"05-vibevoice-preflight-audition fixed chunk plan is stale: "
+				f"preflight={chunk_plan.get('fixed_chunk_plan_json')!r}, current={expected_fixed_plan!r}. "
+				"Rerun preflight before full 05."
+			)
 
 
 def _speaker_display_label(speaker: str, roster_info: dict[str, Any]) -> str:
@@ -449,6 +659,7 @@ def _load_speaker_voices(run_dir: Path, voice_prompt_policy: str) -> tuple[dict[
 	qwen_manifest_path = run_dir / "02c-qwen-vibevoice-prompts" / "voice_prompt_manifest.json"
 	qwen_voices = _speaker_voices_from_manifest(qwen_manifest_path)
 	if qwen_voices is not None:
+		_validate_two_speaker_voice_distinctness_policy(qwen_manifest_path)
 		return qwen_voices, str(qwen_manifest_path)
 	source_manifest_path = run_dir / "02b-source-voice-prompts" / "voice_prompt_manifest.json"
 	if voice_prompt_policy == "source_chinese_direct":
@@ -583,6 +794,54 @@ def _chunk_turns_from_fixed_plan(turns: list[dict[str, Any]], plan_path: Path) -
 	return chunks
 
 
+def _chunk_limit_policy(run_dir: Path) -> dict[str, Any]:
+	target_minutes = float(DEFAULT_MAX_CHUNKS_PER_EPISODE)
+	source = "default_target_minutes_max"
+	episode_manifest_path = run_dir / "episode_manifest.json"
+	if episode_manifest_path.exists():
+		episode_manifest = _read_json(episode_manifest_path)
+		parent_run_dir = Path(str(episode_manifest.get("parent_run_dir") or "")).expanduser()
+		series_manifest_path = parent_run_dir / "04b-series-episodes/series_manifest.json"
+		if series_manifest_path.exists():
+			series_manifest = _read_json(series_manifest_path)
+			target_minutes = float(series_manifest.get("target_minutes_max") or target_minutes)
+			source = "parent_series_manifest.target_minutes_max"
+		elif episode_manifest.get("target_minutes_max") is not None:
+			target_minutes = float(episode_manifest["target_minutes_max"])
+			source = "episode_manifest.target_minutes_max"
+		elif episode_manifest.get("estimated_minutes") is not None:
+			target_minutes = float(episode_manifest["estimated_minutes"])
+			source = "episode_manifest.estimated_minutes"
+	else:
+		run_manifest_path = run_dir / "run_manifest.json"
+		if run_manifest_path.exists():
+			run_manifest = _read_json(run_manifest_path)
+			split_config = run_manifest.get("episode_series_split") or {}
+			if split_config.get("target_minutes_max") is not None:
+				target_minutes = float(split_config["target_minutes_max"])
+				source = "run_manifest.episode_series_split.target_minutes_max"
+	max_chunks = max(1, int(math.ceil(target_minutes * CHUNKS_PER_TARGET_MINUTE)))
+	return {
+		"max_chunks_per_episode": max_chunks,
+		"chunk_limit_source": source,
+		"chunk_limit_target_minutes": target_minutes,
+		"chunks_per_target_minute": CHUNKS_PER_TARGET_MINUTE,
+	}
+
+
+def _assert_chunk_count_within_limit(chunks: list[list[dict[str, Any]]], policy: dict[str, Any]) -> None:
+	max_chunks = int(policy["max_chunks_per_episode"])
+	if len(chunks) <= max_chunks:
+		return
+	total_chars = sum(_chunk_chars(chunk) for chunk in chunks)
+	raise RuntimeError(
+		f"chunk_count={len(chunks)} exceeds max_chunks_per_episode={max_chunks}. "
+		f"target_minutes={policy['chunk_limit_target_minutes']} source={policy['chunk_limit_source']} "
+		f"total_chars={total_chars}. Rebuild the episode plan with fewer, more emotionally continuous "
+		f"chunks within hard_max_chars={HARD_MAX_CHARS}, or split this episode before VibeVoice."
+	)
+
+
 def _chunk_chars(turns: list[dict[str, Any]]) -> int:
 	return sum(int(turn["char_count"]) for turn in turns)
 
@@ -664,6 +923,9 @@ def _chunk_generation_state(final_wav: Path, raw_wav: Path, force: bool, force_c
 def _run_logged(cmd: list[str], cwd: Path, stdout_path: Path, stderr_path: Path, heartbeat_path: Path, label: str) -> int:
 	stdout_path.parent.mkdir(parents=True, exist_ok=True)
 	heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+	started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+	with heartbeat_path.open("a", encoding="utf-8") as heartbeat:
+		heartbeat.write(f"- {started_at} {label} started\n")
 	with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
 		process = subprocess.Popen(cmd, cwd=str(cwd), stdout=stdout, stderr=stderr, text=True)
 		start = time.time()
@@ -675,7 +937,14 @@ def _run_logged(cmd: list[str], cwd: Path, stdout_path: Path, stderr_path: Path,
 					heartbeat.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {label} running elapsed_sec={elapsed:.0f}\n")
 				last_heartbeat = elapsed
 			time.sleep(5)
-		return int(process.returncode or 0)
+		elapsed = time.time() - start
+		returncode = int(process.returncode or 0)
+	with heartbeat_path.open("a", encoding="utf-8") as heartbeat:
+		heartbeat.write(
+			f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {label} finished "
+			f"elapsed_sec={elapsed:.0f} returncode={returncode}\n"
+		)
+	return returncode
 
 
 def _run_quick(cmd: list[str], stdout_path: Path, stderr_path: Path) -> int:
@@ -715,6 +984,205 @@ def _copy_tree_file(src: Path, dst: Path) -> None:
 	shutil.copy2(src, dst)
 
 
+def _resident_report_history_dir(node_dir: Path) -> Path:
+	return node_dir / "resident_batch_runs"
+
+
+def _resident_report_index_path(node_dir: Path) -> Path:
+	return _resident_report_history_dir(node_dir) / "index.json"
+
+
+def _relative_to_run_dir(node_dir: Path, path: Path) -> str:
+	try:
+		return str(path.resolve().relative_to(node_dir.parent.resolve()))
+	except ValueError:
+		return str(path.resolve())
+
+
+def _append_resident_report_index(node_dir: Path, entry: dict[str, Any]) -> None:
+	index_path = _resident_report_index_path(node_dir)
+	if index_path.exists():
+		index = _read_json(index_path)
+	else:
+		index = {
+			"schema_version": "worldview-china-vibevoice-resident-report-index.v1",
+			"reports": [],
+		}
+	reports = index.setdefault("reports", [])
+	assert isinstance(reports, list)
+	reports.append(entry)
+	_write_json(index_path, index)
+
+
+def _copy_resident_report_snapshot(
+	node_dir: Path,
+	report_path: Path,
+	role: str,
+	run_kind: str,
+	job_ids: list[str],
+) -> dict[str, Any] | None:
+	if not report_path.exists():
+		return None
+	try:
+		report_payload = _read_json(report_path)
+		report_job_ids = [str(job.get("job_id") or "") for job in report_payload.get("jobs") or [] if isinstance(job, dict)]
+		report_job_ids = [job_id for job_id in report_job_ids if job_id]
+	except json.JSONDecodeError:
+		report_job_ids = []
+	effective_job_ids = report_job_ids or job_ids
+	history_dir = _resident_report_history_dir(node_dir)
+	history_dir.mkdir(parents=True, exist_ok=True)
+	report_sha = _sha256(report_path)
+	snapshot = history_dir / f"{_timestamp_id()}_{role}_{run_kind}_{report_sha[:12]}.json"
+	shutil.copy2(report_path, snapshot)
+	entry = {
+		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+		"role": role,
+		"run_kind": run_kind,
+		"path": _relative_to_run_dir(node_dir, snapshot),
+		"source_report": _relative_to_run_dir(node_dir, report_path),
+		"sha256": report_sha,
+		"job_ids": effective_job_ids,
+		"job_count": len(effective_job_ids),
+	}
+	_append_resident_report_index(node_dir, entry)
+	return entry
+
+
+def _archive_existing_resident_report(
+	node_dir: Path,
+	report_path: Path,
+	run_kind: str,
+	job_ids: list[str],
+) -> dict[str, Any] | None:
+	return _copy_resident_report_snapshot(
+		node_dir,
+		report_path,
+		"archived_before_overwrite",
+		run_kind,
+		job_ids,
+	)
+
+
+def _register_current_resident_report(
+	node_dir: Path,
+	report_path: Path,
+	run_kind: str,
+	job_ids: list[str],
+) -> dict[str, Any] | None:
+	return _copy_resident_report_snapshot(
+		node_dir,
+		report_path,
+		"completed_batch_snapshot",
+		run_kind,
+		job_ids,
+	)
+
+
+def _resident_report_paths(node_dir: Path) -> list[Path]:
+	paths: list[Path] = []
+	index_path = _resident_report_index_path(node_dir)
+	if index_path.exists():
+		try:
+			index = _read_json(index_path)
+		except json.JSONDecodeError:
+			index = {}
+		for entry in index.get("reports") or []:
+			if not isinstance(entry, dict):
+				continue
+			value = entry.get("path")
+			if not value:
+				continue
+			path = Path(str(value))
+			if not path.is_absolute():
+				path = node_dir.parent / path
+			if path.exists():
+				paths.append(path.resolve())
+	history_dir = _resident_report_history_dir(node_dir)
+	if history_dir.exists():
+		paths.extend(path.resolve() for path in history_dir.glob("*.json") if path.name != "index.json")
+	canonical = node_dir / "resident_batch_report.json"
+	if canonical.exists():
+		paths.append(canonical.resolve())
+	unique: dict[str, Path] = {str(path): path for path in paths}
+	return sorted(unique.values(), key=lambda path: path.stat().st_mtime)
+
+
+def _write_effective_resident_batch_report(node_dir: Path, final_chunk_ids: list[str]) -> str:
+	jobs_by_id: dict[str, dict[str, Any]] = {}
+	source_reports: list[str] = []
+	for report_path in _resident_report_paths(node_dir):
+		try:
+			report = _read_json(report_path)
+		except json.JSONDecodeError:
+			continue
+		report_rel = _relative_to_run_dir(node_dir, report_path)
+		source_reports.append(report_rel)
+		for job in report.get("jobs") or []:
+			if not isinstance(job, dict):
+				continue
+			job_id = str(job.get("job_id") or "")
+			if not job_id:
+				continue
+			copied = dict(job)
+			copied["source_resident_batch_report"] = report_rel
+			jobs_by_id[job_id] = copied
+	missing_job_ids = [chunk_id for chunk_id in final_chunk_ids if chunk_id not in jobs_by_id]
+	jobs = [jobs_by_id[chunk_id] for chunk_id in final_chunk_ids if chunk_id in jobs_by_id]
+	effective = {
+		"schema_version": "worldview-china-vibevoice-resident-effective-final-report.v1",
+		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+		"status": "PASS" if not missing_job_ids else "FAIL",
+		"report_policy": "latest_job_per_final_chunk_from_preserved_resident_report_history",
+		"source_reports": source_reports,
+		"final_chunk_ids": final_chunk_ids,
+		"missing_job_ids": missing_job_ids,
+		"job_count": len(jobs),
+		"jobs": jobs,
+	}
+	effective_path = node_dir / "resident_batch_report.effective_final.json"
+	_write_json(effective_path, effective)
+	if missing_job_ids:
+		raise RuntimeError(
+			"Resident batch report history does not cover final chunks: "
+			f"{', '.join(missing_job_ids)}. Rerun only missing chunks with "
+			+ " ".join(f"--force-chunk-id {chunk_id}" for chunk_id in missing_job_ids)
+			+ "."
+		)
+	return _relative_to_run_dir(node_dir, effective_path)
+
+
+def _assert_resident_batch_raw_outputs(node_dir: Path, jobs: list[dict[str, Any]]) -> None:
+	failures: list[dict[str, Any]] = []
+	for job in jobs:
+		job_id = str(job.get("job_id") or "")
+		output_dir = Path(str(job.get("output_dir") or ""))
+		raw_wav = output_dir / "vibevoice_dialogue_generated.wav"
+		if not raw_wav.exists() or raw_wav.stat().st_size <= 0:
+			failures.append({
+				"job_id": job_id,
+				"expected_raw_wav": str(raw_wav),
+				"reason": "missing_or_empty_raw_wav",
+			})
+	report = {
+		"schema_version": "worldview-china-vibevoice-resident-output-coverage.v1",
+		"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+		"status": "PASS" if not failures else "FAIL",
+		"job_count": len(jobs),
+		"failure_count": len(failures),
+		"failures": failures,
+	}
+	_write_json(node_dir / "resident_batch_output_coverage.json", report)
+	if failures:
+		missing = [str(item["job_id"]) for item in failures]
+		raise RuntimeError(
+			"Resident VibeVoice batch finished but did not create raw wav for: "
+			f"{', '.join(missing)}. Do not rerun the full batch; rerun only these chunks with "
+			+ " ".join(f"--force-chunk-id {chunk_id}" for chunk_id in missing)
+			+ "."
+		)
+
+
 def run_chunks(
 	run_dir: Path,
 	force: bool,
@@ -726,6 +1194,7 @@ def run_chunks(
 	split_all_chunks: bool,
 	split_long_turn_max_chars: int,
 	fixed_chunk_plan_json: Path | None,
+	postprocess_min_source_mean_volume: float,
 	postprocess_min_source_max_volume: float,
 	voice_prompt_policy: str,
 	generation_runner: str,
@@ -749,8 +1218,19 @@ def run_chunks(
 		assert RESIDENT_BATCH_SCRIPT.exists(), f"Missing resident batch script: {RESIDENT_BATCH_SCRIPT}"
 		assert VIBEVOICE_PYTHON.exists(), f"Missing VibeVoice Python: {VIBEVOICE_PYTHON}"
 	python_for_post = RUNTIME_PYTHON if RUNTIME_PYTHON.exists() else Path("python3")
+	_validate_speaker_turn_roster_consistency_gate(run_dir)
+	_validate_pre_tts_frozen_contract_gate(run_dir, required=not dry_run)
 	script_path = run_dir / "04-podcast-script" / "podcast_script.md"
 	speaker_voices, voice_prompt_manifest = _load_speaker_voices(run_dir, voice_prompt_policy)
+	if not dry_run:
+		_validate_vibevoice_preflight_audition_gate(
+			run_dir,
+			voice_prompt_manifest,
+			voice_prompt_policy,
+			voice_context_policy,
+			split_long_turn_max_chars,
+			fixed_chunk_plan_json,
+		)
 	speaker_map = _build_speaker_map(run_dir, speaker_voices)
 	source_turns = _parse_turns(script_path)
 	for turn in source_turns:
@@ -777,6 +1257,8 @@ def run_chunks(
 	else:
 		chunks = _chunk_turns(turns)
 		chunks = _split_selected_chunks(chunks, split_chunk_indices, split_max_chars, split_all_chunks)
+	chunk_limit_policy = _chunk_limit_policy(run_dir)
+	_assert_chunk_count_within_limit(chunks, chunk_limit_policy)
 	node_dir = run_dir / "05-vibevoice-chunks"
 	chunks_dir = node_dir / "chunks"
 	node_dir.mkdir(parents=True, exist_ok=True)
@@ -807,6 +1289,7 @@ def run_chunks(
 		"target_chars": TARGET_CHARS,
 		"min_split_chars": MIN_SPLIT_CHARS,
 		"hard_max_chars": HARD_MAX_CHARS,
+		**chunk_limit_policy,
 		"min_speaker_turns_per_chunk": MIN_SPEAKER_TURNS_PER_CHUNK,
 		"split_chunk_indices": sorted(split_chunk_indices),
 		"split_all_chunks": split_all_chunks,
@@ -934,6 +1417,8 @@ def run_chunks(
 	if resident_jobs:
 		resident_jobs_path = node_dir / "resident_batch_jobs.json"
 		resident_report_path = node_dir / "resident_batch_report.json"
+		resident_job_ids = [str(job["job_id"]) for job in resident_jobs]
+		_archive_existing_resident_report(node_dir, resident_report_path, "formal_generation", resident_job_ids)
 		_write_json(resident_jobs_path, {
 			"schema_version": "worldview-china-vibevoice-resident-jobs.v1",
 			"run_dir": str(run_dir),
@@ -969,6 +1454,8 @@ def run_chunks(
 		)
 		(node_dir / "resident_batch.exitcode").write_text(str(resident_code) + "\n", encoding="utf-8")
 		assert resident_code == 0, f"Resident VibeVoice batch failed; see {node_dir / 'resident_batch.stderr.txt'}"
+		_register_current_resident_report(node_dir, resident_report_path, "formal_generation", resident_job_ids)
+		_assert_resident_batch_raw_outputs(node_dir, resident_jobs)
 
 	for context in chunk_contexts:
 		if not context["needs_postprocess"]:
@@ -989,6 +1476,8 @@ def run_chunks(
 				str(POSTPROCESS_SCRIPT),
 				"--project-dir",
 				str(chunk_dir),
+				"--min-source-mean-volume",
+				str(postprocess_min_source_mean_volume),
 				"--min-source-max-volume",
 				str(postprocess_min_source_max_volume),
 			],
@@ -1072,6 +1561,11 @@ def run_chunks(
 		for turn_index in range(int(result["turn_start"]), int(result["turn_end"]) + 1):
 			turn_lookup[turn_index]["chunk_id"] = result["chunk_id"]
 	aggregate_turns = [turn_lookup[index] for index in sorted(turn_lookup)]
+	resident_batch_report = (
+		_write_effective_resident_batch_report(node_dir, [str(result["chunk_id"]) for result in chunk_results])
+		if generation_runner == "resident_batch"
+		else None
+	)
 	manifest = {
 		"schema_version": "worldview-china-podcast-vibevoice-audio.v1",
 		"audio_backend": "vibevoice_chunked_dialogue",
@@ -1087,7 +1581,9 @@ def run_chunks(
 		"vibevoice_torch_dtype": torch_dtype,
 		"vibevoice_attn_implementation": attn_implementation,
 		"vibevoice_generation_seed": generation_seed,
-		"resident_batch_report": "05-vibevoice-chunks/resident_batch_report.json" if generation_runner == "resident_batch" else None,
+		"resident_batch_report": resident_batch_report,
+		"resident_batch_latest_report": "05-vibevoice-chunks/resident_batch_report.json" if generation_runner == "resident_batch" else None,
+		"resident_batch_report_index": "05-vibevoice-chunks/resident_batch_runs/index.json" if generation_runner == "resident_batch" else None,
 		"tts_safety_normalization_enabled": True,
 		"tts_safety_normalized_source_turn_count": len(tts_safety_normalized_turns),
 		"tts_safety_normalization_rule_counts": tts_safety_rule_counts,
@@ -1178,6 +1674,7 @@ def main() -> int:
 	parser.add_argument("--split-all-chunks", action="store_true")
 	parser.add_argument("--split-long-turn-max-chars", type=int, default=DEFAULT_SPLIT_LONG_TURN_MAX_CHARS)
 	parser.add_argument("--fixed-chunk-plan-json", type=Path)
+	parser.add_argument("--postprocess-min-source-mean-volume", type=float, default=-30.0)
 	parser.add_argument("--postprocess-min-source-max-volume", type=float, default=DEFAULT_POSTPROCESS_MIN_SOURCE_MAX_VOLUME)
 	parser.add_argument("--generation-runner", choices=sorted(GENERATION_RUNNERS), default="resident_batch")
 	parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=DEFAULT_VIBEVOICE_DEVICE, help="Default is mps. Use cpu only as an explicit fallback.")
@@ -1214,6 +1711,7 @@ def main() -> int:
 		args.split_all_chunks,
 		args.split_long_turn_max_chars,
 		args.fixed_chunk_plan_json.expanduser().resolve() if args.fixed_chunk_plan_json else None,
+		args.postprocess_min_source_mean_volume,
 		args.postprocess_min_source_max_volume,
 		args.voice_prompt_policy,
 		args.generation_runner,

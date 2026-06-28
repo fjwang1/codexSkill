@@ -1,15 +1,22 @@
 ---
 name: archive-is-real-chrome-capture
-description: "暂时不可用的网页存档抓取流程归档。仅当用户明确要求尝试 archive.is/archive.today/archive.ph/archive.md 等网页存档镜像、并明确接受真实 Chrome 中可能出现验证码或安全验证时使用；用于通过用户主 Google Chrome 的 Chrome Extension 搜索原文 URL、打开快照候选、保存截图和 chrome_proof 审计。不要被选题流程隐式调用。"
+description: "不稳定但可审计的网页存档抓取流程。仅当用户明确要求尝试 archive.is/archive.today/archive.ph/archive.md 等网页存档镜像，或某个已获用户明确授权的本地 workflow/skill 把 archive fallback 规定为硬门槛时使用；用于通过用户主 Google Chrome 的 Chrome Extension 搜索原文 URL、打开快照候选、保存截图和 chrome_proof 审计。"
 ---
 
 # Archive.is Real Chrome Capture
 
-## 暂时不可用
+## 使用边界
 
 当前网页存档镜像经常在真实 Chrome 中返回 CAPTCHA / security check，导致无人值守流程不可稳定使用。
 
-默认不要调用本 skill。只有用户明确要求“试一下 archive / archive.is / archive.today / archive.ph / archive.md / 网页快照”，并接受以下限制时，才可以运行：
+默认不要为任意抓取任务调用本 skill。只有以下任一条件成立，才可以运行：
+
+```text
+1. 用户明确要求“试一下 archive / archive.is / archive.today / archive.ph / archive.md / 网页快照”。
+2. 用户已对某个本地 workflow/automation/skill 明确规定：公开渠道拿不到文章正文时，必须尝试 archive.is 系列镜像；例如 `daily-china-article-to-wechat-bundle` -> `china-longform-article-selection` 的 retrieval gate。
+```
+
+运行时必须接受以下限制：
 
 ```text
 1. 不保证能拿到正文。

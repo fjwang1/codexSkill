@@ -13,7 +13,9 @@ import run_vibevoice_chunks as chunks
 
 
 DEFAULT_AUDITION_CHUNK_COUNT = 2
-DEFAULT_MIN_SOURCE_MAX_VOLUME = -10.0
+DEFAULT_PASS_SOURCE_MAX_VOLUME = -12.0
+DEFAULT_YELLOW_SOURCE_MAX_VOLUME = -15.0
+DEFAULT_MIN_SOURCE_MEAN_VOLUME = -30.0
 
 
 def _parse_volume(stderr: str) -> dict[str, float]:
@@ -62,6 +64,23 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 	path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _classify_raw_level(
+	volume: dict[str, float],
+	pass_source_max_volume: float,
+	yellow_source_max_volume: float,
+	min_source_mean_volume: float,
+) -> tuple[str, str]:
+	mean_volume = volume["mean_volume_dbfs"]
+	max_volume = volume["max_volume_dbfs"]
+	if mean_volume < min_source_mean_volume:
+		return "FAIL", "mean_volume_below_fail_floor"
+	if max_volume < yellow_source_max_volume:
+		return "FAIL", "max_volume_below_fail_floor"
+	if max_volume < pass_source_max_volume:
+		return "YELLOW", "max_volume_yellow_band_requires_secondary_qa"
+	return "PASS", "raw_level_in_green_band"
+
+
 def _build_chunks(
 	run_dir: Path,
 	split_long_turn_max_chars: int,
@@ -84,6 +103,8 @@ def run_preflight(
 	run_dir: Path,
 	chunk_count: int,
 	min_source_max_volume: float,
+	yellow_source_max_volume: float,
+	min_source_mean_volume: float,
 	voice_prompt_policy: str,
 	voice_context_policy: str,
 	device: str,
@@ -96,11 +117,13 @@ def run_preflight(
 	fixed_chunk_plan_json: Path | None,
 ) -> dict[str, Any]:
 	assert chunk_count > 0
+	assert yellow_source_max_volume < min_source_max_volume
 	run_dir = run_dir.expanduser().resolve()
 	node_dir = run_dir / "05-vibevoice-preflight-audition"
 	chunks_dir = node_dir / "chunks"
 	node_dir.mkdir(parents=True, exist_ok=True)
 	progress = run_dir / "logs" / "progress.md"
+	chunks._validate_pre_tts_frozen_contract_gate(run_dir, required=True)
 	speaker_voices, voice_prompt_manifest = chunks._load_speaker_voices(run_dir, voice_prompt_policy)
 	speaker_map = chunks._build_speaker_map(run_dir, speaker_voices)
 	chunk_sets, turns, tts_safety_rule_counts, dropped_tiny_turns = _build_chunks(
@@ -166,6 +189,8 @@ def run_preflight(
 		})
 	jobs_path = node_dir / "resident_batch_jobs.json"
 	report_path = node_dir / "resident_batch_report.json"
+	job_ids = [str(job["job_id"]) for job in jobs]
+	chunks._archive_existing_resident_report(node_dir, report_path, "preflight_audition", job_ids)
 	_write_json(jobs_path, {
 		"schema_version": "worldview-china-vibevoice-preflight-jobs.v1",
 		"run_dir": str(run_dir),
@@ -213,19 +238,36 @@ def run_preflight(
 	)
 	(node_dir / "resident_batch.exitcode").write_text(str(resident_code) + "\n", encoding="utf-8")
 	assert resident_code == 0, f"Resident VibeVoice preflight failed; see {node_dir / 'resident_batch.stderr.txt'}"
+	chunks._register_current_resident_report(node_dir, report_path, "preflight_audition", job_ids)
+	chunks._assert_resident_batch_raw_outputs(node_dir, jobs)
 	rows: list[dict[str, Any]] = []
 	for item in chunk_plan:
 		raw_wav = Path(str(item["raw_wav"]))
 		assert raw_wav.exists(), f"Missing preflight raw wav: {raw_wav}"
 		volume = _volumedetect(raw_wav)
+		raw_level_status, raw_level_reason = _classify_raw_level(
+			volume,
+			min_source_max_volume,
+			yellow_source_max_volume,
+			min_source_mean_volume,
+		)
 		row = {
 			**item,
 			"duration_sec": round(_duration(raw_wav), 3),
 			**volume,
-			"passes_min_source_max_volume": volume["max_volume_dbfs"] >= min_source_max_volume,
+			"raw_level_status": raw_level_status,
+			"raw_level_reason": raw_level_reason,
+			"passes_min_source_max_volume": raw_level_status == "PASS",
+			"requires_secondary_qa": raw_level_status == "YELLOW",
 		}
 		rows.append(row)
-	status = "PASS" if all(bool(row["passes_min_source_max_volume"]) for row in rows) else "FAIL"
+	row_statuses = {str(row["raw_level_status"]) for row in rows}
+	if "FAIL" in row_statuses:
+		status = "FAIL"
+	elif "YELLOW" in row_statuses:
+		status = "YELLOW"
+	else:
+		status = "PASS"
 	result = {
 		"schema_version": "worldview-china-vibevoice-preflight-audition-result.v1",
 		"status": status,
@@ -234,6 +276,8 @@ def run_preflight(
 		"audition_chunk_count": len(rows),
 		"source_total_chunk_count": len(chunk_sets),
 		"min_source_max_volume_dbfs": min_source_max_volume,
+		"yellow_source_max_volume_dbfs": yellow_source_max_volume,
+		"min_source_mean_volume_dbfs": min_source_mean_volume,
 		"script_sha256": script_sha256,
 		"voice_prompt_manifest": voice_prompt_manifest,
 		"voice_prompt_manifest_sha256": voice_prompt_manifest_sha256,
@@ -251,6 +295,13 @@ def run_preflight(
 			if status == "FAIL"
 			else None
 		),
+		"yellow_guidance": (
+			"If status is YELLOW, do not start unattended full 05 generation until secondary QA checks mean volume, LUFS, "
+			"silence, ASR/script coverage, and spot-listening. Prefer repairing the voice prompt or chunk if the audio "
+			"sounds weak, noisy, or inconsistent."
+			if status == "YELLOW"
+			else None
+		),
 	}
 	_write_json(node_dir / "preflight_audition_result.json", result)
 	(node_dir / "preflight_audition_report.md").write_text(
@@ -258,23 +309,29 @@ def run_preflight(
 			"# VibeVoice Preflight Audition",
 			"",
 			f"- status: {status}",
-			f"- min_source_max_volume_dbfs: {min_source_max_volume}",
+			f"- pass_source_max_volume_dbfs: {min_source_max_volume}",
+			f"- yellow_source_max_volume_dbfs: {yellow_source_max_volume}",
+			f"- min_source_mean_volume_dbfs: {min_source_mean_volume}",
 			f"- audition_chunk_count: {len(rows)}",
 			f"- source_total_chunk_count: {len(chunk_sets)}",
 			f"- voice_prompt_manifest: {voice_prompt_manifest}",
 			"",
-			"| chunk | mean dBFS | max dBFS | pass | duration |",
-			"|---|---:|---:|---:|---:|",
+			"| chunk | mean dBFS | max dBFS | status | reason | duration |",
+			"|---|---:|---:|---|---|---:|",
 			*[
 				f"| {row['chunk_id']} | {row['mean_volume_dbfs']:.1f} | {row['max_volume_dbfs']:.1f} | "
-				f"{str(row['passes_min_source_max_volume']).upper()} | {row['duration_sec']:.1f}s |"
+				f"{row['raw_level_status']} | {row['raw_level_reason']} | {row['duration_sec']:.1f}s |"
 				for row in rows
 			],
 			"",
 			(
 				"FAIL means full 05 generation should not start until 02b/02c voice prompts are repaired."
 				if status == "FAIL"
-				else "PASS means these audition chunks cleared the raw-level gate; continue full 05 generation."
+				else (
+					"YELLOW means full 05 generation needs secondary QA before continuing."
+					if status == "YELLOW"
+					else "PASS means these audition chunks cleared the raw-level gate; continue full 05 generation."
+				)
 			),
 		]) + "\n",
 		encoding="utf-8",
@@ -283,11 +340,13 @@ def run_preflight(
 	run_manifest = chunks._read_json(run_manifest_path) if run_manifest_path.exists() else {}
 	run_manifest.setdefault("nodes", {})["05-vibevoice-preflight-audition"] = {
 		"status": status.lower(),
-		"result": str(node_dir / "preflight_audition_result.json"),
-		"report": str(node_dir / "preflight_audition_report.md"),
-		"min_source_max_volume_dbfs": min_source_max_volume,
-		"audition_chunk_count": len(rows),
-	}
+			"result": str(node_dir / "preflight_audition_result.json"),
+			"report": str(node_dir / "preflight_audition_report.md"),
+			"min_source_max_volume_dbfs": min_source_max_volume,
+			"yellow_source_max_volume_dbfs": yellow_source_max_volume,
+			"min_source_mean_volume_dbfs": min_source_mean_volume,
+			"audition_chunk_count": len(rows),
+		}
 	chunks._write_json(run_manifest_path, run_manifest)
 	return result
 
@@ -296,7 +355,9 @@ def main() -> int:
 	parser = argparse.ArgumentParser(description="Run a short VibeVoice raw-level audition before full Worldview China 05 generation.")
 	parser.add_argument("--run-dir", required=True, type=Path)
 	parser.add_argument("--chunk-count", type=int, default=DEFAULT_AUDITION_CHUNK_COUNT)
-	parser.add_argument("--min-source-max-volume", type=float, default=DEFAULT_MIN_SOURCE_MAX_VOLUME)
+	parser.add_argument("--min-source-max-volume", type=float, default=DEFAULT_PASS_SOURCE_MAX_VOLUME)
+	parser.add_argument("--yellow-source-max-volume", type=float, default=DEFAULT_YELLOW_SOURCE_MAX_VOLUME)
+	parser.add_argument("--min-source-mean-volume", type=float, default=DEFAULT_MIN_SOURCE_MEAN_VOLUME)
 	parser.add_argument("--voice-prompt-policy", choices=sorted(chunks.VOICE_PROMPT_POLICIES), default="qwen_chinese_required")
 	parser.add_argument("--voice-context-policy", choices=sorted(chunks.VOICE_CONTEXT_POLICIES), default="locked_multi_speaker_roster")
 	parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=chunks.DEFAULT_VIBEVOICE_DEVICE)
@@ -312,6 +373,8 @@ def main() -> int:
 		args.run_dir,
 		args.chunk_count,
 		args.min_source_max_volume,
+		args.yellow_source_max_volume,
+		args.min_source_mean_volume,
 		args.voice_prompt_policy,
 		args.voice_context_policy,
 		args.device,
@@ -324,7 +387,11 @@ def main() -> int:
 		args.fixed_chunk_plan_json.expanduser().resolve() if args.fixed_chunk_plan_json else None,
 	)
 	print(json.dumps(result, ensure_ascii=False, indent=2))
-	return 0 if result["status"] == "PASS" else 2
+	if result["status"] == "PASS":
+		return 0
+	if result["status"] == "YELLOW":
+		return 3
+	return 2
 
 
 if __name__ == "__main__":

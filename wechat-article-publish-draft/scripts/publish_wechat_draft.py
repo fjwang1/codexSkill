@@ -430,9 +430,15 @@ def build_digest(markdown: str, override: str | None, metadata: dict[str, Any]) 
 			return truncate_utf8(strip_inline_markdown(value.strip()), 120, 128)
 	plain_lines: list[str] = []
 	for line in markdown.splitlines():
-		if not line.strip() or line.lstrip().startswith("#") or line.lstrip().startswith(">"):
+		stripped = line.strip()
+		if (
+			not stripped
+			or stripped.startswith("#")
+			or stripped.startswith(">")
+			or re.match(r"^!\[[^\]]*\]\([^)]+\)\s*$", stripped)
+		):
 			continue
-		plain_lines.append(strip_inline_markdown(line.strip()))
+		plain_lines.append(strip_inline_markdown(stripped))
 	plain = re.sub(r"\s+", " ", "".join(plain_lines)).strip()
 	return truncate_utf8(plain, 120, 128)
 

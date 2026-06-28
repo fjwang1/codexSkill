@@ -1,0 +1,30 @@
+{
+  "schema_version": "worldview-china-default-voice-pair.v1",
+  "default_pair_id": "20260618_3",
+  "intended_use": "two_speaker_voice_distinctness_fallback",
+  "policy_scope": "exactly_two_speakers_only",
+  "source": {
+    "label": "historical_worldview_china_podcast_run_20260618_3",
+    "copied_from": "/Users/wangfangjia/code/VibeVoice/demo/voices"
+  },
+  "voices": {
+    "Speaker 0": {
+      "vibevoice_name": "WC20260618S3Speaker0QwenZH",
+      "filename": "zh-WC20260618S3Speaker0QwenZH_qwenzh.wav",
+      "sha256": "e512c31b7ead349e7fccbfe945003202c2e1c6c72ccc1138d4ec637a920fc066",
+      "duration_sec": 13.36,
+      "codec": "pcm_s16le",
+      "sample_rate": 24000,
+      "channels": 1
+    },
+    "Speaker 1": {
+      "vibevoice_name": "WC20260618S3Speaker1QwenZH",
+      "filename": "zh-WC20260618S3Speaker1QwenZH_qwenzh.wav",
+      "sha256": "449f95779623f4bfb62e736fd35803a47fc9d0c91325ca2abc299d63487d7d56",
+      "duration_sec": 14.08,
+      "codec": "pcm_s16le",
+      "sample_rate": 24000,
+      "channels": 1
+    }
+  }
+}

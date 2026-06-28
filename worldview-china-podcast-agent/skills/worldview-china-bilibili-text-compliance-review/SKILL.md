@@ -17,7 +17,7 @@ references/bilibili_risk_registry.json
 
 该 registry 维护审核契约、规则分组、确定性规则 ID 覆盖关系和平台退回案例。不要在主流程里无限追加零散规则；新增 B 站退回原因时，应先写入 registry 的 `platform_rejection_cases` 或对应 `rule_groups`，再更新必要的 deterministic pattern。审核报告必须记录 registry 路径、sha256、rule group 数和退回案例数，便于最终 QA 确认本轮审核依据是哪一版。
 
-每次 03d/04c 审核报告必须写入 `reviewed_file_hashes`，键为被审核文件的绝对路径，值为 sha256。最终 QA 只认覆盖当前文件 hash 的 PASS；如果脚本、字幕、标题、封面、metadata、音频 manifest 或安全稿在审核后被修改，旧 PASS 失效，必须重新跑本 skill。
+每次 03d/04c 审核报告必须写入 `reviewed_file_hashes`，键为被审核文件的绝对路径，值为 sha256。最终 QA 只认覆盖当前关键发布文本 hash 的 PASS；如果脚本、字幕、标题、封面、metadata 或安全稿在审核后被修改，旧 PASS 失效，必须重新跑本 skill。音频/字幕 manifest 中的可发布文本字段仍会被扫描；但非发布元数据变化不应单独让审核失效。
 
 如果当前 run 或 episode 曾被 B 站退回，投稿后审核监控 skill 会写入：
 
@@ -54,6 +54,7 @@ references/bilibili_risk_registry.json
 
 1. 主 agent 在 03/03b/04/02d/07/10 生成文本时，必须提前把上述规则写入生成约束，避免源头产出违规文本。
 2. 文稿产出后，主 agent 启动独立审核子 agent，读取本 skill、run 目录文本产物以及可选的 `platform_rejection_lessons.*`，以无上下文审核身份给出 `PASS` / `FAIL` 和命中位置。独立审核必须特别扫描连续上下文，而不是只查词：如果一段形成“社会问题/精神危机 -> 宗教解决 -> 皈依/选择某宗教”或“社群观察 -> 宣教/课程/清真寺邀请”的叙事链，应判 `FAIL`；如果一段命中历史 B 站退回 lesson 中的同类地缘政治/宗教政策/法律法规风险链条，也应判 `FAIL`。
+   - 独立审核结果必须写入当前审核目录的 `independent-review-result.json`，包含 `status`、`reviewed_files`、`reviewed_file_hashes`、`findings` 和 `repair_guidance_for_parent`。03d 写入 `03d-risk-compliance-review/independent-review-result.json`；04c 写入 `04c-bilibili-text-compliance/independent-review-result.json`。
 3. 同时运行 bundled deterministic check，作为低成本召回：
 
 ```bash
@@ -84,11 +85,22 @@ python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/skills/wo
 status == PASS
 reviewed_files includes all current publishable text files
 reviewed_file_hashes includes the current sha256 for each reviewed file
+independent-review-result.json exists and status == PASS
 risk_registry.load_status == loaded
 risk_registry.deterministic_rule_ids_missing_from_registry == []
 platform_rejection_lessons.present == true when rejection lessons exist
 ```
 
-5. 若 deterministic check 或独立审核子 agent 任一 FAIL，不得进入后续 TTS、字幕、视频合成、metadata 或 B 站投稿。应回到对应上游节点做最小必要修复，再重新运行审核。
+5. 若 deterministic check 或独立审核子 agent 任一 FAIL，不得进入后续 TTS、字幕、视频合成、metadata 或 B 站投稿；但这不是父流程终点。审核报告必须让父流程能分流修复：命中当前文件、时间点/segment、规则组、是否来自 platform lesson、建议 owner node 和最小修复方式。
+
+FAIL 分流建议：
+
+- 规范词、具体领导人姓名、逗号数字、制作话术：回产生该文本的节点直接修正，例如 03/04/07/10。
+- 连续涉疆/民族宗教/地缘政治/宗教传播/历史退回 lesson 风险：回 03b 做完整语义链 cut/bridge，不要只替换关键词。
+- 标题、封面、metadata 把敏感内容放大成点击卖点：回 02d 或 10 重写为低风险内容角度，再复跑本审核。
+- `reviewed_file_hashes` 过期或漏文件：无需改稿，重新收集最新发布文本并复跑审核。
+- lesson 文件存在：审核 lesson 用作风险上下文，不把 lesson 自身当作被审核正文；修复后必须确认当前 publishable files 已不含同类风险链条。
+
+修复完成后，必须重新运行 deterministic check 和独立审核，并写入覆盖最新文件 sha256 的 `reviewed_file_hashes`。
 
 上传前如果 02d 标题/封面、07 字幕或 10 metadata 有新增/变更，必须用同一个脚本和子 agent 复跑审核，确保 `text-compliance-review-result.json` 是最新文本的 PASS 结果。

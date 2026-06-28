@@ -483,8 +483,16 @@ def _classify_acoustic_sample(
 	margin: float,
 	min_similarity_margin: float,
 	min_assigned_similarity: float,
+	references_confusable: bool,
+	max_confusable_identity_mismatch_margin: float,
 ) -> tuple[str, str]:
 	if best_speaker != expected_speaker:
+		if (
+			references_confusable
+			and assigned_score >= min_assigned_similarity
+			and abs(margin) <= max_confusable_identity_mismatch_margin
+		):
+			return "REVIEW", "confusable_reference_identity_margin"
 		return "FAIL", "voice_identity_mismatch"
 	if assigned_score < min_assigned_similarity:
 		return "REVIEW", "low_assigned_similarity"
@@ -501,6 +509,8 @@ def run_acoustic_qa(
 	sample_duration_sec: float,
 	min_similarity_margin: float,
 	min_assigned_similarity: float,
+	confusable_reference_similarity: float,
+	max_confusable_identity_mismatch_margin: float,
 ) -> dict[str, Any]:
 	failures: list[dict[str, Any]] = []
 	warnings: list[str] = []
@@ -529,10 +539,33 @@ def run_acoustic_qa(
 			continue
 		reference_embeddings[speaker] = embedding
 		reference_metrics[speaker] = {"reference_wav": str(ref_path), "rms": round(rms, 6), "sha256": _sha256(ref_path)}
+	reference_pair_similarities: list[dict[str, Any]] = []
+	reference_speakers = _sorted_speakers(reference_embeddings.keys())
+	for left_index, left_speaker in enumerate(reference_speakers):
+		for right_speaker in reference_speakers[left_index + 1:]:
+			score = _cosine(reference_embeddings[left_speaker], reference_embeddings[right_speaker])
+			reference_pair_similarities.append({
+				"speaker_a": left_speaker,
+				"speaker_b": right_speaker,
+				"cosine_similarity": round(score, 6),
+			})
+	max_reference_similarity = max(
+		(float(item["cosine_similarity"]) for item in reference_pair_similarities),
+		default=-1.0,
+	)
+	references_confusable = max_reference_similarity >= confusable_reference_similarity
 	turns = _timeline_turns(run_dir)
 	if not turns:
 		failures.append({"message": "audio/dialogue_timeline.json has no usable speaker turns"})
-		return {"status": "FAIL", "samples": [], "reference_metrics": reference_metrics, "failures": failures, "warnings": warnings}
+		return {
+			"status": "FAIL",
+			"samples": [],
+			"reference_metrics": reference_metrics,
+			"reference_pair_similarities": reference_pair_similarities,
+			"references_confusable": references_confusable,
+			"failures": failures,
+			"warnings": warnings,
+		}
 	samples = _select_samples(turns, _chunk_ranges(run_dir), _repair_chunk_ids(run_dir), max_random_per_speaker, sample_duration_sec)
 	results: list[dict[str, Any]] = []
 	for sample in samples:
@@ -557,6 +590,8 @@ def run_acoustic_qa(
 			margin,
 			min_similarity_margin,
 			min_assigned_similarity,
+			references_confusable,
+			max_confusable_identity_mismatch_margin,
 		)
 		result = {
 			**sample,
@@ -580,6 +615,8 @@ def run_acoustic_qa(
 		"sample_count": len(results),
 		"identity_mismatch_count": sum(1 for item in results if item.get("status_reason") == "voice_identity_mismatch"),
 		"reference_metrics": reference_metrics,
+		"reference_pair_similarities": reference_pair_similarities,
+		"references_confusable": references_confusable,
 		"samples": results,
 		"failures": failures,
 		"warnings": warnings,
@@ -588,6 +625,8 @@ def run_acoustic_qa(
 			"max_random_per_speaker": max_random_per_speaker,
 			"min_similarity_margin": min_similarity_margin,
 			"min_assigned_similarity": min_assigned_similarity,
+			"confusable_reference_similarity": confusable_reference_similarity,
+			"max_confusable_identity_mismatch_margin": max_confusable_identity_mismatch_margin,
 		},
 	}
 
@@ -627,6 +666,8 @@ def run_voice_consistency_qa(
 	sample_duration_sec: float = 6.0,
 	min_similarity_margin: float = 0.01,
 	min_assigned_similarity: float = -0.20,
+	confusable_reference_similarity: float = 0.98,
+	max_confusable_identity_mismatch_margin: float = 0.03,
 ) -> dict[str, Any]:
 	expected_voices, reference_paths, manifest_path, voice_failures = _expected_voice_names(run_dir)
 	lineage = run_lineage_qa(run_dir, expected_voices)
@@ -654,6 +695,8 @@ def run_voice_consistency_qa(
 			sample_duration_sec,
 			min_similarity_margin,
 			min_assigned_similarity,
+			confusable_reference_similarity,
+			max_confusable_identity_mismatch_margin,
 		)
 	overall = "PASS" if lineage["status"] == "PASS" and acoustic["status"] in {"PASS", "SKIPPED"} else "FAIL"
 	result = {
@@ -688,6 +731,8 @@ def main() -> int:
 	parser.add_argument("--sample-duration-sec", type=float, default=6.0)
 	parser.add_argument("--min-similarity-margin", type=float, default=0.01)
 	parser.add_argument("--min-assigned-similarity", type=float, default=-0.20)
+	parser.add_argument("--confusable-reference-similarity", type=float, default=0.98)
+	parser.add_argument("--max-confusable-identity-mismatch-margin", type=float, default=0.03)
 	args = parser.parse_args()
 	result = run_voice_consistency_qa(
 		args.run_dir.expanduser().resolve(),
@@ -696,6 +741,8 @@ def main() -> int:
 		sample_duration_sec=args.sample_duration_sec,
 		min_similarity_margin=args.min_similarity_margin,
 		min_assigned_similarity=args.min_assigned_similarity,
+		confusable_reference_similarity=args.confusable_reference_similarity,
+		max_confusable_identity_mismatch_margin=args.max_confusable_identity_mismatch_margin,
 	)
 	print(json.dumps(result, ensure_ascii=False, indent=2))
 	return 0 if result["overall_status"] == "PASS" else 2

@@ -127,8 +127,8 @@ def _coerce_timeline_items(path: Path) -> list[dict[str, Any]]:
 	for index, item in enumerate(raw, start=1):
 		if not isinstance(item, dict):
 			continue
-		start_value = item.get("source_start", item.get("start", item.get("start_sec")))
-		end_value = item.get("source_end", item.get("end", item.get("end_sec")))
+		start_value = item.get("source_start", item.get("source_start_sec", item.get("start", item.get("start_sec"))))
+		end_value = item.get("source_end", item.get("source_end_sec", item.get("end", item.get("end_sec"))))
 		if start_value is None or end_value is None:
 			continue
 		start = _parse_time(start_value)

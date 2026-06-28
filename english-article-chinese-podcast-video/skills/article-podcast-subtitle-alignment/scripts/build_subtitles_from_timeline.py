@@ -20,7 +20,11 @@ MIN_CUE_SEC = 0.45
 NEXT_CUE_OVERLAP_SEC = 0.24
 MIN_GLOBAL_LEAD_SEC = 0.08
 MAX_LATE_START_SEC = 0.02
-DANGLING_FRAGMENT_RE = re.compile(r"(?:非|的|如果|除了|因为|但是|所以|包括|比如|当|把|被|与|以及|或者|并且|而且)$")
+DANGLING_FRAGMENT_RE = re.compile(r"(?:如果|除了|因为|但是|所以|包括|比如|当|把|被|与|以及|或者|并且|而且)$")
+DANGLING_DE_FRAGMENT_RE = re.compile(
+	r"(?:项目|计划|政策|体系|问题|能力|逻辑|结构|机制|部分|方面|阶段|国家|政府|公司|市场|经济|机会|风险|背景|条件|选择|目标|空间|利益|位置|角色|结果|影响|技术|产业|供应链|制度|规则|路线|方式|模式|挑战|压力|信号|证据|观点|内容|议题|事件|安排|方向|战略|价值|趋势)的$"
+)
+CROSS_CUE_REPAIR_MAX_GAP_SEC = 0.80
 SUBTITLE_FONT_PATH = Path("/Volumes/GT34/Downloads/podcast_visual_style_prototypes/fonts/NotoSansCJKsc-Bold.otf")
 SUBTITLE_FONT_FAMILY = "NotoSansCJKsc-Bold"
 SUBTITLE_FONT_FULL_NAME = "Noto Sans CJK SC Bold"
@@ -35,6 +39,28 @@ SUBTITLE_GLYPH_EDGE_PAD_PX = 72
 SUBTITLE_BLOCK_TOP_MIN_Y = 1904
 SUBTITLE_BLOCK_TOP_MAX_Y = 1974
 SUBTITLE_BLOCK_BOTTOM_MAX_Y = 2044
+SEMANTIC_CONNECTOR_BREAKS = (
+	"而不是",
+	"强到",
+	"从而",
+	"进而",
+	"同时",
+	"并且",
+	"也就是",
+	"我们不是",
+	"我们一直",
+	"过去只有",
+	"以及",
+	"允许",
+	"必须",
+	"应该",
+	"能够",
+	"可以",
+	"能不能",
+	"从",
+	"被",
+	"由",
+)
 ASS_MARGIN_V = 116
 PUBLICATION_CHINESE_NAMES = {
 	"the economist": "经济学人",
@@ -206,6 +232,16 @@ def _contains_raw_publication(text: str, raw_terms: list[str]) -> str | None:
 	return None
 
 
+def _is_dangling_fragment(text: str) -> bool:
+	cleaned = text.strip()
+	if DANGLING_FRAGMENT_RE.search(cleaned):
+		return True
+	# A bare trailing "的" is often a valid predicative ending in spoken Chinese
+	# ("是成立的", "有理由的"), so only flag noun-modifier patterns that are
+	# likely waiting for the next noun.
+	return bool(DANGLING_DE_FRAGMENT_RE.search(cleaned))
+
+
 def _subtitle_publication_check(project_dir: Path, cues: list[dict[str, Any]]) -> dict[str, Any]:
 	metadata_path = project_dir / "source" / "source_metadata.json"
 	if not metadata_path.exists():
@@ -267,6 +303,16 @@ def _clean_display_text(text: str) -> str:
 	text = re.sub(r"[，,；;：:、\s]+$", "", text).strip()
 	text = re.sub(r"^[，,；;：:、\s]+", "", text).strip()
 	return text
+
+
+def _join_subtitle_text(left: str, right: str) -> str:
+	left = _clean_display_text(left)
+	right = _clean_display_text(right)
+	if not left:
+		return right
+	if not right:
+		return left
+	return f"{left}，{right}"
 
 
 def _normalise_sentence_periods(text: str) -> str:
@@ -372,6 +418,155 @@ def _split_display_text_to_fit(text: str) -> list[str]:
 	return parts
 
 
+def _split_by_semantic_connectors_to_fit(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont) -> list[str]:
+	text = text.strip()
+	if _fits_single_line(draw, text, font):
+		return [text]
+	candidates: list[tuple[int, int, str, str]] = []
+	for marker in SEMANTIC_CONNECTOR_BREAKS:
+		start = 0
+		while True:
+			index = text.find(marker, start)
+			if index < 0:
+				break
+			start = index + len(marker)
+			if index <= 0 or index >= len(text) - 1:
+				continue
+			left = text[:index].strip(" ，,；;：:、")
+			right = text[index:].strip(" ，,；;：:、")
+			if not left or not right:
+				continue
+			left_width = _measure_spaced_text(draw, left, font)
+			right_width = _measure_spaced_text(draw, right, font)
+			candidates.append((max(left_width, right_width), abs(left_width - right_width), left, right))
+	for _max_width, _balance, left, right in sorted(candidates):
+		pieces: list[str] = []
+		if _fits_single_line(draw, left, font):
+			pieces.append(left)
+		else:
+			try:
+				pieces.extend(_split_by_semantic_connectors_to_fit(left, draw, font))
+			except AssertionError:
+				continue
+		if _fits_single_line(draw, right, font):
+			pieces.append(right)
+		else:
+			try:
+				pieces.extend(_split_by_semantic_connectors_to_fit(right, draw, font))
+			except AssertionError:
+				continue
+		if pieces and all(_fits_single_line(draw, piece, font) for piece in pieces):
+			return pieces
+	assert False, (
+		"Overlong subtitle semantic unit has no safe connector split; "
+		"rewrite upstream into shorter complete sentences before subtitle generation: "
+		f"{text!r}"
+	)
+
+
+def _subtitle_unit(
+	text: str,
+	unit_type: str,
+	sentence_index: int,
+	sentence_complete: bool,
+	split_reason: str,
+	rendered_width_px: int,
+	semantic_clause_group_index: int | None = None,
+) -> dict[str, Any]:
+	unit: dict[str, Any] = {
+		"text": text,
+		"semantic_unit_type": unit_type,
+		"sentence_index": sentence_index,
+		"sentence_complete": sentence_complete,
+		"split_reason": split_reason,
+		"rendered_width_px": rendered_width_px,
+	}
+	if semantic_clause_group_index is not None:
+		unit["semantic_clause_group_index"] = semantic_clause_group_index
+	return unit
+
+
+def _split_unit_into_clauses(text: str) -> list[str]:
+	clauses = _split_by_semantic_clause_marks(text)
+	if len(clauses) > 1:
+		return clauses
+	return []
+
+
+def _make_repaired_clause_unit(
+	text: str,
+	base: dict[str, Any],
+	draw: ImageDraw.ImageDraw,
+	font: ImageFont.ImageFont,
+	group_index: int,
+) -> dict[str, Any]:
+	return _subtitle_unit(
+		text=text,
+		unit_type=str(base.get("semantic_unit_type") or "semantic_clause"),
+		sentence_index=int(base.get("sentence_index") or 1),
+		sentence_complete=False,
+		split_reason=f"{base.get('split_reason') or 'semantic_clause'}_dangling_repair",
+		rendered_width_px=_measure_spaced_text(draw, text, font),
+		semantic_clause_group_index=group_index,
+	)
+
+
+def _repair_dangling_units(
+	units: list[dict[str, Any]],
+	draw: ImageDraw.ImageDraw,
+	font: ImageFont.ImageFont,
+) -> list[dict[str, Any]]:
+	repaired: list[dict[str, Any]] = []
+	index = 0
+	while index < len(units):
+		current = dict(units[index])
+		current_text = str(current.get("text") or "")
+		if not _is_dangling_fragment(current_text) or index + 1 >= len(units):
+			repaired.append(current)
+			index += 1
+			continue
+
+		next_unit = dict(units[index + 1])
+		next_text = str(next_unit.get("text") or "")
+		combined = _join_subtitle_text(current_text, next_text)
+		if _fits_single_line(draw, combined, font) and not _is_dangling_fragment(combined):
+			next_unit["text"] = combined
+			next_unit["rendered_width_px"] = _measure_spaced_text(draw, combined, font)
+			next_unit["split_reason"] = f"{next_unit.get('split_reason') or 'semantic_clause'}_dangling_repair"
+			repaired.append(next_unit)
+			index += 2
+			continue
+
+		clauses = _split_unit_into_clauses(current_text)
+		repaired_pair: tuple[dict[str, Any], dict[str, Any]] | None = None
+		for move_count in range(1, len(clauses)):
+			prefix = "，".join(clauses[:-move_count])
+			suffix = "，".join(clauses[-move_count:])
+			borrowed_next = _join_subtitle_text(suffix, next_text)
+			if (
+				prefix
+				and borrowed_next
+				and _fits_single_line(draw, prefix, font)
+				and _fits_single_line(draw, borrowed_next, font)
+				and not _is_dangling_fragment(prefix)
+				and not _is_dangling_fragment(borrowed_next)
+			):
+				group_index = int(current.get("semantic_clause_group_index") or len(repaired) + 1)
+				repaired_pair = (
+					_make_repaired_clause_unit(prefix, current, draw, font, group_index),
+					_make_repaired_clause_unit(borrowed_next, next_unit, draw, font, group_index + 1),
+				)
+				break
+		if repaired_pair is not None:
+			repaired.extend(repaired_pair)
+			index += 2
+			continue
+
+		repaired.append(current)
+		index += 1
+	return repaired
+
+
 def _semantic_subtitle_units(text: str) -> list[dict[str, Any]]:
 	font = _subtitle_font()
 	draw = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
@@ -379,56 +574,55 @@ def _semantic_subtitle_units(text: str) -> list[dict[str, Any]]:
 	units: list[dict[str, Any]] = []
 	for sentence_index, sentence in enumerate(sentences, start=1):
 		if _fits_single_line(draw, sentence, font):
-			units.append({
-				"text": sentence,
-				"semantic_unit_type": "sentence",
-				"sentence_index": sentence_index,
-				"sentence_complete": True,
-				"split_reason": "sentence_boundary",
-				"rendered_width_px": _measure_spaced_text(draw, sentence, font),
-			})
+			units.append(_subtitle_unit(
+				text=sentence,
+				unit_type="sentence",
+				sentence_index=sentence_index,
+				sentence_complete=True,
+				split_reason="sentence_boundary",
+				rendered_width_px=_measure_spaced_text(draw, sentence, font),
+			))
 			continue
 		clauses = _split_by_semantic_clause_marks(sentence)
-		assert len(clauses) > 1, (
-			"Overlong subtitle sentence has no semantic punctuation boundary; "
-			"rewrite upstream into shorter complete sentences before subtitle generation: "
-			f"{sentence!r}"
-		)
+		if len(clauses) <= 1:
+			clauses = _split_by_semantic_connectors_to_fit(sentence, draw, font)
 		buffer = ""
 		clause_group_index = 1
 		for clause in clauses:
-			assert _fits_single_line(draw, clause, font), (
-				"Subtitle semantic clause still does not fit one line; "
-				"rewrite upstream into shorter complete sentences before subtitle generation: "
-				f"{clause!r}"
-			)
-			candidate = f"{buffer}，{clause}" if buffer else clause
-			if buffer and not _fits_single_line(draw, candidate, font):
-				units.append({
-					"text": buffer,
-					"semantic_unit_type": "semantic_clause",
-					"sentence_index": sentence_index,
-					"sentence_complete": False,
-					"split_reason": "overlong_sentence_semantic_clause",
-					"semantic_clause_group_index": clause_group_index,
-					"rendered_width_px": _measure_spaced_text(draw, buffer, font),
-				})
-				clause_group_index += 1
-				buffer = clause
-			else:
-				buffer = candidate
+			subclauses = [clause] if _fits_single_line(draw, clause, font) else _split_by_semantic_connectors_to_fit(clause, draw, font)
+			for clause in subclauses:
+				assert _fits_single_line(draw, clause, font), (
+					"Subtitle semantic clause still does not fit one line; "
+					"rewrite upstream into shorter complete sentences before subtitle generation: "
+					f"{clause!r}"
+				)
+				candidate = f"{buffer}，{clause}" if buffer else clause
+				if buffer and not _fits_single_line(draw, candidate, font):
+					units.append(_subtitle_unit(
+						text=buffer,
+						unit_type="semantic_clause",
+						sentence_index=sentence_index,
+						sentence_complete=False,
+						split_reason="overlong_sentence_semantic_clause",
+						rendered_width_px=_measure_spaced_text(draw, buffer, font),
+						semantic_clause_group_index=clause_group_index,
+					))
+					clause_group_index += 1
+					buffer = clause
+				else:
+					buffer = candidate
 		if buffer:
-			units.append({
-				"text": buffer,
-				"semantic_unit_type": "semantic_clause",
-				"sentence_index": sentence_index,
-				"sentence_complete": False,
-				"split_reason": "overlong_sentence_semantic_clause",
-				"semantic_clause_group_index": clause_group_index,
-				"rendered_width_px": _measure_spaced_text(draw, buffer, font),
-			})
+			units.append(_subtitle_unit(
+				text=buffer,
+				unit_type="semantic_clause",
+				sentence_index=sentence_index,
+				sentence_complete=False,
+				split_reason="overlong_sentence_semantic_clause",
+				rendered_width_px=_measure_spaced_text(draw, buffer, font),
+				semantic_clause_group_index=clause_group_index,
+			))
 	assert units, f"No semantic subtitle units generated from text: {text!r}"
-	return units
+	return _repair_dangling_units(units, draw, font)
 
 
 def _split_timing(start: float, end: float, parts: list[str]) -> list[tuple[float, float]]:
@@ -450,10 +644,56 @@ def _split_timing(start: float, end: float, parts: list[str]) -> list[tuple[floa
 	return timings
 
 
+def _semantic_units_are_publishable(text: str) -> bool:
+	try:
+		units = _semantic_subtitle_units(text)
+	except AssertionError:
+		return False
+	return bool(units) and all(not _is_dangling_fragment(str(unit.get("text") or "")) for unit in units)
+
+
+def _merge_dangling_source_units(source_units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	merged: list[dict[str, Any]] = []
+	index = 0
+	while index < len(source_units):
+		current = dict(source_units[index])
+		current_text = str(current.get("text") or "")
+		if not _is_dangling_fragment(_clean_display_text(current_text)) or index + 1 >= len(source_units):
+			merged.append(current)
+			index += 1
+			continue
+
+		next_unit = dict(source_units[index + 1])
+		same_speaker = current.get("speaker") == next_unit.get("speaker")
+		gap_sec = float(next_unit["start_sec"]) - float(current["end_sec"])
+		combined_text = _join_subtitle_text(current_text, str(next_unit.get("text") or ""))
+		if (
+			same_speaker
+			and -0.05 <= gap_sec <= CROSS_CUE_REPAIR_MAX_GAP_SEC
+			and _semantic_units_are_publishable(combined_text)
+		):
+			current["text"] = combined_text
+			current["end_sec"] = float(next_unit["end_sec"])
+			current["alignment_confidence"] = current.get("alignment_confidence") or next_unit.get("alignment_confidence")
+			current["source_kind"] = f"{current.get('source_kind') or 'source'}_dangling_repair_group"
+			current["source_cue_indices"] = [
+				item
+				for item in (current.get("source_cue_index"), next_unit.get("source_cue_index"))
+				if item is not None
+			]
+			merged.append(current)
+			index += 2
+			continue
+
+		merged.append(current)
+		index += 1
+	return merged
+
+
 def _source_units_from_timeline(timeline: dict[str, Any]) -> list[dict[str, Any]]:
 	source_cues = sorted(list(timeline.get("cues") or []), key=lambda item: (float(item.get("start_sec") or 0), int(item.get("cue_index") or 0)))
 	if source_cues:
-		return [
+		return _merge_dangling_source_units([
 			{
 				"source_kind": "cue",
 				"source_turn_id": cue.get("turn_id"),
@@ -467,10 +707,10 @@ def _source_units_from_timeline(timeline: dict[str, Any]) -> list[dict[str, Any]
 				"alignment_confidence": cue.get("alignment_confidence"),
 			}
 			for cue in source_cues
-		]
+		])
 	turns = sorted(list(timeline.get("turns") or []), key=lambda item: (float(item.get("start_sec") or 0), int(item.get("turn_index") or 0)))
 	if turns:
-		return [
+		return _merge_dangling_source_units([
 			{
 				"source_kind": "turn",
 				"source_turn_id": turn.get("turn_id"),
@@ -484,7 +724,7 @@ def _source_units_from_timeline(timeline: dict[str, Any]) -> list[dict[str, Any]
 				"alignment_confidence": turn.get("alignment_confidence"),
 			}
 			for turn in turns
-		]
+		])
 	assert source_cues, "dialogue_timeline has no turns or cues"
 	return []
 
@@ -510,6 +750,7 @@ def _build_cues(timeline: dict[str, Any], audio_duration: float, lead_sec: float
 				"source_turn_id": source.get("source_turn_id"),
 				"source_turn_index": source.get("source_turn_index"),
 				"source_cue_index": source.get("source_cue_index"),
+				"source_cue_indices": source.get("source_cue_indices"),
 				"source_unit_index": source_index,
 				"source_unit_split_index": split_index,
 				"source_unit_split_count": len(semantic_units),
@@ -568,7 +809,7 @@ def _subtitle_policy_summary(cues: list[dict[str, Any]], lead_sec: float) -> dic
 	]
 	dangling_fragment_violations = [
 		cue for cue in cues
-		if DANGLING_FRAGMENT_RE.search(str(cue.get("display_text") or "").strip())
+		if _is_dangling_fragment(str(cue.get("display_text") or ""))
 	]
 	starts = [float(cue["start_sec"]) for cue in cues]
 	monotonic_start_violation_count = sum(

@@ -49,11 +49,21 @@ SUBTITLE_FONT_FAMILY = "NotoSansCJKsc-Bold"
 SUBTITLE_FONT_FULL_NAME = "Noto Sans CJK SC Bold"
 SUBTITLE_FONT_LICENSE_NOTE = "SIL Open Font License 1.1"
 VISUAL_SYNC_MODES = {"disabled_v1", "turn_retimed_basic_v1"}
+DEFAULT_VISUAL_SYNC_MODE = "turn_retimed_basic_v1"
 SOURCE_BACKGROUND_AUDIO_GAIN = 0.65
+FORMAL_FULL_RENDER_EXPERIMENT_RE = re.compile(r"(^|[._-])(manual|experiment|exploratory|debug|probe|test)([._-]|$)", re.IGNORECASE)
+FORMAL_FULL_RENDER_EXPERIMENT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v"}
+FORMAL_FULL_RENDER_MIN_SEC = 5.0
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-	return subprocess.run(cmd, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	result = subprocess.run(cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	if result.returncode != 0:
+		raise RuntimeError(
+			"Command failed with exit code "
+			f"{result.returncode}: {' '.join(cmd)}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+		)
+	return result
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -317,6 +327,22 @@ def _select_turn_audio_timeline(run_dir: Path, explicit_timeline: Path | None, a
 		"No current turn audio timeline matches audio/final_podcast.wav. "
 		f"Checked: {existing}. Regenerate 06c from the current final audio before turn-retimed rendering."
 	)
+
+
+def _select_source_turn_map(run_dir: Path, explicit_path: Path | None) -> tuple[Path, str]:
+	active_path = run_dir / "04-source-dialogue-turn-map/source_dialogue_turn_map.active.json"
+	if explicit_path is not None:
+		resolved = explicit_path.resolve()
+		if resolved == active_path.resolve():
+			return resolved, "active_dialogue_turn_map"
+		return resolved, "explicit_cli_source_turn_map_debug"
+	candidates = [
+		(active_path, "active_dialogue_turn_map"),
+	]
+	for path, reason in candidates:
+		if path.exists():
+			return path.resolve(), reason
+	return active_path.resolve(), "missing_active_source_turn_map"
 
 
 def _audio_filter_for_mix(audio_start_offset_sec: float, source_background_segments: list[dict[str, Any]], source_audio_input_index: int = 2) -> tuple[str, str, dict[str, Any]]:
@@ -824,6 +850,64 @@ def _extract_screenshots(video: Path, screenshots_dir: Path, duration: float) ->
 	return paths
 
 
+def _scan_formal_full_render_experiments(
+	output_dir: Path,
+	target_duration_sec: float,
+	review_sample: bool,
+	allow_full_render_experiments: bool,
+) -> dict[str, Any]:
+	work_dir = output_dir / "work"
+	candidates: list[dict[str, Any]] = []
+	if work_dir.exists():
+		full_render_floor = max(FORMAL_FULL_RENDER_MIN_SEC, target_duration_sec * 0.80)
+		for path in sorted(work_dir.rglob("*")):
+			if not path.is_file() or path.suffix.lower() not in FORMAL_FULL_RENDER_EXPERIMENT_EXTENSIONS:
+				continue
+			if not FORMAL_FULL_RENDER_EXPERIMENT_RE.search(path.name):
+				continue
+			duration: float | None
+			try:
+				duration = _duration(path)
+			except Exception:
+				duration = None
+			full_length_like = duration is None or duration >= full_render_floor
+			if not full_length_like:
+				continue
+			candidates.append({
+				"path": str(path),
+				"duration_sec": round(duration, 3) if duration is not None else None,
+				"target_duration_sec": round(target_duration_sec, 3),
+				"full_render_floor_sec": round(full_render_floor, 3),
+				"reason": "manual_or_test_named_full_length_render_in_formal_work_dir",
+			})
+	status = "PASS"
+	if allow_full_render_experiments:
+		status = "SKIPPED_ALLOWED_DEBUG"
+	elif review_sample:
+		status = "SKIPPED_REVIEW_SAMPLE"
+	elif candidates:
+		status = "FAIL"
+	return {
+		"schema_version": "worldview-china-formal-render-experiment-scan.v1",
+		"status": status,
+		"review_sample": review_sample,
+		"allow_full_render_experiments": allow_full_render_experiments,
+		"candidate_count": len(candidates),
+		"candidates": candidates,
+	}
+
+
+def _assert_no_formal_full_render_experiments(scan: dict[str, Any]) -> None:
+	if scan.get("status") != "FAIL":
+		return
+	paths = ", ".join(str(item.get("path")) for item in scan.get("candidates") or [])
+	raise AssertionError(
+		"Formal 08 source-video revoice found full-length manual/test render artifacts in the work directory. "
+		"Delete or move these debug renders, or rerun as an explicit review sample. Offending files: "
+		f"{paths}"
+	)
+
+
 def run_revoice(
 	run_dir: Path,
 	source_video: Path | None,
@@ -842,6 +926,7 @@ def run_revoice(
 	turn_audio_timeline: Path | None,
 	source_time_offset_sec: float | None,
 	update_root: bool,
+	allow_full_render_experiments: bool = False,
 ) -> dict[str, Any]:
 	run_dir = run_dir.resolve()
 	assert visual_sync_mode in VISUAL_SYNC_MODES
@@ -849,14 +934,18 @@ def run_revoice(
 	episode_manifest = _read_json_optional(episode_manifest_path)
 	series_episode = episode_manifest.get("schema_version") == "worldview-china-podcast-series-episode.v1"
 	episode_source_video = _resolve_optional_path(run_dir, episode_manifest.get("source_episode_video")) if series_episode else None
-	source_is_preclipped_episode = source_video is None and episode_source_video is not None and episode_source_video.exists()
 	semantic_source_start_sec = source_start_sec
 	if semantic_source_start_sec is None and series_episode and episode_manifest.get("source_start_sec") is not None:
 		semantic_source_start_sec = float(episode_manifest["source_start_sec"])
+	source = (source_video or episode_source_video or run_dir / "02-source-capture/youtube-media/source.mp4").resolve()
+	source_is_preclipped_episode = (
+		episode_source_video is not None
+		and episode_source_video.exists()
+		and source == episode_source_video.resolve()
+	)
 	cut_source_start_sec = None if source_is_preclipped_episode else semantic_source_start_sec
 	if series_episode and (semantic_source_start_sec is not None or source_is_preclipped_episode) and not match_audio_duration:
 		match_audio_duration = True
-	source = (source_video or episode_source_video or run_dir / "02-source-capture/youtube-media/source.mp4").resolve()
 	audio_path = (audio or run_dir / "audio/final_podcast.wav").resolve()
 	assert source.exists(), f"Missing source video: {source}"
 	assert audio_path.exists(), f"Missing Chinese audio: {audio_path}"
@@ -900,10 +989,7 @@ def run_revoice(
 	source_audio_for_mix_reason = "not_needed"
 	if visual_sync_mode == "turn_retimed_basic_v1":
 		retime = _load_turn_retime_module()
-		default_source_turn_map = run_dir / "02b-source-voice-prompts/source_speaker_timeline.normalized.json"
-		if not default_source_turn_map.exists():
-			default_source_turn_map = run_dir / "03-source-translation/source_transcript.zh.json"
-		retime_source_turn_map = (source_turn_map or default_source_turn_map).resolve()
+		retime_source_turn_map, retime_source_turn_map_selection = _select_source_turn_map(run_dir, source_turn_map)
 		retime_turn_audio_timeline, retime_turn_audio_timeline_selection = _select_turn_audio_timeline(
 			run_dir,
 			turn_audio_timeline,
@@ -966,6 +1052,7 @@ def run_revoice(
 		turn_retime_result = {
 			"visual_sync_mode": visual_sync_mode,
 			"source_turn_map": str(retime_source_turn_map),
+			"source_turn_map_selection": retime_source_turn_map_selection,
 			"turn_audio_timeline": str(retime_turn_audio_timeline),
 			"turn_audio_timeline_selection": retime_turn_audio_timeline_selection,
 			"source_time_offset_sec": retime_time_offset,
@@ -981,6 +1068,14 @@ def run_revoice(
 			"source_audio_time_offset_sec": source_audio_time_offset_sec,
 			"source_background_audio_segments": source_background_segments,
 		}
+
+	formal_render_experiment_scan = _scan_formal_full_render_experiments(
+		output_dir,
+		target_duration,
+		review_sample,
+		allow_full_render_experiments,
+	)
+	_assert_no_formal_full_render_experiments(formal_render_experiment_scan)
 
 	final_video = output_dir / "final_video.mp4"
 	burned_subtitle_render: dict[str, Any] | None = None
@@ -1080,6 +1175,8 @@ def run_revoice(
 		"target_video_resolution": f"{WIDTH}x{HEIGHT}",
 		"subtitle_mode": "burned_ass" if burn_subtitles else "sidecar_not_burned",
 		"subtitle_delivery_policy": "burned_subtitles_default" if burn_subtitles else "sidecar_user_requested_no_burn_subtitles",
+		"formal_full_render_experiments_allowed": allow_full_render_experiments,
+		"formal_full_render_experiment_scan": formal_render_experiment_scan,
 		"burned_subtitle_render": burned_subtitle_render,
 		"audio_mix": audio_mix_manifest,
 		"source_video": str(source),
@@ -1161,11 +1258,12 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--subtitles-ass", type=Path, help="Sidecar ASS subtitle path to copy. Defaults to <run_dir>/video/final_subtitles.ass.")
 	parser.add_argument("--video-encoder", choices=["h264_videotoolbox", "libx264"], default="h264_videotoolbox")
 	parser.add_argument("--video-bitrate", default="12000k", help="Bitrate used by h264_videotoolbox burned-subtitle 1440p renders.")
-	parser.add_argument("--visual-sync-mode", choices=sorted(VISUAL_SYNC_MODES), default="disabled_v1")
+	parser.add_argument("--visual-sync-mode", choices=sorted(VISUAL_SYNC_MODES), default=DEFAULT_VISUAL_SYNC_MODE)
 	parser.add_argument("--source-turn-map", type=Path, help="Source speaker turn map used by turn_retimed_basic_v1.")
 	parser.add_argument("--turn-audio-timeline", type=Path, help="Final Chinese audio turn timeline used by turn_retimed_basic_v1.")
 	parser.add_argument("--source-time-offset-sec", type=float, help="Subtract this offset from source turn timestamps before retiming, useful for pre-cut episode videos.")
 	parser.add_argument("--no-update-root", action="store_true")
+	parser.add_argument("--allow-full-render-experiments", action="store_true", help="Debug only: allow formal work dir to contain full-length manual/test render artifacts.")
 	parser.add_argument("--force", action="store_true")
 	parser.set_defaults(burn_subtitles=True)
 	return parser.parse_args()
@@ -1191,6 +1289,7 @@ def main() -> None:
 		turn_audio_timeline=args.turn_audio_timeline,
 		source_time_offset_sec=args.source_time_offset_sec,
 		update_root=not args.no_update_root,
+		allow_full_render_experiments=args.allow_full_render_experiments,
 	)
 	print(json.dumps({
 		"final_video": manifest["final_video"],

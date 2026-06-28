@@ -15,6 +15,28 @@ from typing import Any
 
 PUNCT_RE = re.compile(r"[\s,，。.!！?？;；:：、'\"“”‘’（）()《》<>\\[\\]{}—…·-]+")
 SUBTITLE_MAX_NORM_CHARS = 30
+CUE_LOW_CONFIDENCE_INTERPOLATION_THRESHOLD = 0.3
+MIN_CUE_SEC_PER_CHAR = 0.045
+SEMANTIC_CONNECTOR_BREAKS = (
+	"而不是",
+	"强到",
+	"从而",
+	"进而",
+	"同时",
+	"并且",
+	"也就是",
+	"我们不是",
+	"我们一直",
+	"过去只有",
+	"以及",
+	"允许",
+	"必须",
+	"应该",
+	"能够",
+	"可以",
+	"能不能",
+	"由",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -214,19 +236,62 @@ def _split_overlong_sentence(sentence: str, max_chars: int) -> list[str]:
 	buffer = ""
 	for clause in clauses:
 		clause = _clean_subtitle_unit(clause)
-		assert len(_norm(clause)) <= max_chars, (
-			"Subtitle semantic clause is too long; rewrite upstream instead of hard-splitting a phrase: "
-			f"{clause!r}"
-		)
-		candidate = buffer + clause if not buffer else buffer + clause
-		if buffer and len(_norm(candidate)) > max_chars:
-			units.append(buffer.strip())
-			buffer = clause
-		else:
-			buffer = candidate
+		for subclause in _split_overlong_clause_at_connectors(clause, max_chars):
+			candidate = buffer + subclause if not buffer else buffer + subclause
+			if buffer and len(_norm(candidate)) > max_chars:
+				units.append(buffer.strip())
+				buffer = subclause
+			else:
+				buffer = candidate
 	if buffer.strip():
 		units.append(buffer.strip())
 	return units
+
+
+def _split_overlong_clause_at_connectors(clause: str, max_chars: int) -> list[str]:
+	clause = _clean_subtitle_unit(clause)
+	if len(_norm(clause)) <= max_chars:
+		return [clause]
+	candidates: list[tuple[int, int, str, str]] = []
+	for marker in SEMANTIC_CONNECTOR_BREAKS:
+		start = 0
+		while True:
+			index = clause.find(marker, start)
+			if index < 0:
+				break
+			start = index + len(marker)
+			if index <= 0 or index >= len(clause) - 1:
+				continue
+			left = clause[:index].strip()
+			right = clause[index:].strip()
+			if not left or not right:
+				continue
+			left_len = len(_norm(left))
+			right_len = len(_norm(right))
+			candidates.append((max(left_len, right_len), abs(left_len - right_len), left, right))
+	for _max_side, _balance, left, right in sorted(candidates):
+		pieces: list[str] = []
+		if len(_norm(left)) > max_chars:
+			try:
+				pieces.extend(_split_overlong_clause_at_connectors(left, max_chars))
+			except AssertionError:
+				continue
+		else:
+			pieces.append(left)
+		if len(_norm(right)) > max_chars:
+			try:
+				pieces.extend(_split_overlong_clause_at_connectors(right, max_chars))
+			except AssertionError:
+				continue
+		else:
+			pieces.append(right)
+		if pieces and all(len(_norm(piece)) <= max_chars for piece in pieces):
+			return pieces
+	assert False, (
+		"Subtitle semantic clause is too long and has no safe semantic connector split; "
+		"rewrite upstream instead of hard-splitting a phrase: "
+		f"{clause!r}"
+	)
 
 
 def _split_text_for_cues(text: str, max_chars: int = SUBTITLE_MAX_NORM_CHARS) -> list[str]:
@@ -268,6 +333,14 @@ def _bounded_span(start: float, end: float, duration: float, minimum: float) -> 
 	if end <= start:
 		start = max(0.0, end - minimum)
 	return start, end
+
+
+def _proportional_cue_span(turn_start_sec: float, turn_end_sec: float, turn_start_idx: int, turn_end_idx: int, cue_start_idx: int, cue_end_idx: int) -> tuple[float, float]:
+	total_chars = max(1, turn_end_idx - turn_start_idx)
+	turn_duration = max(0.001, turn_end_sec - turn_start_sec)
+	relative_start = max(0.0, min(1.0, (cue_start_idx - turn_start_idx) / total_chars))
+	relative_end = max(relative_start, min(1.0, (cue_end_idx - turn_start_idx) / total_chars))
+	return turn_start_sec + turn_duration * relative_start, turn_start_sec + turn_duration * relative_end
 
 
 def build_timeline(project_dir: Path, asr_json: Path, output: Path) -> dict[str, Any]:
@@ -324,9 +397,19 @@ def build_timeline(project_dir: Path, asr_json: Path, output: Path) -> dict[str,
 			cue_asr_count = sum(1 for item in cue_char_times if item[2] == "asr")
 			cue_confidence_ratio = cue_asr_count / max(1, len(cue_char_times))
 			cue_confidence = "high" if cue_confidence_ratio >= 0.6 else "medium" if cue_confidence_ratio >= 0.3 else "low"
-			cue_start = max(0.0, min(item[0] for item in cue_char_times))
-			cue_end = min(duration, max(item[1] for item in cue_char_times))
-			cue_start, cue_end = _bounded_span(cue_start, cue_end, duration, 0.4)
+			min_cue_duration = max(0.4, min(1.2, len(_norm(chunk)) * MIN_CUE_SEC_PER_CHAR))
+			proportional_start, proportional_end = _proportional_cue_span(start, end, start_idx, end_idx, cue_start_idx, cue_end_idx)
+			timing_source = "asr_character_span" if cue_asr_count else "interpolated_character_span"
+			if cue_confidence_ratio < CUE_LOW_CONFIDENCE_INTERPOLATION_THRESHOLD:
+				cue_start, cue_end = proportional_start, proportional_end
+				timing_source = "interpolated_character_span"
+			else:
+				cue_start = max(0.0, min(item[0] for item in cue_char_times))
+				cue_end = min(duration, max(item[1] for item in cue_char_times))
+				if cue_end - cue_start < min_cue_duration and proportional_end - proportional_start >= min_cue_duration:
+					cue_start, cue_end = proportional_start, proportional_end
+					timing_source = "interpolated_character_span"
+			cue_start, cue_end = _bounded_span(cue_start, cue_end, duration, min_cue_duration)
 			cues.append({
 				"cue_index": cue_index,
 				"turn_index": turn_index,
@@ -338,7 +421,7 @@ def build_timeline(project_dir: Path, asr_json: Path, output: Path) -> dict[str,
 				"end_sec": round(cue_end, 3),
 				"alignment_confidence": cue_confidence,
 				"asr_matched_char_ratio": round(cue_confidence_ratio, 3),
-				"timing_source": "asr_character_span" if cue_asr_count else "interpolated_character_span",
+				"timing_source": timing_source,
 			})
 			cue_index += 1
 

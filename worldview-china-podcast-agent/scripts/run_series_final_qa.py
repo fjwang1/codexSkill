@@ -12,6 +12,7 @@ from typing import Any
 MAX_SPEAKERS = 4
 DEFAULT_SCHEDULED_PUBLISH_SLOTS = ("11:00", "17:00")
 SERIES_BALANCED_SLOT_SCHEDULE_SOURCE = "series_daily_11_17_balanced_ordered_slots"
+AUTOMATION_HOURLY_ROLLOVER_SCHEDULE_SOURCE = "automation_missed_11_slot_hourly_rollover"
 SPEAKER_RE = re.compile(r"^Speaker ([0-3])$")
 LOCKED_ROSTER_PATCH_POLICIES = {
 	"single_speaker_patch_from_locked_roster",
@@ -19,6 +20,16 @@ LOCKED_ROSTER_PATCH_POLICIES = {
 ALLOWED_AUDIT_MONITOR_STATUSES = {
 	"APPROVED",
 	"REVIEW_PENDING_AFTER_MAX_CHECKS",
+}
+ALLOWED_PROCESS_REVIEW_STATUSES = {
+	"PASS_OPTIMIZED",
+	"PASS_NO_ACTIONABLE_OPTIMIZATION",
+	"PASS_OPTIMIZATION_DECLINED",
+}
+PROCESS_REVIEW_STATUS_TO_DECISION = {
+	"PASS_OPTIMIZED": "optimized",
+	"PASS_NO_ACTIONABLE_OPTIMIZATION": "no_actionable_optimization",
+	"PASS_OPTIMIZATION_DECLINED": "declined_due_to_insufficient_evidence",
 }
 
 
@@ -128,6 +139,76 @@ def _expected_balanced_slot_schedule(first_schedule: datetime, episode_index: in
 	return first_schedule.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _first_non_empty(*values: Any) -> Any:
+	for value in values:
+		if value not in (None, ""):
+			return value
+	return None
+
+
+def _has_hourly_rollover_schedule_override(metadata: dict[str, Any], episode_manifest: dict[str, Any], episode: dict[str, Any]) -> bool:
+	return any(
+		doc.get("automation_hourly_rollover_after_missed_slot") is True
+		for doc in (metadata, episode_manifest, episode)
+	)
+
+
+def _validate_hourly_rollover_schedule(
+	metadata: dict[str, Any],
+	episode_manifest: dict[str, Any],
+	episode: dict[str, Any],
+	schedule_slots: tuple[str, ...],
+	expected_index: int,
+	failures: list[str],
+	warnings: list[str],
+) -> None:
+	if not _has_hourly_rollover_schedule_override(metadata, episode_manifest, episode):
+		failures.append(f"episode_{expected_index:03d} hourly rollover schedule source is missing automation override proof")
+		return
+	original_source = str(_first_non_empty(
+		metadata.get("original_schedule_source"),
+		episode_manifest.get("original_schedule_source"),
+		episode.get("original_schedule_source"),
+	) or "")
+	if original_source != SERIES_BALANCED_SLOT_SCHEDULE_SOURCE:
+		failures.append(
+			f"episode_{expected_index:03d} hourly rollover original_schedule_source mismatch: "
+			f"{original_source or 'missing'}"
+		)
+	target_slot = str(_first_non_empty(
+		metadata.get("automation_target_slot"),
+		episode_manifest.get("automation_target_slot"),
+		episode.get("automation_target_slot"),
+	) or "")
+	if target_slot not in schedule_slots:
+		failures.append(
+			f"episode_{expected_index:03d} hourly rollover target slot is not in series slots: "
+			f"{target_slot or 'missing'}"
+		)
+	original_schedule = _parse_dt(_first_non_empty(
+		metadata.get("original_scheduled_publish_at"),
+		episode_manifest.get("original_scheduled_publish_at"),
+		episode.get("original_scheduled_publish_at"),
+	))
+	actual_schedule = _parse_dt(metadata.get("scheduled_publish_at"))
+	if original_schedule is None:
+		failures.append(f"episode_{expected_index:03d} hourly rollover original_scheduled_publish_at is missing")
+	if actual_schedule is None:
+		failures.append(f"episode_{expected_index:03d} hourly rollover scheduled_publish_at is missing")
+		return
+	if actual_schedule.minute != 0 or actual_schedule.second != 0 or actual_schedule.microsecond != 0:
+		failures.append(f"episode_{expected_index:03d} hourly rollover actual schedule is not on a whole hour: {actual_schedule}")
+	if original_schedule is not None and actual_schedule <= original_schedule:
+		failures.append(
+			f"episode_{expected_index:03d} hourly rollover actual schedule must be after the missed slot: "
+			f"actual={actual_schedule} original={original_schedule}"
+		)
+	warnings.append(
+		f"episode_{expected_index:03d} uses user-authorized hourly rollover from {target_slot} "
+		f"to {actual_schedule.isoformat()}"
+	)
+
+
 def _speaker_index(speaker: str) -> int:
 	match = SPEAKER_RE.fullmatch(speaker)
 	assert match, f"Unsupported speaker id: {speaker}"
@@ -218,6 +299,48 @@ def _validate_audit_monitor_status(
 			f"episode_{episode_index:03d} audit monitor status is not allowed: "
 			f"{status or 'missing'}"
 		)
+
+
+def _validate_process_review_status(
+	episode_dir: Path,
+	episode_index: int,
+	upload_status: str,
+	require_upload_submitted: bool,
+	failures: list[str],
+) -> None:
+	if upload_status == "BLOCKED" and not require_upload_submitted:
+		return
+	report_path = episode_dir / "11d-process-review/process-review-result.json"
+	report = _read_json_optional(report_path)
+	if not report:
+		failures.append(f"episode_{episode_index:03d} process review report is missing: {report_path}")
+		return
+	status = str(report.get("status") or "")
+	if status not in ALLOWED_PROCESS_REVIEW_STATUSES:
+		failures.append(
+			f"episode_{episode_index:03d} process review status is not allowed: "
+			f"{status or 'missing'}"
+		)
+		return
+	expected_decision = PROCESS_REVIEW_STATUS_TO_DECISION[status]
+	decision = str(report.get("optimization_decision") or "")
+	if decision != expected_decision:
+		failures.append(
+			f"episode_{episode_index:03d} process review optimization_decision mismatch: "
+			f"actual={decision or 'missing'} expected={expected_decision}"
+		)
+	if not report.get("longest_phase"):
+		failures.append(f"episode_{episode_index:03d} process review missing longest_phase evidence")
+	evidence_sources = report.get("evidence_sources") or report.get("reviewed_artifacts") or []
+	if not isinstance(evidence_sources, list) or not evidence_sources:
+		failures.append(f"episode_{episode_index:03d} process review missing evidence_sources")
+	if status == "PASS_OPTIMIZED":
+		applied_changes = report.get("applied_changes") or []
+		tests_run = report.get("tests_run") or []
+		if not isinstance(applied_changes, list) or not applied_changes:
+			failures.append(f"episode_{episode_index:03d} optimized process review missing applied_changes")
+		if not isinstance(tests_run, list) or not tests_run:
+			failures.append(f"episode_{episode_index:03d} optimized process review missing tests_run")
 
 
 def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: bool) -> dict[str, Any]:
@@ -364,17 +487,28 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 			warnings.append(f"episode_{expected_index:03d} scheduled publish seed was bypassed by explicit user submit-now override")
 		elif first_schedule is not None:
 			schedule_source = str(metadata.get("schedule_source") or episode_manifest.get("schedule_source") or episode.get("schedule_source") or "")
-			if schedule_source != SERIES_BALANCED_SLOT_SCHEDULE_SOURCE:
+			actual_schedule = _parse_dt(metadata.get("scheduled_publish_at"))
+			if schedule_source == SERIES_BALANCED_SLOT_SCHEDULE_SOURCE:
+				expected_schedule = _expected_balanced_slot_schedule(first_schedule, expected_index, len(episodes), schedule_slots)
+				if actual_schedule != expected_schedule:
+					failures.append(
+						f"episode_{expected_index:03d} scheduled_publish_at mismatch: "
+						f"actual={actual_schedule} expected={expected_schedule}"
+					)
+			elif schedule_source == AUTOMATION_HOURLY_ROLLOVER_SCHEDULE_SOURCE:
+				_validate_hourly_rollover_schedule(
+					metadata,
+					episode_manifest,
+					episode,
+					schedule_slots,
+					expected_index,
+					failures,
+					warnings,
+				)
+			else:
 				failures.append(
 					f"episode_{expected_index:03d} schedule_source is not the balanced daily slot policy: "
 					f"{schedule_source or 'missing'}"
-				)
-			expected_schedule = _expected_balanced_slot_schedule(first_schedule, expected_index, len(episodes), schedule_slots)
-			actual_schedule = _parse_dt(metadata.get("scheduled_publish_at"))
-			if actual_schedule != expected_schedule:
-				failures.append(
-					f"episode_{expected_index:03d} scheduled_publish_at mismatch: "
-					f"actual={actual_schedule} expected={expected_schedule}"
 				)
 		status = str(upload_report.get("status") or "")
 		if require_upload_submitted and status != "SUBMITTED":
@@ -384,6 +518,7 @@ def run_series_qa(run_dir: Path, require_upload_submitted: bool, write_history: 
 		if status == "SUBMITTED" and not _upload_report_has_final_submit_proof(upload_report):
 			failures.append(f"episode_{expected_index:03d} upload submitted without final submit proof")
 		_validate_audit_monitor_status(episode_dir, expected_index, status, require_upload_submitted, failures)
+		_validate_process_review_status(episode_dir, expected_index, status, require_upload_submitted, failures)
 	return _write_result(run_dir, failures, warnings, write_history)
 
 

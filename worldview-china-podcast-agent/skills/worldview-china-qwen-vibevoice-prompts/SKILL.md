@@ -20,7 +20,7 @@ Required:
 <run_dir>/02-source-capture/source_transcript.en.json
 ```
 
-`02b-source-voice-prompts/speaker_roster.json` must be derived from the frozen 02a census roster, not re-created during Qwen prompt generation. `source_transcript.en.json` is used to recover the English `reference_text` matching the selected source clip. If it is absent, the script falls back to `selected_clips[].text_preview`; if no usable text exists, stop and fix the source capture or 02b manifest. Do not skip this node for English source videos.
+`02b-source-voice-prompts/speaker_roster.json` must be derived from the frozen 02a census roster, not re-created during Qwen prompt generation. `source_transcript.en.json` is used to recover the English `reference_text` matching the selected source clip. If it is absent, the script falls back to `selected_clips[].text_preview`; if no usable text exists, block downstream generation and fix source capture or the 02b manifest. Do not skip this node for English source videos.
 
 Local Qwen3 defaults:
 
@@ -63,6 +63,8 @@ Outputs:
 ├── reference/speaker<N-1>/reference.wav
 ├── registered/zh-<VoiceName>_qwenzh.wav
 ├── voice_prompt_manifest.json
+├── voice_distinctness_policy_result.json
+├── voice_distinctness_policy_report.md
 └── voice_prompt_report.md
 ```
 
@@ -73,6 +75,22 @@ By default, the final normalized prompt WAVs are also copied into:
 ```
 
 Use `--no-register-voices` only for audits; downstream VibeVoice generation normally requires registration.
+
+After successful prompt generation, formal runs must apply the Worldview China two-speaker voice distinctness policy before any VibeVoice preflight or full generation:
+
+```bash
+uv run --with numpy python /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/apply_voice_distinctness_policy.py \
+  --run-dir <run_dir> \
+  --threshold 0.90
+```
+
+This policy is intentionally scoped to exactly two-speaker podcasts. If the two generated Chinese prompts are too similar at the configured 90% threshold, the whole effective two-speaker roster is replaced with the shared `20260618_3` default pair stored under:
+
+```text
+/Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/assets/default-voices/20260618_3/
+```
+
+The policy must replace both speakers together and preserve the original cloned prompts under `original_cloned_speaker_voices`; downstream VibeVoice reads only the effective `speaker_voices`. Three- and four-speaker podcasts skip this automatic fallback principle.
 
 ## Method
 
@@ -113,6 +131,7 @@ After generation, require:
 - Duration is normally `5-30s`.
 - No long silence; `silence_ratio` should be low.
 - `reference_text` must correspond to the frozen source speaker and must not be sponsor/music/rolling-caption noise.
+- For exactly two speakers, `voice_prompt_manifest.json.voice_distinctness_policy.status` must be `PASS_ORIGINAL_CLONED_PAIR` or `DEFAULT_FALLBACK_APPLIED`, and `threshold` must be `0.90`. If fallback is applied, `effective_speaker_voices_source` must be `default_pair_20260618_3`.
 
 Useful checks:
 
@@ -134,7 +153,9 @@ python3 /Users/wangfangjia/.codex/skills/worldview-china-podcast-agent/scripts/r
   --chunk-count 2 \
   --voice-prompt-policy qwen_chinese_required \
   --voice-context-policy locked_multi_speaker_roster \
-  --min-source-max-volume -10.0 \
+  --min-source-max-volume -12.0 \
+  --yellow-source-max-volume -15.0 \
+  --min-source-mean-volume -30.0 \
   --device mps \
   --no-progress-bar \
   --force
@@ -144,13 +165,16 @@ Series episode mode must run this inside each `episode_XXX` run directory before
 
 ```text
 05-vibevoice-preflight-audition/preflight_audition_result.json exists
-status == PASS
-all rows[].max_volume_dbfs >= -10.0
+status == PASS for unattended full generation
+or status == YELLOW only after secondary QA explicitly passes
+all PASS rows have rows[].max_volume_dbfs >= -12.0 and rows[].mean_volume_dbfs >= -30.0
+YELLOW rows have -15.0 <= rows[].max_volume_dbfs < -12.0 and rows[].mean_volume_dbfs >= -30.0
+no row has rows[].max_volume_dbfs < -15.0 or rows[].mean_volume_dbfs < -30.0
 voice_prompt_manifest_sha256 matches the current 02c voice_prompt_manifest.json
 script_sha256 matches the current podcast_script.md
 ```
 
-If preflight fails, fix 02b/02c before full generation:
+If preflight fails, block full generation and repair 02b/02c before retrying. Do not end the parent workflow:
 
 - Re-check whether the selected 02b clip's `reference_text` overlaps sponsor, subscribe, Spotify, URL, membership, or rolling-caption text; choose another clean clip for the same frozen speaker if needed.
 - Rewrite `target_text` to a short, topic-matched Chinese prompt instead of a generic template.
@@ -171,4 +195,4 @@ over:
 <run_dir>/02b-source-voice-prompts/voice_prompt_manifest.json
 ```
 
-Both manifests intentionally expose the same `speaker_voices[Speaker N].vibevoice_name` shape. For English or other non-Chinese source videos, if 02c is missing or not `pass`, stop and fix 02c. Direct 02b usage is allowed only for already-Chinese source audio.
+Both manifests intentionally expose the same `speaker_voices[Speaker N].vibevoice_name` shape. For English or other non-Chinese source videos, if 02c is missing or not `pass`, block 05 and fix 02c; do not fall back to direct 02b usage. Direct 02b usage is allowed only for already-Chinese source audio.

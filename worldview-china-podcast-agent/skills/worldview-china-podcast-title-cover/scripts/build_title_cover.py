@@ -49,6 +49,9 @@ REJECTED_GENERIC_IDENTITY_LABELS = {
 	"专家",
 }
 WEAK_TITLE_CORE_RE = re.compile(r"(变局之后|新格局|新局势|深度解析|未来走向|影响几何|怎么看|怎么了|足迹|脉络|图景)$")
+CONCRETE_TITLE_SIGNAL_RE = re.compile(
+	r"(为什么|怎么|如何|正在|开始|先|最|打到|承压|离不开|变成|不是|比|更|强|弱|脆弱|反噬|重估|改写|让|使|被|把|会|可能|仍|还)"
+)
 DEFAULT_EPISODE_ORDER_MARKER_TEMPLATE = "第{episode_index}集"
 DEFAULT_EPISODE_TITLE_TEMPLATE = "{series_title}·{episode_order_marker}：{subtitle}"
 
@@ -145,12 +148,44 @@ def _validate_title_core(title_core: str) -> str:
 	assert title_core, "Translated title core is empty"
 	assert not re.match(r"^《[^》]+》[:：]", title_core), "Translated title core must not include a channel/program prefix"
 	assert not FORBIDDEN_IDENTITY_LABEL_RE.search(title_core), "Translated title core must not add source/channel/podcast labeling"
+	separator_count = sum(title_core.count(item) for item in ("、", "与", "和", "及"))
+	likely_keyword_stack = separator_count >= 2 and not CONCRETE_TITLE_SIGNAL_RE.search(title_core)
+	assert not likely_keyword_stack, (
+		"Title core looks like a keyword stack or conference-agenda topic list; rewrite it as a concrete "
+		"claim, pressure point, consequence, or question that a Bilibili viewer can understand immediately."
+	)
 	assert not WEAK_TITLE_CORE_RE.search(title_core), (
 		"Title core is too generic for Bilibili; rewrite it as a specific claim, conflict, consequence, "
 		"or source-speaker quote rather than a background label."
 	)
 	assert len(title_core) <= 42, f"Translated title core is too long for cover title: {len(title_core)} chars"
 	return title_core
+
+
+def _title_information_policy(identity_label: str, title_core: str) -> dict[str, Any]:
+	separator_count = sum(title_core.count(item) for item in ("、", "与", "和", "及"))
+	concrete_signal = bool(CONCRETE_TITLE_SIGNAL_RE.search(title_core))
+	return {
+		"status": "PASS",
+		"bilibili_viewer_information_test": "PASS",
+		"identity_prefix_must_explain_why_listen": True,
+		"title_core_must_explain_what_happens_or_why_it_matters": True,
+		"obscure_name_policy": "Use a famous person's name only when the name itself carries click value; otherwise translate the credential into a viewer-readable role label such as 哥大经济学家.",
+		"keyword_stack_rejected": True,
+		"topic_noun_separator_count": separator_count,
+		"concrete_content_signal_detected": concrete_signal,
+		"agent_self_check": [
+			"If the viewer has never heard of the person, the prefix should still carry useful identity information.",
+			"If the viewer reads only the title core, they should be able to repeat the main claim, pressure point, conflict, or consequence.",
+			"If the title sounds like a database row, conference agenda, or pile of proper nouns, rewrite it.",
+		],
+		"example_rewrite": {
+			"weak": "亚当·图兹：中国冲击2.0正在打到德国身上",
+			"stronger": "哥大经济学家：中国冲击2.0先打到德国工业",
+		},
+		"identity_label": identity_label,
+		"translated_title_core": title_core,
+	}
 
 
 def _build_full_title(identity_label: str, title_core: str) -> str:
@@ -371,6 +406,7 @@ def build_title_cover(
 			"and why no brighter concise identity/title is available"
 		)
 	title_core = _validate_title_core(translated_title_core)
+	title_information_policy = _title_information_policy(identity_label, title_core)
 	manifest_video_title = str(episode_manifest.get("video_title") or "").strip()
 	manifest_cover_title = str(episode_manifest.get("cover_title") or "").strip()
 	resolved_episode_title_template = str(episode_manifest.get("episode_title_template") or episode_title_template)
@@ -422,6 +458,16 @@ def build_title_cover(
 		"cover_title_omits_episode_index": episode_index is not None and not cover_include_episode_index,
 		"title_lines": lines,
 		"preserve_title_lines": True,
+		"title_line_policy": {
+			"layout": "center",
+			"priority": [
+				"large_two_line_if_it_fits",
+				"large_three_line_if_two_lines_do_not_fit",
+				"shrunk_three_line_only_if_large_three_lines_do_not_fit",
+			],
+			"source_lines_are_advisory_for_center_layout": True,
+			"font_size_policy": "keep cover title large before shrinking; prefer adding a third line over reducing the font size",
+		},
 		"highlight_text": highlights[0],
 		"highlight_texts": highlights,
 		"highlight_style": {"color": "yellow", "font_weight": "bold"},
@@ -440,6 +486,8 @@ def build_title_cover(
 			"requires_specific_eye": True,
 			"allowed_hook_types": ["sharp_claim", "conflict_question", "consequence", "counterintuitive_quote"],
 			"rejects_generic_background_titles": True,
+			"requires_concrete_content_not_keyword_stack": True,
+			"bilibili_viewer_information_test": title_information_policy,
 			"identity_label_policy": identity_label_policy,
 		},
 	}
@@ -499,6 +547,7 @@ def build_title_cover(
 		"source_identity_label": identity_label,
 		"source_identity_basis": identity_basis,
 		"identity_label_policy": identity_label_policy,
+		"title_information_policy": title_information_policy,
 		"translated_title_core": title_core,
 		"translated_title": video_title,
 		"cover_title_text": render_title,
@@ -516,6 +565,14 @@ def build_title_cover(
 		"cover_4k_sha256": _sha256(cover_out),
 		"frame_selection": frame_meta,
 		"title_layout": "center",
+		"title_line_policy": {
+			"priority": [
+				"large_two_line_if_it_fits",
+				"large_three_line_if_two_lines_do_not_fit",
+				"shrunk_three_line_only_if_large_three_lines_do_not_fit",
+			],
+			"source_lines_are_advisory_for_center_layout": True,
+		},
 		"title_policy": (
 			"series_episode_indexed_video_title_plus_unindexed_cover_title"
 			if episode_index is not None and not cover_include_episode_index
@@ -541,7 +598,8 @@ def build_title_cover(
 		f"- cover_4k: `{cover_out}`",
 		f"- frame_selection: {frame_meta['selection']}",
 		"- title_layout: center",
-		"- policy: source identity prefix plus platform-native hook title; original YouTube title is a reference signal, not a mandatory translation boundary; no lazy channel/source/program label; source video frame background.",
+		"- title_line_policy: prefer large two lines; if that does not fit, prefer large three lines; shrink only after large three lines cannot fit.",
+		"- policy: source identity prefix plus platform-native hook title; original YouTube title is a reference signal, not a mandatory translation boundary; no lazy channel/source/program label; title core must contain concrete content rather than a keyword pile; source video frame background.",
 	]
 	(node_dir / "title_cover_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
 	return manifest

@@ -18,6 +18,7 @@ BAD_TRANSLATION_PATTERNS: list[tuple[str, str, str]] = [
 	("religious_call_mistranslation", r"(?:Allahbarum|阿拉巴鲁姆|Wii大师|人类时代|院长如何被保存)", "宗教/历史名词明显机翻错译"),
 	("ad_or_sponsor_residue", r"(?:赞助商|本节目由|优惠码|使用代码|Patreon|Provision\s*Capital|Debt\s*Clinic|My\s*Debt\s*Clinic|provisioncap|\.com|www\.)", "广告、赞助、链接或会员 CTA 残留在翻译稿中"),
 	("literal_translation_fragment", r"(?:切断你的联系|最大的一笔交易|大麻烦|准备金|回归者|人类时代)", "疑似字面对译词，容易造成语义断裂或敏感误读"),
+	("untranslated_latin_run_in_zh_text", r"(?:[A-Za-z][A-Za-z'’.-]{24,}|(?:\b[A-Za-z][A-Za-z'’.-]*\b\s*){8,})", "中文翻译稿中残留长串未翻译英文；这会让 VibeVoice 高概率错读或进入重复循环，必须先翻成自然中文"),
 ]
 
 
@@ -43,6 +44,8 @@ QUALITATIVE_READING_CRITERIA = {
 	"tts_ready_spoken_style": "适合 TTS 朗读，允许口语但不堆叠低信息口癖",
 }
 
+OPENING_CTA_DIALOGUE_RE = re.compile(r"\b(?:what|why|how)\b[^.?!]{0,180}\?", re.IGNORECASE | re.DOTALL)
+
 
 def _read_json(path: Path) -> dict[str, Any]:
 	return json.loads(path.read_text(encoding="utf-8"))
@@ -67,6 +70,128 @@ def _candidate_translation_files(run_dir: Path) -> list[Path]:
 	if safe.exists():
 		candidates.append(safe)
 	return [path for path in candidates if path.exists()]
+
+
+def _time_to_sec(value: Any) -> float | None:
+	if value is None:
+		return None
+	if isinstance(value, int | float):
+		return float(value)
+	text = str(value).strip()
+	match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,](\d+))?", text)
+	if not match:
+		return None
+	hours = int(match.group(1) or 0)
+	minutes = int(match.group(2))
+	seconds = int(match.group(3))
+	fraction = float("0." + match.group(4)) if match.group(4) else 0.0
+	return hours * 3600 + minutes * 60 + seconds + fraction
+
+
+def _source_first_segment(run_dir: Path) -> dict[str, Any] | None:
+	path = run_dir / "02-source-capture/source_transcript.en.json"
+	if not path.exists():
+		return None
+	try:
+		data = _read_json(path)
+	except Exception:
+		return None
+	payload = data.get("transcript") if isinstance(data.get("transcript"), dict) else data
+	segments = payload.get("segments") if isinstance(payload, dict) else None
+	if not isinstance(segments, list):
+		return None
+	for segment in segments:
+		if isinstance(segment, dict) and str(segment.get("text") or "").strip():
+			return segment
+	return None
+
+
+def _is_non_initial_series_episode(run_dir: Path) -> bool:
+	manifest_path = run_dir / "episode_manifest.json"
+	if not manifest_path.exists():
+		return False
+	try:
+		manifest = _read_json(manifest_path)
+	except Exception:
+		return False
+	try:
+		episode_index = int(manifest.get("episode_index") or 0)
+		episode_count = int(manifest.get("episode_count") or 0)
+	except (TypeError, ValueError):
+		return False
+	return episode_count > 1 and episode_index > 1
+
+
+def _has_mixed_post_cut_opening_cta(source_segment: dict[str, Any] | None) -> bool:
+	if source_segment is None:
+		return False
+	start_value = source_segment.get("start_sec", source_segment.get("start", 0.0))
+	try:
+		start_sec = float(start_value or 0.0)
+	except (TypeError, ValueError):
+		start_sec = 0.0
+	if start_sec > 3.0:
+		return False
+	text = re.sub(r"\s+", " ", str(source_segment.get("text") or "")).strip()
+	lower_prefix = text[:420].lower()
+	if "before we start" not in lower_prefix or "podcast" not in lower_prefix:
+		return False
+	if not any(token in lower_prefix for token in ("subscribe", "follow us", "spotify", "audio experience")):
+		return False
+	return OPENING_CTA_DIALOGUE_RE.search(text) is not None
+
+
+def _first_translation_segment(path: Path) -> dict[str, Any] | None:
+	try:
+		data = _read_json(path)
+	except Exception:
+		return None
+	segments = data.get("segments")
+	if not isinstance(segments, list):
+		return None
+	for segment in segments:
+		if isinstance(segment, dict):
+			return segment
+	return None
+
+
+def _review_post_cold_open_opening_integrity(run_dir: Path, files: list[Path], findings: list[dict[str, Any]]) -> None:
+	if _is_non_initial_series_episode(run_dir):
+		return
+	source_first = _source_first_segment(run_dir)
+	if not _has_mixed_post_cut_opening_cta(source_first):
+		return
+	for path in files:
+		first = _first_translation_segment(path)
+		if first is None:
+			continue
+		first_start = _time_to_sec(first.get("source_start_sec") or first.get("source_start"))
+		if first_start is not None and first_start > 5.0:
+			_add_finding(
+				findings,
+				severity="fail",
+				rule_id="post_cold_open_opening_skipped_after_cta_cleanup",
+				message="冷开场后的 active source 首段含主持人开场 CTA、正式问题和回答，但翻译稿从 5 秒以后才开始；必须保留自然开场桥接，不能直接跳到正题半句。",
+				file=path,
+				segment=first,
+				excerpt=str(source_first.get("text") or ""),
+			)
+			continue
+		cleanup = first.get("pre_translation_cleanup") if isinstance(first.get("pre_translation_cleanup"), dict) else {}
+		bridge_present = cleanup.get("source_opening_bridge_inserted") is True
+		source_text = str(first.get("source_text") or "").strip()
+		zh_text = str(first.get("zh_text") or first.get("text") or "").strip()
+		starts_as_bare_question = re.match(r"^(?:what|why|how)\b", source_text, flags=re.IGNORECASE) is not None or re.match(r"^.{0,16}(?:怎么了|为什么|如何|怎么办)[？?]?", zh_text) is not None
+		if not bridge_present and starts_as_bare_question:
+			_add_finding(
+				findings,
+				severity="fail",
+				rule_id="post_cold_open_opening_bridge_missing",
+				message="冷开场后的首段 CTA 被移除后，翻译稿直接以主题问题开头，缺少主持人开场桥接；应在 03 阶段插入短开场并拆分主持人问题/嘉宾回答。",
+				file=path,
+				segment=first,
+				excerpt=source_text or zh_text,
+			)
 
 
 def _segment_excerpt(text: str, limit: int = 110) -> str:
@@ -397,6 +522,7 @@ def run_review(run_dir: Path, stage: str = "after_translation") -> dict[str, Any
 			file=run_dir / "03-source-translation/source_transcript.zh.json",
 		)
 	reviewed = [_review_translation_file(path, findings) for path in files]
+	_review_post_cold_open_opening_integrity(run_dir, files, findings)
 	_write_qualitative_reading_packet(output_dir, reviewed)
 	qualitative_review = _validate_qualitative_reading_review(output_dir, reviewed, findings)
 	fail_count = sum(1 for finding in findings if finding.get("severity") == "fail")
@@ -420,6 +546,7 @@ def run_review(run_dir: Path, stage: str = "after_translation") -> dict[str, Any
 			"machine_translation_artifacts_block_script_generation": True,
 			"comma_thousands_numbers_block_tts": True,
 			"independent_qualitative_reading_required": True,
+			"post_cold_open_opening_bridge_required_when_cta_is_removed": True,
 		},
 		"qualitative_reading_review": qualitative_review,
 		"findings": findings,
