@@ -1,0 +1,4 @@
+interface:
+  display_name: "Article Video Script"
+  short_description: "主动检索扩展资料，将文章改写成有节奏的视频口播稿"
+  default_prompt: "Use $article-video-script to turn an article into a hook-driven video voiceover script with titles and pacing."
