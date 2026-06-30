@@ -1,11 +1,11 @@
 ---
 name: english-article-chinese-single-host-video-remake
-description: 从选题或本地文章开始，将英文或中文长文改造成以中国视角讲述中国故事的中文单人口播解释视频，并沿用原流程生成音频、字幕、视频和 B 站投稿草稿/提交。未提供本地文章路径时，先调用 china-longform-article-selection 选择最近三个完整自然日内发布、已去重、正文可获取的中国相关英文深度好文；提供本地文章路径时直接标准化为 source/article.txt。只保留原单人口播视频制作流程。
+description: 从选题或本地文章开始，将英文或中文长文先改造成以中国视角讲述中国故事的中文 Markdown 翻译稿，再调用 article-video-script 转译为中文单人口播视频稿，并沿用原流程生成音频、字幕、视频和 B 站投稿草稿/提交。未提供本地文章路径时，先调用 china-longform-article-selection 选择最近三个完整自然日内发布、已去重、正文可获取的中国相关英文深度好文；提供本地文章路径时直接标准化为 source/article.txt。只保留原单人口播视频制作流程。
 ---
 
 # 中国故事单人口播视频
 
-这是“以中国视角讲述中国故事”的单人口播视频总控 skill。输入可以是本地文章文件路径，也可以没有输入文章。没有本地文章路径时，先按本 skill 的选题依赖选择 1 篇可用文章；有本地文章路径时，直接进入本地文章标准化。
+这是“以中国视角讲述中国故事”的单人口播视频总控 skill。输入可以是本地文章文件路径，也可以没有输入文章。没有本地文章路径时，先按本 skill 的选题依赖选择 1 篇可用文章；有本地文章路径时，直接进入本地文章标准化。表达层必须拆成两步：先产出中国视角中文 Markdown 翻译/改写稿，再把该稿转译为视频口播稿。
 
 本 skill 只保留原流程视频制作：
 
@@ -14,6 +14,8 @@ topic selection when no local article is provided
 -> selected/local source article material
 -> source/article.txt + source/source_metadata.json
 -> planning/article_brief.json + context_cards.json + episode_outline.json
+-> translation/china_perspective_version.md
+-> video_script/article-video-script.md
 -> single_host_script.md + podcast_script.md compatibility mirror
 -> title / cover / PPT Master deck / VibeVoice single-speaker TTS
 -> audio/final_podcast.wav
@@ -109,20 +111,27 @@ selection/used-article-dedupe.json
 1. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-episode-planning/SKILL.md`
    - 以 `mode=single_host_explainer` 输出 planning artifacts。
 2. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-china-story-voiceover-script/SKILL.md`
-   - 输出 `single_host_script.md` 和兼容镜像 `podcast_script.md`。
-   - 口播稿必须以中国视角讲述中国故事；不得出现报刊名、作者名、来源 URL、“外媒/外刊/原文/这篇文章说/报道指出/文章认为”等来源框架。
-3. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-chapter-visuals/SKILL.md`
+   - 在本流程中作为“中国视角 Markdown 翻译稿/改写稿”节点使用。
+   - 输出 `translation/china_perspective_version.md`、`translation/china_perspective_adaptation_result.json` 和 `translation/china_perspective_adaptation_report.md`。
+   - 翻译稿必须像中国作者基于材料写出的中文长文，不得出现报刊名、作者名、来源 URL、“外媒/外刊/原文/这篇文章说/报道指出/文章认为”等来源框架。
+3. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-video-script/SKILL.md`
+   - 读取 `translation/china_perspective_version.md`，把中文 Markdown 翻译稿转译为有钩子、有节奏的视频口播稿。
+   - 本流程下显式要求不要主动扩展新事实；如需核验高变化事实，只能把来源写入内部 `video_script/article-video-script.md` 或报告，不得把来源框架写入观众可见稿件。
+   - 先输出完整转译稿 `video_script/article-video-script.md`，保留标题备选、节奏设计、完整口播稿和资料来源。
+   - 再把其中可直接录制的正文规范化为 `single_host_script.md`，使用 `# 单人口播稿：<自然中文标题>`、`形式：以中国视角讲述中国故事的单人口播`、`建议时长：...`、`## 正文` 格式。
+   - 将 `single_host_script.md` 原样复制为 `podcast_script.md` 兼容镜像；不要加入 `Speaker 0:`、`Speaker 1:`、标题备选、节奏表或资料来源。
+4. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-chapter-visuals/SKILL.md`
    - 生成 PPT Master deck 章节视觉和 `chapter_visuals/chapter_semantics.json`。
-4. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-title-writing/SKILL.md`
-5. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-cover-image-generation/SKILL.md`
-6. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/SKILL.md`
-7. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-single-host-vibevoice-audio/SKILL.md`
-8. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-audio-alignment/SKILL.md`
-9. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-chapter-timeline-binding/SKILL.md`
-10. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-alignment/SKILL.md`
-11. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-static-video/SKILL.md`
-12. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-timeline-qa/SKILL.md`
-13. `/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md`
+5. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-title-writing/SKILL.md`
+6. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-cover-image-generation/SKILL.md`
+7. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/SKILL.md`
+8. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-single-host-vibevoice-audio/SKILL.md`
+9. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-audio-alignment/SKILL.md`
+10. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-chapter-timeline-binding/SKILL.md`
+11. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-alignment/SKILL.md`
+12. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-static-video/SKILL.md`
+13. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-timeline-qa/SKILL.md`
+14. `/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md`
 
 B 站投稿必须通过 `bilibili-video-upload-draft`。不得在本 skill 中手写 B 站 Chrome/Playwright 上传逻辑，不得伪造投稿 report。当前 agent 缺少 `chrome:control-chrome` 但视频和 metadata 已完成时，返回 `UPLOAD_READY_CHROME_HANDOFF_REQUIRED`。
 
@@ -148,9 +157,18 @@ Planning Gate:
   planning/context_cards.json exists
   planning/episode_outline.json exists
 
-Script Gate:
+China Perspective Translation Gate:
+  translation/china_perspective_version.md exists
+  translation/china_perspective_adaptation_result.json exists
+  translation/china_perspective_adaptation_report.md exists
+  reader/viewer-facing translation text contains no publication name, author name, source URL, "外媒", "外刊", "原文", "这篇文章", "报道指出", "文章认为" or equivalent source framing
+
+Video Script Gate:
+  video_script/article-video-script.md exists
   single_host_script.md exists
   podcast_script.md compatibility mirror exists
+  podcast_script.md content is identical to single_host_script.md
+  single_host_script.md has a `## 正文` section and does not include title candidates, pacing table, source list or production notes
   reader/viewer-facing text contains no publication name, author name, source URL, "外媒", "外刊", "原文", "这篇文章", "报道指出", "文章认为" or equivalent source framing
 
 Video Gates:
@@ -170,6 +188,7 @@ Video Gates:
 - 不生成 `wechat/`、`wechat/reviewed_article.md`、`wechat/article_metadata.json`、微信封面占位图或微信发布报告。
 - 不调用 `wechat-article-publish-draft`、`md-to-wechat`、微信 API 或微信浏览器自动化。
 - 必须调用 VibeVoice、ASR、字幕、视频合成和 B 站投稿链路，除非环境阻塞。
+- 必须在中国视角 Markdown 翻译稿产出后调用 `article-video-script`，再进入 PPT、标题、音频和视频后段流程。
 - 面向观众的衍生内容不得出现报刊名、作者名、来源 URL 或“外媒/外刊/这篇文章/报道指出”等来源框架；来源信息只保留在内部 metadata、plan 和生产报告中。
 
 ## 最终回复
@@ -177,6 +196,8 @@ Video Gates:
 成功时列出：
 
 - `single_host_script.md`
+- `translation/china_perspective_version.md`
+- `video_script/article-video-script.md`
 - `audio/final_podcast_preview.mp3`
 - `video/final_video.mp4`
 - `cover/cover_4k.png`

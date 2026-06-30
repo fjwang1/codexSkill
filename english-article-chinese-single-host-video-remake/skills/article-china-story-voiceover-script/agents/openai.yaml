@@ -1,4 +1,4 @@
 interface:
-  display_name: "中国故事口播稿"
-  short_description: "把本地文章改写成中国视角的单人口播稿"
-  default_prompt: "使用 $article-china-story-voiceover-script，把这个本地文章项目改写成以中国视角讲述中国故事的单人口播稿。"
+  display_name: "中国故事翻译稿"
+  short_description: "把本地文章转写成中国视角中文 Markdown"
+  default_prompt: "使用 $article-china-story-voiceover-script，把这个本地文章项目转写成以中国视角讲述中国故事的中文 Markdown 翻译稿。"
