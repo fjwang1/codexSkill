@@ -17,11 +17,11 @@ topic selection when no local article is provided
 -> translation/china_perspective_version.md
 -> video_script/article-video-script.md
 -> single_host_script.md + podcast_script.md compatibility mirror
--> title / cover / PPT Master deck / VibeVoice single-speaker TTS
+-> title / cover / VibeVoice single-speaker TTS
 -> audio/final_podcast.wav
 -> ASR/forced alignment -> audio/dialogue_timeline.json
--> bind chapter_semantics.json to dialogue_timeline.json
 -> subtitles
+-> AI-generated video visuals from real audio timeline
 -> video/final_video.mp4
 -> subtitle timeline QA
 -> Bilibili upload and final submit in real Chrome
@@ -120,18 +120,17 @@ selection/used-article-dedupe.json
    - 先输出完整转译稿 `video_script/article-video-script.md`，保留标题备选、节奏设计、完整口播稿和资料来源。
    - 再把其中可直接录制的正文规范化为 `single_host_script.md`，使用 `# 单人口播稿：<自然中文标题>`、`形式：以中国视角讲述中国故事的单人口播`、`建议时长：...`、`## 正文` 格式。
    - 将 `single_host_script.md` 原样复制为 `podcast_script.md` 兼容镜像；不要加入 `Speaker 0:`、`Speaker 1:`、标题备选、节奏表或资料来源。
-4. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-chapter-visuals/SKILL.md`
-   - 生成 PPT Master deck 章节视觉和 `chapter_visuals/chapter_semantics.json`。
-5. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-title-writing/SKILL.md`
-6. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-cover-image-generation/SKILL.md`
-7. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/SKILL.md`
-8. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-single-host-vibevoice-audio/SKILL.md`
-9. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-audio-alignment/SKILL.md`
-10. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-chapter-timeline-binding/SKILL.md`
-11. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-alignment/SKILL.md`
-12. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-static-video/SKILL.md`
-13. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-timeline-qa/SKILL.md`
-14. `/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md`
+4. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-title-writing/SKILL.md`
+5. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-cover-image-generation/SKILL.md`
+6. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/bilibili-podcast-cover/SKILL.md`
+7. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-single-host-vibevoice-audio/SKILL.md`
+8. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-audio-alignment/SKILL.md`
+9. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-alignment/SKILL.md`
+10. `/Users/wangfangjia/.codex/skills/english-article-chinese-single-host-video-remake/skills/article-ai-video-visuals/SKILL.md`
+   - 用真实音频时间轴生成全 AI 视频画面 prompts、选择生成图，并合成 `video/final_video.mp4`。
+   - 不调用 stock footage，不使用 PPT Master 章节图，不把 AI 图中的乱码文字当作正式文字；精确标题、数字和标签由后处理叠加。
+11. `/Users/wangfangjia/.codex/skills/english-article-chinese-podcast-video/skills/article-podcast-subtitle-timeline-qa/SKILL.md`
+12. `/Users/wangfangjia/.codex/skills/bilibili-video-upload-draft/SKILL.md`
 
 B 站投稿必须通过 `bilibili-video-upload-draft`。不得在本 skill 中手写 B 站 Chrome/Playwright 上传逻辑，不得伪造投稿 report。当前 agent 缺少 `chrome:control-chrome` 但视频和 metadata 已完成时，返回 `UPLOAD_READY_CHROME_HANDOFF_REQUIRED`。
 
@@ -173,10 +172,13 @@ Video Script Gate:
 
 Video Gates:
   title and cover artifacts exist
-  chapter_visuals/chapter_plan.json exists
   audio/final_podcast.wav exists and is the timeline source
   audio/dialogue_timeline.json exists
   video/final_subtitles.srt and video/final_subtitles.ass exist
+  ai_video_visuals/visual_manifest.json exists
+  ai_video_visuals/image_prompts.json exists
+  ai_video_visuals/selected_visuals.json exists and maps every shot to a generated local image
+  ai_video_visuals/visual_render_manifest.json exists and records image hashes, audio hash, final video hash, dimensions and fps
   video/final_video.mp4 exists and ffprobe passes
   subtitle timeline QA status is PASS
   bilibili-video-upload-draft creates bilibili_upload_draft_report.json/.md or returns explicit upload handoff/blocker
@@ -187,8 +189,9 @@ Video Gates:
 - 只保留原单人口播视频流程；不要提供微信公众号模式。
 - 不生成 `wechat/`、`wechat/reviewed_article.md`、`wechat/article_metadata.json`、微信封面占位图或微信发布报告。
 - 不调用 `wechat-article-publish-draft`、`md-to-wechat`、微信 API 或微信浏览器自动化。
-- 必须调用 VibeVoice、ASR、字幕、视频合成和 B 站投稿链路，除非环境阻塞。
-- 必须在中国视角 Markdown 翻译稿产出后调用 `article-video-script`，再进入 PPT、标题、音频和视频后段流程。
+- 必须调用 VibeVoice、ASR、字幕、AI 视频画面生成/选择/合成和 B 站投稿链路，除非环境阻塞。
+- 必须在中国视角 Markdown 翻译稿产出后调用 `article-video-script`，再进入标题、音频和 AI 视频画面后段流程。
+- 不再生成 PPT Master 章节视觉；视频画面由 `article-ai-video-visuals` 生成和合成。
 - 面向观众的衍生内容不得出现报刊名、作者名、来源 URL 或“外媒/外刊/这篇文章/报道指出”等来源框架；来源信息只保留在内部 metadata、plan 和生产报告中。
 
 ## 最终回复

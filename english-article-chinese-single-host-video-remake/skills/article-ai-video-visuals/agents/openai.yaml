@@ -1,0 +1,4 @@
+interface:
+  display_name: "Article AI Video Visuals"
+  short_description: "生成口播视频 AI 画面和成片"
+  default_prompt: "Use $article-ai-video-visuals to generate AI visual frames and assemble a timed voiceover video."
